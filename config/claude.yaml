@@ -1,0 +1,7 @@
+apiKeyEnvVar: ANTHROPIC_API_KEY
+baseUrl: https://api.anthropic.com/v1
+model: claude-sonnet-4-20250514
+maxTokens: 4096
+# systemPrompt: You are a helpful assistant.
+headers:
+  anthropic-version: "2023-06-01"
