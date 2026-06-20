@@ -1,0 +1,14 @@
+{
+  "name": "tree-sitter-learning",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "parse": "node examples/parse-js.js",
+    "query": "node examples/query-js.js"
+  },
+  "dependencies": {
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-javascript": "^0.23.1"
+  }
+}
