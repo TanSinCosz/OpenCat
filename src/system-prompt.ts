@@ -1,17 +1,14 @@
 import os from "node:os";
 import path from "node:path";
 
-import type { DeepSeekMessage } from "./deepseek/types.js";
-import type { Runtime, State } from "./types/type.js";
+import type { Runtime } from "./types/type.js";
 import type { Tool } from "./Tools/types.js";
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY =
   "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
 const CYBER_RISK_INSTRUCTION =
-  "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes.";
-
-// const MAX_GIT_STATUS_CHARS = 2000;
+  "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.";
 
 export interface OutputStyleConfig {
   name: string;
@@ -19,55 +16,28 @@ export interface OutputStyleConfig {
   keepCodingInstructions?: boolean;
 }
 
-export interface MainSystemPromptOptions {
+export interface SystemPromptOptions {
   cwd?: string;
   model?: string;
   language?: string;
-  customSystemPrompt?: string;
-  appendSystemPrompt?: string;
-  overrideSystemPrompt?: string;
   includeDynamicBoundary?: boolean;
-  includeGitStatus?: boolean;
-  includeUserContext?: boolean;
   includeEnvironment?: boolean;
   outputStyle?: OutputStyleConfig;
 }
 
-export interface MainSystemPrompt {
-  systemPrompt: string;
-  systemPromptParts: string[];
-  modelMessages: DeepSeekMessage[];
-  userContext: Record<string, string>;
-  systemContext: Record<string, string>;
-}
+export type MainSystemPromptOptions = SystemPromptOptions;
 
-export async function buildMainSystemPrompt(
+export async function buildSystemPrompt(
   runtime: Runtime,
-  state: State,
-  options: MainSystemPromptOptions = {},
-): Promise<MainSystemPrompt> {
+  options: SystemPromptOptions = {},
+): Promise<string> {
   const resolvedOptions = resolvePromptOptions(runtime, options);
-  const baseMessages = state.Messages.map(({ message }) => message);
-
   const defaultParts = await buildDefaultSystemPromptParts(
     runtime.tools,
     resolvedOptions,
   );
-  const systemPromptParts = appendSystemContext(
-    buildEffectiveSystemPromptParts(defaultParts, resolvedOptions),
-    buildSystemContext(resolvedOptions),
-  );
-  const userContext = resolvedOptions.includeUserContext
-    ? buildUserContext(resolvedOptions)
-    : {};
 
-  return {
-    systemPrompt: systemPromptParts.filter(Boolean).join("\n\n"),
-    systemPromptParts,
-    modelMessages: prependUserContext(baseMessages, userContext),
-    userContext,
-    systemContext: buildSystemContext(resolvedOptions),
-  };
+  return defaultParts.filter(Boolean).join("\n\n");
 }
 
 async function buildDefaultSystemPromptParts(
@@ -92,78 +62,6 @@ async function buildDefaultSystemPromptParts(
     getLanguageSection(options.language),
     getOutputStyleSection(outputStyle),
   ].filter(Boolean);
-}
-
-function buildEffectiveSystemPromptParts(
-  defaultParts: string[],
-  options: RequiredPromptOptions,
-): string[] {
-  if (options.overrideSystemPrompt) {
-    return [options.overrideSystemPrompt];
-  }
-
-  const parts = options.customSystemPrompt
-    ? [options.customSystemPrompt]
-    : [...defaultParts];
-
-  if (options.appendSystemPrompt) {
-    parts.push(options.appendSystemPrompt);
-  }
-
-  return parts;
-}
-
-function appendSystemContext(
-  systemPromptParts: string[],
-  context: Record<string, string>,
-): string[] {
-  const contextText = Object.entries(context)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join("\n");
-
-  return contextText ? [...systemPromptParts, contextText] : systemPromptParts;
-}
-
-function prependUserContext(
-  messages: DeepSeekMessage[],
-  context: Record<string, string>,
-): DeepSeekMessage[] {
-  const contextText = Object.entries(context)
-    .map(([key, value]) => `# ${key}\n${value}`)
-    .join("\n\n");
-
-  if (!contextText) {
-    return messages;
-  }
-
-  return [
-    {
-      role: "user",
-      content:
-        "<system-reminder>\n" +
-        "As you answer the user's questions, you can use the following context:\n" +
-        `${contextText}\n\n` +
-        "IMPORTANT: this context may or may not be relevant. Do not respond to it unless it is useful for the user's task.\n" +
-        "</system-reminder>",
-    },
-    ...messages,
-  ];
-}
-
-function buildSystemContext(
-  options: RequiredPromptOptions,
-): Record<string, string> {
-  void options;
-  // Git status context is disabled for now. Keep this function as the boundary
-  // so we can restore git context without changing buildMainSystemPrompt().
-  return {};
-}
-
-function buildUserContext(options: RequiredPromptOptions): Record<string, string> {
-  return {
-    currentDate: `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
-    cwd: options.cwd,
-  };
 }
 
 function getIntroSection(outputStyle?: OutputStyleConfig): string {
@@ -200,7 +98,7 @@ function getToolUseSection(tools: readonly Tool[]): string {
   return `# Tool Use
 - Available tools: ${toolNames}.
 - Validate tool inputs before calling tools. Tool call implementations can assume they receive post-validation input.
-- Prefer the dedicated file tools for file operations instead of shell commands when available.
+- Prefer dedicated file tools for file operations instead of shell commands when available.
 - Use search tools before broad reads when looking for unknown files or symbols.
 - For edit/write operations, respect each tool's safety contract, especially read-before-edit and modified-after-read checks.`;
 }
@@ -276,51 +174,6 @@ async function getEnabledTools(tools: readonly Tool[]): Promise<Tool[]> {
   return enabled;
 }
 
-// function getGitStatus(cwd: string): string | undefined {
-//   if (!isGitRepo(cwd)) {
-//     return undefined;
-//   }
-//
-//   const branch = git(cwd, "branch", "--show-current") || "(unknown)";
-//   const status = truncate(git(cwd, "--no-optional-locks", "status", "--short"));
-//   const recentCommits = git(cwd, "--no-optional-locks", "log", "--oneline", "-n", "5");
-//   const userName = git(cwd, "config", "user.name");
-//
-//   return [
-//     "This git status is a snapshot captured when the prompt was built.",
-//     `Current branch: ${branch}`,
-//     userName ? `Git user: ${userName}` : "",
-//     `Status:\n${status || "(clean)"}`,
-//     `Recent commits:\n${recentCommits || "(none)"}`,
-//   ]
-//     .filter(Boolean)
-//     .join("\n\n");
-// }
-//
-// function isGitRepo(cwd: string): boolean {
-//   return git(cwd, "rev-parse", "--is-inside-work-tree").trim() === "true";
-// }
-//
-// function git(cwd: string, ...args: string[]): string {
-//   try {
-//     return execFileSync("git", args, {
-//       cwd,
-//       encoding: "utf8",
-//       stdio: ["ignore", "pipe", "ignore"],
-//     }).trim();
-//   } catch {
-//     return "";
-//   }
-// }
-//
-// function truncate(value: string): string {
-//   if (value.length <= MAX_GIT_STATUS_CHARS) {
-//     return value;
-//   }
-//
-//   return `${value.slice(0, MAX_GIT_STATUS_CHARS)}\n... (truncated)`;
-// }
-
 function getShellName(): string {
   return process.env.SHELL || process.env.COMSPEC || "unknown";
 }
@@ -328,36 +181,23 @@ function getShellName(): string {
 interface RequiredPromptOptions
   extends Required<
     Pick<
-      MainSystemPromptOptions,
-      | "cwd"
-      | "model"
-      | "includeDynamicBoundary"
-      | "includeGitStatus"
-      | "includeUserContext"
-      | "includeEnvironment"
+      SystemPromptOptions,
+      "cwd" | "model" | "includeDynamicBoundary" | "includeEnvironment"
     >
   > {
   language?: string;
-  customSystemPrompt?: string;
-  appendSystemPrompt?: string;
-  overrideSystemPrompt?: string;
   outputStyle?: OutputStyleConfig;
 }
 
 function resolvePromptOptions(
   runtime: Runtime,
-  options: MainSystemPromptOptions,
+  options: SystemPromptOptions,
 ): RequiredPromptOptions {
   return {
     cwd: path.resolve(options.cwd ?? runtime.cwd),
-    model: options.model ?? "unknown",
+    model: options.model ?? runtime.deepSeekRuntimeConfig.model ?? "unknown",
     language: options.language,
-    customSystemPrompt: options.customSystemPrompt,
-    appendSystemPrompt: options.appendSystemPrompt,
-    overrideSystemPrompt: options.overrideSystemPrompt,
     includeDynamicBoundary: options.includeDynamicBoundary ?? true,
-    includeGitStatus: options.includeGitStatus ?? false,
-    includeUserContext: options.includeUserContext ?? true,
     includeEnvironment: options.includeEnvironment ?? true,
     outputStyle: options.outputStyle,
   };

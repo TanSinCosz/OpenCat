@@ -1,249 +1,229 @@
-import { Tool, ToolUseContext } from "../types.js";
-import { outputSchema, inputSchema } from "./type.js";
+import { spawn } from "child_process";
 import { z } from "zod";
-import { expandPath } from "../utils/path.js";
 
-import { discoverSkillsForReadPath } from "../utils/discoverSkillsForReadPath.js";
-import { getFileModificationTimeAsync } from "../utils/fileState.js";
-import { createStructuredPatch } from "../utils/patch.js";
-import { BASH_TOOL_NAME } from "./prompt.js";
-
-import { mkdir, readFile, writeFile } from 'fs/promises'
-import { dirname } from 'path'
-
+import { Tool, ToolUseContext } from "../types.js";
+import { getCwd } from "../utils/cwd.js";
+import { BASH_TOOL_NAME, DESCRIPTION, getMaxTimeoutMs, getSimplePrompt } from "./prompt.js";
+import { inputSchema, outputSchema } from "./type.js";
 
 type typeInput = z.infer<ReturnType<typeof inputSchema>>;
 type typeOutput = z.infer<ReturnType<typeof outputSchema>>;
 
 type ValidationResult =
     | { result: true }
-    | { result: false; message: string };
+    | { result: false; message: string; errorCode?: number };
 
-type PreparedEdit =
-    | {
-        ok: true;
-        absoluteFilePath: string;
-        originalFileContents: string;
-        actualOldString: string;
-        replaceAll: boolean;
-    }
-    | {
-        ok: false;
-        message: string;
-    };
+const MAX_COMMAND_LENGTH = 10_000;
+const MAX_BUFFER_CHARS = 100_000;
+
+const INTERACTIVE_COMMANDS = /\b(?:vim|vi|nano|less|more|top|htop|ssh|python|node|irb|mysql|psql)\b\s*$/i;
+const BACKGROUND_COMMAND = /(?:^|[;&|]\s*)[^;&|]*&\s*$/;
+const COMMAND_SUBSTITUTION = /`|\$\(/;
+const REDIRECTION = /(^|[^>])>{1,2}(?!>)|</;
+const HEREDOC = /<<-?/;
+const LONG_PIPELINE = /(?:\|.*){3,}/;
+
+const DANGEROUS_COMMANDS = [
+    /^rm(?:\s|$)/i,
+    /^del(?:\s|$)/i,
+    /^rmdir(?:\s|$)/i,
+    /^chmod(?:\s|$)/i,
+    /^chown(?:\s|$)/i,
+    /^git\s+(?:reset|checkout|clean|push\s+--force|push\s+-f|rebase)(?:\s|$)/i,
+    /^(?:curl|wget)(?:\s|$)/i,
+    /^(?:npm|pnpm|yarn)\s+(?:install|add)(?:\s|$)/i,
+    /^pip\s+install(?:\s|$)/i,
+    /^uv\s+add(?:\s|$)/i,
+];
 
 export class Bash implements Tool<typeInput, typeOutput, typeof inputSchema, typeof outputSchema> {
-
     name = BASH_TOOL_NAME;
-    searchHint = 'modify file contents in place';
-    maxResultSizeChars = 100_000;
+    searchHint = "execute shell commands";
+    maxResultSizeChars = MAX_BUFFER_CHARS;
     strict = true;
-    async description() {
-        return 'A tool for editing files'
-    };
-    async prompt() {
-        return getSimplePrompt();
-    };
     inputSchema = inputSchema;
     outputSchema = outputSchema;
+
+    description(): string {
+        return DESCRIPTION;
+    }
+
+    prompt(): string {
+        return getSimplePrompt();
+    }
+
     isConcurrencySafe(): boolean {
         return false;
     }
 
-    async validateInput(
-        input: typeInput,
-        context: ToolUseContext,
-    ): Promise<ValidationResult> {
-        const prepared = await prepareEdit(input, context)
-        if ('message' in prepared) {
-            return { result: false, message: prepared.message }
+    async validateInput(input: typeInput, _context?: ToolUseContext): Promise<ValidationResult> {
+        const command = input.command.trim();
+
+        if (!command) {
+            return { result: false, message: "Command cannot be empty.", errorCode: 1 };
         }
 
-        return { result: true }
+        if (command.length > MAX_COMMAND_LENGTH) {
+            return {
+                result: false,
+                message: `Command is too long. Keep commands under ${MAX_COMMAND_LENGTH} characters.`,
+                errorCode: 2,
+            };
+        }
+
+        if (input.timeout !== undefined && input.timeout > getMaxTimeoutMs()) {
+            return {
+                result: false,
+                message: `Timeout cannot exceed ${getMaxTimeoutMs()} milliseconds.`,
+                errorCode: 3,
+            };
+        }
+
+        if (input.dangerouslyDisableSandbox) {
+            return {
+                result: false,
+                message: "dangerouslyDisableSandbox is not supported in the initial Bash tool.",
+                errorCode: 4,
+            };
+        }
+
+        const blockedReason = getBlockedCommandReason(command);
+        if (blockedReason) {
+            return { result: false, message: blockedReason, errorCode: 5 };
+        }
+
+        return { result: true };
     }
 
     async call(input: typeInput, context: ToolUseContext): Promise<typeOutput> {
-        const { file_path, new_string } = input
-        const prepared = await prepareEdit(input, context)
-
-        if ('message' in prepared) {
-            throw new Error(prepared.message)
+        const validation = await this.validateInput(input, context);
+        if (validation.result === false) {
+            throw new Error(validation.message);
         }
 
-        await discoverSkillsForReadPath(prepared.absoluteFilePath, context)
-
-        const updatedFile = prepared.replaceAll
-            ? prepared.originalFileContents.replaceAll(prepared.actualOldString, new_string)
-            : prepared.originalFileContents.replace(prepared.actualOldString, new_string)
-
-        await writeTextFile(prepared.absoluteFilePath, updatedFile)
-
-        const timestamp = await getFileModificationTimeAsync(prepared.absoluteFilePath)
-        context.readFileState.set(prepared.absoluteFilePath, {
-            content: updatedFile,
-            timestamp,
-            offset: undefined,
-            limit: undefined,
-        })
-
-        return {
-            filePath: file_path,
-            oldString: prepared.actualOldString,
-            newString: new_string,
-            originalFile: prepared.originalFileContents,
-            structuredPatch: createStructuredPatch(
-                file_path,
-                prepared.originalFileContents,
-                updatedFile,
-            ),
-            userModified: false,
-            replaceAll: prepared.replaceAll,
-        }
+        const timeout = input.timeout ?? 120_000;
+        return runShellCommand(input.command.trim(), timeout, context);
     }
 }
 
-async function prepareEdit(
-    input: typeInput,
+function getBlockedCommandReason(command: string): string | null {
+    if (BACKGROUND_COMMAND.test(command)) {
+        return "Background execution is not supported in the initial Bash tool.";
+    }
+
+    if (INTERACTIVE_COMMANDS.test(command)) {
+        return "Interactive commands are not supported because they may wait for keyboard input.";
+    }
+
+    if (COMMAND_SUBSTITUTION.test(command)) {
+        return "Command substitution with backticks or $() is blocked in the initial Bash tool.";
+    }
+
+    if (HEREDOC.test(command)) {
+        return "Heredocs are blocked in the initial Bash tool. Use FileWrite for file creation.";
+    }
+
+    if (REDIRECTION.test(command)) {
+        return "Shell redirection is blocked in the initial Bash tool. Use FileRead/FileWrite/Edit tools for file IO.";
+    }
+
+    if (LONG_PIPELINE.test(command)) {
+        return "Long pipelines are blocked in the initial Bash tool. Keep commands simple and inspectable.";
+    }
+
+    const subcommands = splitSimpleSubcommands(command);
+    for (const subcommand of subcommands) {
+        if (DANGEROUS_COMMANDS.some(pattern => pattern.test(subcommand.trim()))) {
+            return `Potentially destructive or environment-changing command requires a later permission flow: ${subcommand.trim()}`;
+        }
+    }
+
+    return null;
+}
+
+function splitSimpleSubcommands(command: string): string[] {
+    return command
+        .split(/\s*(?:&&|\|\||;|\|)\s*/g)
+        .map(part => part.trim())
+        .filter(Boolean);
+}
+
+function runShellCommand(
+    command: string,
+    timeout: number,
     context: ToolUseContext,
-): Promise<PreparedEdit> {
-    const { file_path, old_string, new_string, replace_all = false } = input
-    const absoluteFilePath = expandPath(file_path)
+): Promise<typeOutput> {
+    return new Promise((resolve, reject) => {
+        let stdout = "";
+        let stderr = "";
+        let interrupted = false;
+        let settled = false;
 
-    if (old_string === new_string) {
-        return {
-            ok: false,
-            message: 'old_string and new_string are the same.',
-        }
-    }
+        const child = spawn(command, {
+            cwd: getCwd(),
+            shell: true,
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "pipe"],
+        });
 
-    const originalFileContents = await readTextFileOrNull(absoluteFilePath)
+        const finish = (result: typeOutput) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            context.abortController.signal.removeEventListener("abort", abortHandler);
+            resolve(result);
+        };
 
-    if (originalFileContents === null) {
-        if (old_string === '') {
-            return {
-                ok: true,
-                absoluteFilePath,
-                originalFileContents: '',
-                actualOldString: '',
-                replaceAll: replace_all,
-            }
-        }
+        const fail = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            context.abortController.signal.removeEventListener("abort", abortHandler);
+            reject(error);
+        };
 
-        return {
-            ok: false,
-            message: `File does not exist: ${file_path}`,
-        }
-    }
+        const abortHandler = () => {
+            interrupted = true;
+            child.kill();
+        };
 
-    if (old_string === '' && originalFileContents.trim() !== '') {
-        return {
-            ok: false,
-            message: 'Cannot create new file - file already exists.',
-        }
-    }
+        const timeoutId = setTimeout(() => {
+            interrupted = true;
+            child.kill();
+        }, timeout);
 
-    const lastRead = context.readFileState.get(absoluteFilePath)
-    if (!lastRead) {
-        return {
-            ok: false,
-            message: 'File has not been read yet. Read it first before editing.',
-        }
-    }
+        context.abortController.signal.addEventListener("abort", abortHandler, { once: true });
 
-    const lastWriteTime = await getFileModificationTimeAsync(absoluteFilePath)
-    if (lastWriteTime > lastRead.timestamp) {
-        return {
-            ok: false,
-            message: 'File has been modified since read. Read it again before editing.',
-        }
-    }
+        child.stdout?.on("data", chunk => {
+            stdout = appendWithLimit(stdout, String(chunk));
+        });
 
-    const actualOldString = findActualString(originalFileContents, old_string)
+        child.stderr?.on("data", chunk => {
+            stderr = appendWithLimit(stderr, String(chunk));
+        });
 
-    if (actualOldString === null) {
-        return {
-            ok: false,
-            message: `String to replace not found in file.\nString: ${old_string}`,
-        }
-    }
+        child.on("error", error => {
+            fail(error);
+        });
 
-    const matches = actualOldString === ''
-        ? 1
-        : originalFileContents.split(actualOldString).length - 1
-
-    if (matches > 1 && !replace_all) {
-        return {
-            ok: false,
-            message: `Found ${matches} matches of the string to replace, but replace_all is false.`,
-        }
-    }
-
-    return {
-        ok: true,
-        absoluteFilePath,
-        originalFileContents,
-        actualOldString,
-        replaceAll: replace_all,
-    }
+        child.on("close", code => {
+            finish({
+                stdout,
+                stderr,
+                interrupted,
+                returnCodeInterpretation: code === 0
+                    ? undefined
+                    : `Command exited with code ${code ?? "unknown"}.`,
+            });
+        });
+    });
 }
 
-
-
-export async function readTextFileOrNull(filePath: string): Promise<string | null> {
-    try {
-        return await readFile(filePath, 'utf8')
-    } catch (error) {
-        if (isENOENT(error)) {
-            return null
-        }
-
-        throw error
-    }
-}
-
-export async function readTextFileOrEmpty(filePath: string): Promise<string> {
-    return (await readTextFileOrNull(filePath)) ?? ''
-}
-
-export function findActualString(
-    fileContent: string,
-    oldString: string,
-): string | null {
-    if (oldString === '') {
-        return ''
+function appendWithLimit(current: string, chunk: string): string {
+    const next = current + chunk;
+    if (next.length <= MAX_BUFFER_CHARS) {
+        return next;
     }
 
-    if (fileContent.includes(oldString)) {
-        return oldString
-    }
-
-    // 模型常常给 \n，但 Windows 文件里可能是 \r\n
-    const crlfOldString = oldString.replaceAll('\n', '\r\n')
-    if (crlfOldString !== oldString && fileContent.includes(crlfOldString)) {
-        return crlfOldString
-    }
-
-    // 反过来也兼容一下：模型给 \r\n，但文件里是 \n
-    const lfOldString = oldString.replaceAll('\r\n', '\n')
-    if (lfOldString !== oldString && fileContent.includes(lfOldString)) {
-        return lfOldString
-    }
-
-    return null
-}
-
-export async function writeTextFile(
-    filePath: string,
-    content: string,
-): Promise<void> {
-    await mkdir(dirname(filePath), { recursive: true })
-    await writeFile(filePath, content, 'utf8')
-}
-
-function isENOENT(error: unknown): boolean {
-    return (
-        error instanceof Error &&
-        'code' in error &&
-        error.code === 'ENOENT'
-    )
+    return next.slice(0, MAX_BUFFER_CHARS) + "\n[Output truncated]";
 }

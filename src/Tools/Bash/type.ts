@@ -2,6 +2,7 @@ import { z } from "zod";
 import { lazySchema } from "../utils/lazySchema.js";
 import { semanticBoolean } from "../utils/semanticBoolean.js";
 import { semanticNumber } from "../utils/semanticNumber.js";
+import { getMaxTimeoutMs } from "./prompt.js";
 
 
 
@@ -33,14 +34,14 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
 // Exposing it in the schema would let the model bypass permission checks and the
 // sandbox by pairing an innocuous command with an arbitrary file write.
 // Also conditionally remove run_in_background when background tasks are disabled.
-const inputSchema = lazySchema(() => fullInputSchema().omit({
+export const inputSchema = lazySchema(() => fullInputSchema().omit({
     run_in_background: true,
     _simulatedSedEdit: true
 }));
 
 
 
-const outputSchema = lazySchema(() => z.object({
+export const outputSchema = lazySchema(() => z.object({
     stdout: z.string().describe('The standard output of the command'),
     stderr: z.string().describe('The standard error output of the command'),
     rawOutputPath: z.string().optional().describe('Path to raw output file for large MCP tool outputs'),

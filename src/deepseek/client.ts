@@ -72,9 +72,7 @@ export function createDeepSeekClient(
   async function create(
     input: DeepSeekCreateRequest
   ): Promise<DeepSeekChatCompletionResponse> {
-    const sdkRequest = toOpenAICreateRequest(
-      prependSystemPrompt(input, options.config.systemPrompt)
-    );
+    const sdkRequest = toOpenAICreateRequest(input);
     const sdkResponse = await sendDeepSeekSdkRequest(runtimeConfig, sdkRequest);
     return fromOpenAIResponse(sdkResponse);
   }
@@ -82,9 +80,7 @@ export function createDeepSeekClient(
   async function* stream(
     input: DeepSeekStreamRequest
   ): AsyncGenerator<DeepSeekStreamEnvelope, void, void> {
-    const sdkRequest = toOpenAIStreamRequest(
-      prependSystemPrompt(input, options.config.systemPrompt)
-    );
+    const sdkRequest = toOpenAIStreamRequest(input);
 
     for await (const chunk of streamDeepSeekSdkRequest(runtimeConfig, sdkRequest)) {
       yield {
@@ -111,26 +107,6 @@ export function createDeepSeekClient(
     create,
     stream,
     collectStream,
-  };
-}
-
-function prependSystemPrompt<T extends { messages: DeepSeekMessage[] }>(
-  input: T,
-  systemPrompt: string | undefined
-): T {
-  if (!systemPrompt) {
-    return input;
-  }
-
-  return {
-    ...input,
-    messages: [
-      {
-        role: "system",
-        content: systemPrompt,
-      },
-      ...input.messages,
-    ],
   };
 }
 

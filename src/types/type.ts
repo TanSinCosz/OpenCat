@@ -1,4 +1,5 @@
 import type { MemoryConfig } from "../Memory/type.js";
+import { createDeepSeekClient, type DeepSeekClient } from "../deepseek/client.js";
 import {
   createToolUseContext,
   type AgentDefinitionsResult,
@@ -17,6 +18,9 @@ export interface Runtime {
   
   cwd: string;
   deepSeekRuntimeConfig: DeepSeekRuntimeSettings;
+  deepSeekClient: DeepSeekClient;
+  systemPrompt?: string;
+  toolResultBudgetState?: ToolResultBudgetState;
   MemoryConfig: MemoryConfig
   
   tools: Tools;
@@ -32,6 +36,11 @@ export interface Message {
   message: DeepSeekMessage
 }
 
+export interface ToolResultBudgetState {
+  seenIds: Set<string>;
+  replacements: Map<string, string>;
+}
+
 export interface CreateStateOptions {
   messages?: Message[];
   mode?: State["mode"];
@@ -42,6 +51,9 @@ export interface CreateRuntimeOptions {
   agentId?: Runtime["agentId"];
   cwd?: string;
   deepSeekRuntimeConfig: DeepSeekRuntimeSettings;
+  deepSeekClient?: DeepSeekClient;
+  systemPrompt?: string;
+  toolResultBudgetState?: ToolResultBudgetState;
   MemoryConfig: MemoryConfig;
   tools?: Tools;
   state?: State;
@@ -70,6 +82,13 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
     agentId: options.agentId ?? "main",
     cwd: options.cwd ?? process.cwd(),
     deepSeekRuntimeConfig: options.deepSeekRuntimeConfig,
+    deepSeekClient:
+      options.deepSeekClient ??
+      createDeepSeekClient({
+        config: options.deepSeekRuntimeConfig,
+      }),
+    systemPrompt: options.systemPrompt,
+    toolResultBudgetState: options.toolResultBudgetState,
     MemoryConfig: options.MemoryConfig,
     tools,
     toolUseContext: createToolUseContext({
