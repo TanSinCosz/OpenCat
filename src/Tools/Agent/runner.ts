@@ -167,7 +167,7 @@ async function runAgentSynchronously(
 
   try {
     for await (const event of query(childRuntime, childState, {
-      maxTurns: options.maxTurns ?? options.agentDefinition.maxTurns ?? 10,
+      maxTurns: options.maxTurns ?? options.agentDefinition.maxTurns ?? 100,
       messagesForQueryBuilder: async (runtime, state) => {
         await drainPendingAgentMessagesIntoChildContext(
           options,

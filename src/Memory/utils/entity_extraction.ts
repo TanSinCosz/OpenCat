@@ -1,3 +1,5 @@
+import { tokenizeForBm25CN } from "./lemmatizeCN.js";
+
 /**
  * Entity extraction from text using NLP and regex heuristics.
  *
@@ -280,6 +282,35 @@ const FORMATTING_MARKERS: Set<string> = new Set([
   "###",
   "**",
   "__",
+]);
+
+const GENERIC_ZH_TERMS: Set<string> = new Set([
+  "用户",
+  "助手",
+  "喜欢",
+  "常用",
+  "需要",
+  "希望",
+  "负责",
+  "处理",
+  "使用",
+  "进行",
+  "重构",
+  "相关",
+  "内容",
+  "问题",
+  "项目",
+  "部分",
+  "东西",
+  "方式",
+  "方案",
+  "这里",
+  "这个",
+  "那个",
+  "我们",
+  "他们",
+  "你们",
+  "自己",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -602,6 +633,82 @@ function extractCompoundsRegex(text: string): ExtractedEntity[] {
   return entities;
 }
 
+function hasHan(text: string): boolean {
+  return /\p{Script=Han}/u.test(text);
+}
+
+function isChineseEntityToken(token: string): boolean {
+  if (token.length < 2 || token.length > 32) {
+    return false;
+  }
+
+  if (GENERIC_ZH_TERMS.has(token)) {
+    return false;
+  }
+
+  for (const term of GENERIC_ZH_TERMS) {
+    if (
+      token.endsWith(term) &&
+      token.length > term.length &&
+      /^[a-z0-9_-]+[\p{Script=Han}]+$/u.test(token)
+    ) {
+      return false;
+    }
+  }
+
+  return /[\p{Script=Han}A-Za-z0-9]/u.test(token);
+}
+
+function compactChineseSource(text: string): string {
+  return text.replace(/\s+/g, "");
+}
+
+/**
+ * Chinese has no capitalization or whitespace boundaries, so the English
+ * proper-noun heuristics above miss almost everything. We reuse the same Jieba
+ * normalization as BM25 and add adjacent-token phrases that appear contiguously
+ * in the source, which recovers entities like "机器学习课程".
+ */
+function extractChineseEntities(text: string): ExtractedEntity[] {
+  if (!hasHan(text)) {
+    return [];
+  }
+
+  const entities: ExtractedEntity[] = [];
+  const compactSource = compactChineseSource(text).toLowerCase();
+  const tokens = tokenizeForBm25CN(text).filter(isChineseEntityToken);
+
+  const asciiEntityRe = /[A-Za-z][A-Za-z0-9_-]{1,}/g;
+  let asciiMatch: RegExpExecArray | null;
+  while ((asciiMatch = asciiEntityRe.exec(text)) !== null) {
+    const token = asciiMatch[0].toLowerCase();
+    if (isChineseEntityToken(token)) {
+      entities.push({ type: "PROPER", text: token });
+    }
+  }
+
+  for (const token of tokens) {
+    entities.push({ type: "NOUN", text: token });
+  }
+
+  for (let i = 0; i < tokens.length; i++) {
+    let phrase = tokens[i];
+    for (let j = i + 1; j < Math.min(tokens.length, i + 3); j++) {
+      phrase += tokens[j];
+      if (
+        phrase.length >= 4 &&
+        phrase.length <= 32 &&
+        compactSource.includes(phrase.toLowerCase()) &&
+        !GENERIC_ZH_TERMS.has(phrase)
+      ) {
+        entities.push({ type: "COMPOUND", text: phrase });
+      }
+    }
+  }
+
+  return entities;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -636,6 +743,9 @@ export function extractEntities(text: string): ExtractedEntity[] {
   } else {
     raw.push(...extractCompoundsRegex(text));
   }
+
+  // 4. Chinese / mixed-language entities.
+  raw.push(...extractChineseEntities(text));
 
   // === DEDUPLICATION & CLEANUP ===
 

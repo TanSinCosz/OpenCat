@@ -70,10 +70,10 @@ function isMeaningfulToken(token: string): boolean {
  * 4. Remove punctuation / symbol-only tokens.
  * 5. Return space-joined tokens for BM25 indexing.
  */
-export function lemmatizeForBm25CN(text: string): string {
+export function tokenizeForBm25CN(text: string): string[] {
   const normalizedText = text.trim();
   if (!normalizedText) {
-    return "";
+    return [];
   }
 
   const stopWords = loadStopWords();
@@ -94,5 +94,9 @@ export function lemmatizeForBm25CN(text: string): string {
     filtered.push(normalizedToken);
   }
 
-  return filtered.join(" ");
+  return filtered;
+}
+
+export function lemmatizeForBm25CN(text: string): string {
+  return tokenizeForBm25CN(text).join(" ");
 }
