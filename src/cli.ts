@@ -3,7 +3,9 @@ import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 
 import { loadConfig } from "./config/load-config.js";
-import type { MemoryConfig } from "./Memory/type.js";
+import { createMemoryConfig } from "./Memory/config.js";
+import { closeMcpConnections } from "./mcp/index.js";
+import { createToolsWithConfiguredMcp } from "./mcp/config.js";
 import { query } from "./query.js";
 import { recordTranscriptMessage } from "./transcript/persistence.js";
 import { createMessage } from "./types/messages.js";
@@ -12,13 +14,16 @@ import { createState, type State } from "./types/state.js";
 import type { Runtime } from "./types/runtime.js";
 
 export async function runCli(args: string[]): Promise<void> {
+  const { tools, mcpConnections } = await createToolsWithConfiguredMcp(process.cwd());
   const runtime = createRuntime({
     cwd: process.cwd(),
     deepSeekRuntimeConfig: loadConfig(),
-    MemoryConfig: createCliMemoryConfig(),
+    MemoryConfig: createMemoryConfig({ cwd: process.cwd() }),
     longTermMemoryConfig: {
       autoInject: true,
     },
+    tools,
+    mcpConnections,
   });
   const state = createState();
   const firstPrompt = args.join(" ").trim();
@@ -56,6 +61,7 @@ export async function runCli(args: string[]): Promise<void> {
       await runUserPrompt(prompt, runtime, state);
     }
   } finally {
+    closeMcpConnections(runtime.mcpConnections);
     readline.close();
   }
 }
@@ -114,23 +120,6 @@ async function runUserPrompt(
   } catch (error) {
     output.write(`\n[error] ${stringifyError(error)}\n`);
   }
-}
-
-function createCliMemoryConfig(): MemoryConfig {
-  return {
-    embedder: {
-      provider: "cli",
-      config: {},
-    },
-    vectorStore: {
-      provider: "cli",
-      config: {},
-    },
-    llm: {
-      provider: "cli",
-      config: {},
-    },
-  };
 }
 
 function stringifyError(error: unknown): string {

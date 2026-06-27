@@ -1,5 +1,7 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
+import fs from "fs";
+import path from "path";
 import { HistoryManager } from "./base.js";
 
 
@@ -10,6 +12,7 @@ export class SQLiteManager implements HistoryManager{
     private stmtSelect!: Database.Statement;
 
     constructor(dbPath: string) {
+        ensureSQLiteDirectory(dbPath);
         this.db = new Database(dbPath);
         this.init();
     }
@@ -174,4 +177,12 @@ export class SQLiteManager implements HistoryManager{
     close(): void {
         this.db.close();
     }
+}
+
+function ensureSQLiteDirectory(dbPath: string): void {
+    if (!dbPath || dbPath === ":memory:" || dbPath.startsWith("file:")) {
+        return;
+    }
+
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 }

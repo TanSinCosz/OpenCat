@@ -4,7 +4,9 @@ import { readdir, stat } from "node:fs/promises";
 import { join, parse } from "node:path";
 
 import { loadConfig } from "./config/load-config.js";
-import type { MemoryConfig } from "./Memory/type.js";
+import { createMemoryConfig } from "./Memory/config.js";
+import { closeMcpConnections } from "./mcp/index.js";
+import { createToolsWithConfiguredMcp } from "./mcp/config.js";
 import { query } from "./query.js";
 import {
   loadStateFromTranscript,
@@ -50,14 +52,17 @@ interface CreateWebCliSessionOptions {
 async function createWebCliSession(
   options: CreateWebCliSessionOptions,
 ): Promise<WebCliSession> {
+  const { tools, mcpConnections } = await createToolsWithConfiguredMcp(process.cwd());
   const runtime = createRuntime({
     cwd: process.cwd(),
     sessionId: options.sessionId,
     deepSeekRuntimeConfig: loadConfig(),
-    MemoryConfig: createWebMemoryConfig(),
+    MemoryConfig: createMemoryConfig({ cwd: process.cwd() }),
     longTermMemoryConfig: {
       autoInject: true,
     },
+    tools,
+    mcpConnections,
   });
   const hydrate = getTranscriptHydrationMode();
   const restored = options.resume && runtime.transcriptStore
@@ -289,6 +294,7 @@ function previewText(value: string, maxChars = 500): string {
 }
 
 async function resetSession(): Promise<void> {
+  closeMcpConnections(session.runtime.mcpConnections);
   session = await createWebCliSession({
     sessionId: createSessionId(),
     resume: false,
@@ -348,23 +354,6 @@ function sendText(
     "Content-Type": "text/plain; charset=utf-8",
   });
   response.end(text);
-}
-
-function createWebMemoryConfig(): MemoryConfig {
-  return {
-    embedder: {
-      provider: "web-cli",
-      config: {},
-    },
-    vectorStore: {
-      provider: "web-cli",
-      config: {},
-    },
-    llm: {
-      provider: "web-cli",
-      config: {},
-    },
-  };
 }
 
 function stringifyError(error: unknown): string {

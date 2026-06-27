@@ -135,6 +135,83 @@ test("Agent tool async mode registers task lifecycle and notification", async ()
   assert.match(state.agentNotifications[0]?.message ?? "", /async child/);
 });
 
+test("read-only agents only receive read tools", async () => {
+  const { runtime, state, streamRequests } = createHarness({
+    streams: [[textChunk("explore result")]],
+  });
+  const agent = findAgentTool(runtime);
+
+  const output = await agent.call(
+    {
+      prompt: "inspect the repo",
+      description: "read-only child",
+      subagent_type: "Explore",
+      execution_mode: "sync",
+    },
+    runtime.toolUseContext,
+    runtime,
+    state,
+  );
+
+  assert.equal(output.status, "completed");
+  assert.deepEqual(
+    getRequestToolNames(streamRequests[0]),
+    ["Read", "Glob", "Grep"],
+  );
+});
+
+test("verification agents receive Bash for checks but not editing tools", async () => {
+  const { runtime, state, streamRequests } = createHarness({
+    streams: [[textChunk("verification result")]],
+  });
+  const agent = findAgentTool(runtime);
+
+  const output = await agent.call(
+    {
+      prompt: "verify the change",
+      description: "verify child",
+      subagent_type: "verification",
+      execution_mode: "sync",
+    },
+    runtime.toolUseContext,
+    runtime,
+    state,
+  );
+
+  assert.equal(output.status, "completed");
+  assert.deepEqual(
+    getRequestToolNames(streamRequests[0]),
+    ["Bash", "Read", "Glob", "Grep"],
+  );
+});
+
+test("worker agents receive editing tools but not recursive Agent tool", async () => {
+  const { runtime, state, streamRequests } = createHarness({
+    streams: [[textChunk("worker result")]],
+  });
+  const agent = findAgentTool(runtime);
+
+  const output = await agent.call(
+    {
+      prompt: "implement a scoped change",
+      description: "worker child",
+      subagent_type: "worker",
+      execution_mode: "sync",
+    },
+    runtime.toolUseContext,
+    runtime,
+    state,
+  );
+
+  assert.equal(output.status, "completed");
+  const toolNames = getRequestToolNames(streamRequests[0]);
+  assert.ok(toolNames.includes("Read"));
+  assert.ok(toolNames.includes("Edit"));
+  assert.ok(toolNames.includes("Write"));
+  assert.ok(toolNames.includes("Bash"));
+  assert.ok(!toolNames.includes("Agent"));
+});
+
 test("Agent task pending messages can be queued and drained", () => {
   const state = createState();
   state.agentTasks.agent_test = {
@@ -269,6 +346,11 @@ function findAgentTool(runtime: ReturnType<typeof createRuntime>): Agent {
   const tool = runtime.tools.find((item) => item.name === "Agent");
   assert.ok(tool instanceof Agent);
   return tool;
+}
+
+function getRequestToolNames(request: DeepSeekStreamRequest | undefined): string[] {
+  assert.ok(request);
+  return (request.tools ?? []).map((tool) => tool.function.name);
 }
 
 function createFakeClient(

@@ -21,12 +21,12 @@ import { createState, type State } from "../../types/state.js";
 import type {
   AppState,
   PermissionMode,
-  Tool,
   ToolPermissionContext,
 } from "../types.js";
 import { cloneFileStateCache } from "../types.js";
 import type { AgentDefinition } from "./definitions.js";
 import { drainAgentMessages } from "./state.js";
+import { resolveAgentTools } from "./tool-policy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -270,9 +270,14 @@ function createChildAgentRuntime(
   worktree: AgentWorktreeSession | undefined,
 ): Runtime {
   const parent = options.parentRuntime;
-  const childTools = options.mode === "fork"
-    ? parent.tools
-    : filterToolsForAgent(parent.tools, options.agentDefinition);
+  const childTools = resolveAgentTools(
+    options.agentDefinition,
+    parent.tools,
+    {
+      isAsync: options.mode === "async",
+      isFork: options.mode === "fork",
+    },
+  ).resolvedTools;
 
   return createRuntime({
     sessionId: parent.sessionId,
@@ -400,23 +405,6 @@ function clonePermissionRules<T extends Record<string, string[] | undefined>>(
       values ? [...values] : values,
     ]),
   ) as T;
-}
-
-function filterToolsForAgent(
-  tools: readonly Tool[],
-  agentDefinition: AgentDefinition,
-): Tool[] {
-  const allowAll = !agentDefinition.tools || agentDefinition.tools.includes("*");
-  const allowed = new Set(agentDefinition.tools ?? []);
-  const denied = new Set(agentDefinition.disallowedTools ?? []);
-
-  return tools.filter((tool) => {
-    if (denied.has(tool.name)) {
-      return false;
-    }
-
-    return allowAll || allowed.has(tool.name);
-  });
 }
 
 function resolveAgentModel(

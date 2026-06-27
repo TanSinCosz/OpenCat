@@ -30,6 +30,9 @@ pnpm-debug.log*
 *.sqlite3
 .mem0/
 .opencat/
+.codegraph/
+vendor/codegraph/
+vendor/codegraph-main.zip
 
 # Cache and temporary files
 .cache/

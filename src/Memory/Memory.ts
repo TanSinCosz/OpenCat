@@ -49,7 +49,7 @@ export class MemoryTool {
         this.embedder = new OpenAIEmbedder(config.embedder.config);
         this.db = new SQLiteManager(config.historyDbPath || ":memory:")
 
-        this.llm = new OpenAIStructuredLLM(config.llm)
+        this.llm = new OpenAIStructuredLLM(config.llm.config)
         this.vectorStore = new MemoryVectorStore(this.config.vectorStore.config);
         this.telemetryId = "anonymous";
     }
