@@ -156,7 +156,7 @@ test("read-only agents only receive read tools", async () => {
   assert.equal(output.status, "completed");
   assert.deepEqual(
     getRequestToolNames(streamRequests[0]),
-    ["Read", "Glob", "Grep"],
+    ["Read", "Glob", "Grep", "WebSearch"],
   );
 });
 
@@ -181,7 +181,7 @@ test("verification agents receive Bash for checks but not editing tools", async 
   assert.equal(output.status, "completed");
   assert.deepEqual(
     getRequestToolNames(streamRequests[0]),
-    ["Bash", "Read", "Glob", "Grep"],
+    ["Bash", "Read", "Glob", "Grep", "WebSearch"],
   );
 });
 

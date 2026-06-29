@@ -7,6 +7,7 @@ import type {
 } from "openai/resources/chat/completions";
 
 import type { DeepSeekRuntimeSettings } from "../types/config.js";
+import { normalizeDeepSeekApiError } from "./errors.js";
 
 export interface DeepSeekRuntimeConfig {
   apiKey: string;
@@ -35,7 +36,11 @@ export async function sendDeepSeekSdkRequest(
   request: ChatCompletionCreateParamsNonStreaming
 ): Promise<ChatCompletion> {
   const client = createDeepSeekOpenAIClient(config);
-  return client.chat.completions.create(request);
+  try {
+    return await client.chat.completions.create(request);
+  } catch (error) {
+    throw normalizeDeepSeekApiError(error);
+  }
 }
 
 export async function* streamDeepSeekSdkRequest(
@@ -43,10 +48,19 @@ export async function* streamDeepSeekSdkRequest(
   request: ChatCompletionCreateParamsStreaming
 ): AsyncGenerator<ChatCompletionChunk, void, void> {
   const client = createDeepSeekOpenAIClient(config);
-  const stream = await client.chat.completions.create(request);
+  let stream: AsyncIterable<ChatCompletionChunk>;
+  try {
+    stream = await client.chat.completions.create(request);
+  } catch (error) {
+    throw normalizeDeepSeekApiError(error);
+  }
 
-  for await (const chunk of stream) {
-    yield chunk;
+  try {
+    for await (const chunk of stream) {
+      yield chunk;
+    }
+  } catch (error) {
+    throw normalizeDeepSeekApiError(error);
   }
 }
 

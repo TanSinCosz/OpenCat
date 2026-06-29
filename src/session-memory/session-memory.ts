@@ -11,6 +11,8 @@ import {
   DEFAULT_SESSION_MEMORY_TEMPLATE,
   SESSION_MEMORY_SYSTEM_PROMPT,
 } from "./prompts.js";
+import { savePersistedSessionMemory } from "./persistence.js";
+import { recordTranscriptStateSnapshot } from "../transcript/persistence.js";
 
 export type SessionMemoryUpdateResult =
   | { status: "updated"; content: string }
@@ -101,6 +103,9 @@ export async function updateSessionMemoryForAutoCompress(
       sessionMemory.lastSummarizedMessageId = lastMessage.id;
     }
   }
+
+  await savePersistedSessionMemory(runtime, state);
+  await recordTranscriptStateSnapshot(runtime, state, "session_memory");
 
   return { status: "updated", content };
 }

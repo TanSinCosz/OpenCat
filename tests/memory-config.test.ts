@@ -7,6 +7,7 @@ import { createMemoryConfig } from "../src/Memory/config.js";
 const MEMORY_ENV_KEYS = [
   "OPENCAT_MEMORY_EMBEDDING_API_KEY",
   "OPENCAT_EMBEDDING_API_KEY",
+  "DASHSCOPE_API_KEY",
   "OPENCAT_MEMORY_EMBEDDING_BASE_URL",
   "OPENCAT_EMBEDDING_BASE_URL",
   "OPENCAT_MEMORY_EMBEDDING_MODEL",
@@ -74,6 +75,18 @@ test("createMemoryConfig keeps DeepSeek credentials on memory LLM only", () => {
     assert.equal(config.llm.config.apiKey, "deepseek-key");
     assert.equal(config.llm.config.baseURL, "https://api.deepseek.com");
     assert.equal(config.llm.config.model, "deepseek-chat");
+  });
+});
+
+test("createMemoryConfig accepts DashScope as an embedding key fallback", () => {
+  withCleanEnv(() => {
+    process.env.DASHSCOPE_API_KEY = "dashscope-key";
+    process.env.OPENCAT_MEMORY_EMBEDDING_MODEL = "text-embedding-v4";
+
+    const config = createMemoryConfig({ cwd: "C:/repo" });
+
+    assert.equal(config.embedder.config.apiKey, "dashscope-key");
+    assert.equal(config.vectorStore.config.dimension, 1024);
   });
 });
 

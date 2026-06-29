@@ -39,12 +39,17 @@ export async function buildMessagesForQuery(
     promptOptions?: SystemPromptOptions;
     steps?: readonly MessageCompressionStep[];
     applyRequestLimits?: boolean;
+    includeRuntimeContext?: boolean;
   } = {},
 ): Promise<MessagesForQuery> {
   const promptOptions = options.promptOptions ?? {};
   const applyRequestLimits = options.applyRequestLimits ?? true;
+  const includeRuntimeContext = options.includeRuntimeContext ?? true;
   const systemPrompt = await getOrCreateSystemPrompt(runtime, promptOptions);
   const projectedMessages = projectMessagesWithAutoCompress(state);
+  const runtimeContextMessages = includeRuntimeContext
+    ? state.runtimeContextMessages
+    : [];
   const longTermMemoryMessage = await createLongTermMemoryContextMessage(
     runtime,
     projectedMessages,
@@ -57,6 +62,7 @@ export async function buildMessagesForQuery(
     },
     ...(longTermMemoryMessage ? [longTermMemoryMessage] : []),
     ...projectedMessages.map(toDeepSeekMessage),
+    ...runtimeContextMessages.map(toDeepSeekMessage),
   ];
 
   if (applyRequestLimits) {

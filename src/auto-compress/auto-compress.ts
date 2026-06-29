@@ -5,7 +5,6 @@ import {
 } from "../session-memory/prompts.js";
 import {
   loadPersistedSessionMemory,
-  savePersistedSessionMemory,
 } from "../session-memory/persistence.js";
 import { updateSessionMemoryForAutoCompress } from "../session-memory/session-memory.js";
 import { restoreReadFileStateAfterAutoCompress } from "./read-file-restore.js";
@@ -68,7 +67,6 @@ export async function applyAutoCompression(
     const updateResult = await updateSessionMemoryForAutoCompress(runtime, state);
     if (updateResult.status === "updated") {
       autoCompress.sessionMemoryUpdated = true;
-      await savePersistedSessionMemory(runtime, state);
     } else {
       return updateResult;
     }
@@ -272,6 +270,7 @@ function createAutoCompressSummaryMessage(
     content: summary.content,
     id: `msg_${summary.id}`,
     createdAt: summary.createdAt,
+    source: "auto_compress",
   };
 }
 

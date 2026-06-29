@@ -144,7 +144,7 @@ async function prepareEdit(
     }
 
     const lastRead = context.readFileState.get(absoluteFilePath)
-    if (!lastRead) {
+    if (!lastRead || lastRead.isPartialView) {
         return {
             ok: false,
             message: 'File has not been read yet. Read it first before editing.',

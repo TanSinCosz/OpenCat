@@ -7,8 +7,9 @@ import {
   type FileState,
   type FileStateCache,
 } from "../Tools/types.js";
+import { createRuntimeContextMessage } from "../query/runtime-context.js";
 import type { AutoCompressSummaryId } from "../types/context.js";
-import { createMessage, type Message } from "../types/messages.js";
+import type { Message } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
 
@@ -52,7 +53,7 @@ export async function restoreReadFileStateAfterAutoCompress(
     readFileState,
   );
 
-  state.Messages.push(...restored.messages);
+  state.runtimeContextMessages.push(...restored.messages);
   runtime.toolUseContext.messages = state.Messages;
 
   return {
@@ -109,8 +110,8 @@ async function createPostCompactFileRestoreMessages(
       isPartialView: restored.truncated,
     });
 
-    messages.push(createMessage({
-      role: "user",
+    messages.push(createRuntimeContextMessage({
+      source: "file_restore",
       content: renderPostCompactFileAttachment(restored),
     }));
     remainingChars -= restored.attachmentChars;

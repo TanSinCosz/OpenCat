@@ -3,10 +3,14 @@ import { createMessage, toDeepSeekMessage, type ToolMessage } from "./types/mess
 import { persistLargeToolResultIfNeeded } from "./tool-results/persistence.js";
 import type { Runtime } from "./types/runtime.js";
 import type { State } from "./types/state.js";
-import { streamAssistantMessage } from "./query/assistant-stream.js";
+import { streamAssistantWithReasoningContinuation } from "./query/reasoning-continuation.js";
 import { buildMessagesForQuery } from "./query/messages.js";
 import { createStreamRequest } from "./query/request.js";
 import type { MessagesForQuery, QueryEvent, QueryOptions } from "./query/types.js";
+import {
+  clearRuntimeContextAfterModelRequest,
+  loadRuntimeContextForQuery,
+} from "./query/runtime-context.js";
 import { applyAutoCompression } from "./auto-compress/index.js";
 import {
   recordTranscriptMessage,
@@ -24,43 +28,14 @@ export type {
 export { buildMessagesForQuery, createMessagesForQueryBuilder } from "./query/messages.js";
 export { createStreamRequest } from "./query/request.js";
 export { applyAutoCompression } from "./auto-compress/index.js";
+export {
+  appendRuntimeContextMessages,
+  clearRuntimeContextAfterModelRequest,
+  createRuntimeContextMessage,
+  loadRuntimeContextForQuery,
+} from "./query/runtime-context.js";
 
 const DEFAULT_AUTO_COMPRESS_TRIGGER_TOKENS = 160_000;
-
-export function flushAgentNotificationsToMessages(state: State): number {
-  const notifications = state.agentNotifications.splice(0);
-
-  for (const notification of notifications) {
-    state.Messages.push(createMessage({
-      role: "user",
-      content: notification.message,
-    }));
-  }
-
-  return notifications.length;
-}
-
-export async function flushAgentNotificationsToMessagesAndTranscript(
-  runtime: Runtime,
-  state: State,
-): Promise<number> {
-  if (runtime.agentRole !== "main") {
-    return 0;
-  }
-
-  const beforeCount = state.Messages.length;
-  const flushed = flushAgentNotificationsToMessages(state);
-
-  for (const message of state.Messages.slice(beforeCount)) {
-    await recordTranscriptMessage(runtime, message);
-  }
-
-  if (flushed > 0) {
-    await recordTranscriptStateSnapshot(runtime, state, "agent_notification");
-  }
-
-  return flushed;
-}
 
 export async function* query(
   runtime: Runtime,
@@ -76,7 +51,6 @@ export async function* _query(
   options: QueryOptions = {},
 ): AsyncGenerator<QueryEvent, void, void> {
   const maxTurns = options.maxTurns ?? 100;
-  const client = runtime.deepSeekClient;
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     const messagesForQuery = await prepareMessagesForQuery(
@@ -93,25 +67,17 @@ export async function* _query(
     const request = await createStreamRequest(runtime, messagesForQuery.messages);
     yield { type: "model_stream_start", turn };
 
-    let assistantMessage;
-    for await (const update of streamAssistantMessage(client, request)) {
-      if (update.type === "assistant_message_ready") {
-        assistantMessage = update.message;
-        continue;
-      }
-
-      yield update;
-    }
-
-    if (!assistantMessage) {
-      throw new Error("Model stream completed without an assistant message.");
-    }
+    const assistantMessage = yield* streamAssistantWithReasoningContinuation(
+      runtime,
+      request,
+    );
 
     const persistedAssistantMessage = createMessage(assistantMessage);
     state.Messages.push(persistedAssistantMessage);
     await recordTranscriptMessage(runtime, persistedAssistantMessage);
     runtime.toolUseContext.messages = state.Messages;
     yield { type: "assistant_message", message: assistantMessage };
+    await clearRuntimeContextAfterModelRequest(runtime, state);
 
     const toolCalls = assistantMessage.tool_calls ?? [];
     if (toolCalls.length === 0) {
@@ -166,7 +132,7 @@ async function prepareMessagesForQuery(
         messagesForQuery = await options.messagesForQueryBuilder(runtime, state);
       }
     }
-    if (await flushAgentNotificationsToMessagesAndTranscript(runtime, state) > 0) {
+    if (await loadRuntimeContextForQuery(runtime, state) > 0) {
       runtime.toolUseContext.messages = state.Messages;
       messagesForQuery = await options.messagesForQueryBuilder(runtime, state);
     }
@@ -176,6 +142,7 @@ async function prepareMessagesForQuery(
   const projectedMessages = await buildMessagesForQuery(runtime, state, {
     promptOptions: options.promptOptions,
     applyRequestLimits: false,
+    includeRuntimeContext: false,
   });
 
   if (shouldApplyAutoCompression(projectedMessages)) {
@@ -185,7 +152,7 @@ async function prepareMessagesForQuery(
     }
   }
 
-  if (await flushAgentNotificationsToMessagesAndTranscript(runtime, state) > 0) {
+  if (await loadRuntimeContextForQuery(runtime, state) > 0) {
     runtime.toolUseContext.messages = state.Messages;
   }
 

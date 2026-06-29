@@ -12,6 +12,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "Read",
   "Glob",
   "Grep",
+  "WebSearch",
 ]);
 
 const VERIFY_TOOL_NAMES = new Set([

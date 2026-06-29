@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AutoCompressState } from "../types/context.js";
-import type { Message, MessageId } from "../types/messages.js";
+import type { Message, MessageId, MessageSource } from "../types/messages.js";
 import { createState, type State } from "../types/state.js";
 import type { Runtime } from "../types/runtime.js";
 import type { SessionMemoryState } from "../types/session-memory.js";
@@ -18,6 +18,7 @@ export type TranscriptSnapshotReason =
   | "auto_compress"
   | "manual"
   | "query"
+  | "runtime_context"
   | "session_memory";
 
 export type TranscriptEntry =
@@ -42,6 +43,7 @@ export type PersistedStateSnapshot = {
   mode: State["mode"];
   agentTasks: AgentTasksState;
   agentNotifications: AgentNotification[];
+  runtimeContextMessages: Message[];
   messageCount: number;
   latestMessageId?: MessageId;
 };
@@ -199,6 +201,9 @@ export async function loadStateFromTranscript(
 
   return createState({
     messages,
+    runtimeContextMessages: latestSnapshot?.runtimeContextMessages?.map(
+      normalizeHydratedTranscriptMessage,
+    ),
     autoCompress: latestSnapshot?.autoCompress,
     sessionMemory: latestSnapshot?.sessionMemory,
     mode: latestSnapshot?.mode,
@@ -230,6 +235,7 @@ function createPersistedStateSnapshot(state: State): PersistedStateSnapshot {
     mode: state.mode,
     agentTasks: state.agentTasks,
     agentNotifications: state.agentNotifications,
+    runtimeContextMessages: state.runtimeContextMessages,
     messageCount: state.Messages.length,
     latestMessageId: state.Messages.at(-1)?.id,
   };
@@ -241,24 +247,77 @@ function hydrateMessagesFromTranscript(
   hydrate: LoadStateFromTranscriptOptions["hydrate"],
 ): Message[] {
   if (hydrate === "full") {
-    return messageEntries.map((entry) => entry.message);
+    return messageEntries.map((entry) =>
+      normalizeHydratedTranscriptMessage(entry.message)
+    );
   }
 
   const throughMessageId = getActiveAutoCompressThroughMessageId(
     latestSnapshot,
   );
   if (!throughMessageId) {
-    return messageEntries.map((entry) => entry.message);
+    return messageEntries.map((entry) =>
+      normalizeHydratedTranscriptMessage(entry.message)
+    );
   }
 
   const throughIndex = messageEntries.findIndex(
     (entry) => entry.message.id === throughMessageId,
   );
   if (throughIndex === -1) {
-    return messageEntries.map((entry) => entry.message);
+    return messageEntries.map((entry) =>
+      normalizeHydratedTranscriptMessage(entry.message)
+    );
   }
 
-  return messageEntries.slice(throughIndex + 1).map((entry) => entry.message);
+  return messageEntries
+    .slice(throughIndex + 1)
+    .map((entry) => normalizeHydratedTranscriptMessage(entry.message));
+}
+
+function normalizeHydratedTranscriptMessage(message: Message): Message {
+  const normalized = ensureHydratedMessageSource(message);
+
+  if (
+    normalized.role !== "assistant" ||
+    normalized.content ||
+    (normalized.tool_calls?.length ?? 0) > 0 ||
+    !normalized.reasoning_content
+  ) {
+    return normalized;
+  }
+
+  return {
+    ...normalized,
+    content: [
+      "The model returned internal reasoning but did not produce a final answer.",
+      "This older transcript entry was recovered so the session can continue.",
+    ].join(" "),
+  };
+}
+
+function ensureHydratedMessageSource(message: Message): Message {
+  if (message.source) {
+    return message;
+  }
+
+  return {
+    ...message,
+    source: getDefaultHydratedMessageSource(message),
+  };
+}
+
+function getDefaultHydratedMessageSource(message: Message): MessageSource {
+  switch (message.role) {
+    case "system":
+      return "system";
+    case "user":
+      return "user";
+    case "assistant":
+      return "assistant";
+    case "tool":
+      return "tool";
+  }
 }
 
 function getActiveAutoCompressThroughMessageId(

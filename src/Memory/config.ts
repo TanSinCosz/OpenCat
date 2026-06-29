@@ -10,6 +10,16 @@ export function createMemoryConfig(
   options: CreateMemoryConfigOptions = {},
 ): MemoryConfig {
   const cwd = options.cwd ?? process.cwd();
+  const embeddingModel = envFirst(
+    "OPENCAT_MEMORY_EMBEDDING_MODEL",
+    "OPENCAT_EMBEDDING_MODEL",
+  ) ?? "text-embedding-3-small";
+  const embeddingDims = envNumberFirst(
+    "OPENCAT_MEMORY_EMBEDDING_DIMS",
+    "OPENCAT_MEMORY_EMBEDDING_DIMENSIONS",
+    "OPENCAT_EMBEDDING_DIMS",
+    "OPENCAT_EMBEDDING_DIMENSIONS",
+  );
   const embeddingBaseURL = envFirst(
     "OPENCAT_MEMORY_EMBEDDING_BASE_URL",
     "OPENCAT_EMBEDDING_BASE_URL",
@@ -18,6 +28,7 @@ export function createMemoryConfig(
   const embeddingApiKey = envFirst(
     "OPENCAT_MEMORY_EMBEDDING_API_KEY",
     "OPENCAT_EMBEDDING_API_KEY",
+    "DASHSCOPE_API_KEY",
     "OPENAI_API_KEY",
   ) ?? (embeddingBaseURL ? "not-needed" : undefined);
   const llmApiKey = envFirst(
@@ -37,16 +48,8 @@ export function createMemoryConfig(
       config: {
         apiKey: embeddingApiKey,
         baseURL: embeddingBaseURL,
-        model: envFirst(
-          "OPENCAT_MEMORY_EMBEDDING_MODEL",
-          "OPENCAT_EMBEDDING_MODEL",
-        ) ?? "text-embedding-3-small",
-        embeddingDims: envNumberFirst(
-          "OPENCAT_MEMORY_EMBEDDING_DIMS",
-          "OPENCAT_MEMORY_EMBEDDING_DIMENSIONS",
-          "OPENCAT_EMBEDDING_DIMS",
-          "OPENCAT_EMBEDDING_DIMENSIONS",
-        ),
+        model: embeddingModel,
+        embeddingDims,
       },
     },
     vectorStore: {
@@ -57,14 +60,10 @@ export function createMemoryConfig(
           envFirst("OPENCAT_MEMORY_VECTOR_DB_PATH"),
           ".opencat/memory/vector_store.db",
         ),
-        dimension: envNumberFirst(
-          "OPENCAT_MEMORY_EMBEDDING_DIMS",
-          "OPENCAT_MEMORY_EMBEDDING_DIMENSIONS",
+        dimension: embeddingDims ?? envNumberFirst(
           "OPENCAT_MEMORY_VECTOR_DIMENSION",
           "OPENCAT_MEMORY_VECTOR_DIMS",
-          "OPENCAT_EMBEDDING_DIMS",
-          "OPENCAT_EMBEDDING_DIMENSIONS",
-        ) ?? 1536,
+        ) ?? inferDefaultEmbeddingDimension(embeddingModel),
       },
     },
     llm: {
@@ -111,4 +110,12 @@ function resolveConfigPath(
   fallback: string,
 ): string {
   return path.resolve(cwd, configured ?? fallback);
+}
+
+function inferDefaultEmbeddingDimension(model: string): number {
+  if (model === "text-embedding-v4") {
+    return 1024;
+  }
+
+  return 1536;
 }

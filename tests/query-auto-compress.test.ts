@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -61,6 +61,22 @@ test("query auto-compresses oversized projections with session memory before mod
   assert.equal(state.sessionMemory.status, "ready");
   assert.equal(state.autoCompress.summaries.length, 1);
   assert.ok(state.autoCompress.activeSummaryId);
+
+  const sessionMemoryRaw = await readFile(
+    join(runtime.cwd, ".opencat", "session-memory", `${runtime.sessionId}.json`),
+    "utf8",
+  );
+  const persistedSessionMemory = JSON.parse(sessionMemoryRaw);
+  assert.equal(persistedSessionMemory.sessionId, runtime.sessionId);
+  assert.equal(persistedSessionMemory.state.status, "ready");
+  assert.match(persistedSessionMemory.state.content, /Auto-compress test/);
+
+  const transcriptEntries = await runtime.transcriptStore!.load();
+  assert.ok(
+    transcriptEntries.some((entry) =>
+      entry.type === "state_snapshot" && entry.reason === "session_memory"
+    ),
+  );
 
   const requestMessages = streamRequests[0]!.messages;
   const summaryMessage = requestMessages.find(
@@ -132,6 +148,7 @@ test("query flushes agent notifications after auto-compression", async () => {
   assert.equal(createRequests.length, 1);
   assert.equal(streamRequests.length, 1);
   assert.equal(state.agentNotifications.length, 0);
+  assert.equal(state.runtimeContextMessages.length, 0);
 
   const sessionMemoryRequestText = JSON.stringify(createRequests[0]!.messages);
   const mainRequestText = JSON.stringify(streamRequests[0]!.messages);

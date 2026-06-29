@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { loadConfig } from "./config/load-config.js";
 import { createMemoryConfig } from "./Memory/config.js";
 import { closeMcpConnections } from "./mcp/index.js";
+import { formatErrorForUser } from "./deepseek/errors.js";
 import { createToolsWithConfiguredMcp } from "./mcp/config.js";
 import { query } from "./query.js";
 import { recordTranscriptMessage } from "./transcript/persistence.js";
@@ -123,9 +124,5 @@ async function runUserPrompt(
 }
 
 function stringifyError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
+  return formatErrorForUser(error);
 }

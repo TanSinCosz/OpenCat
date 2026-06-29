@@ -13,6 +13,7 @@ import {
 
 export interface State {
   Messages: Message[];
+  runtimeContextMessages: Message[];
   autoCompress: AutoCompressState;
   sessionMemory: SessionMemoryState;
   mode: "default" | "plan";
@@ -22,6 +23,7 @@ export interface State {
 
 export interface CreateStateOptions {
   messages?: Message[];
+  runtimeContextMessages?: Message[];
   autoCompress?: AutoCompressState;
   sessionMemory?: SessionMemoryState;
   mode?: State["mode"];
@@ -32,6 +34,7 @@ export interface CreateStateOptions {
 export function createState(options: CreateStateOptions = {}): State {
   return {
     Messages: options.messages ?? [],
+    runtimeContextMessages: options.runtimeContextMessages ?? [],
     autoCompress: options.autoCompress ?? {
       summaries: [],
       sessionMemoryUpdated: false,

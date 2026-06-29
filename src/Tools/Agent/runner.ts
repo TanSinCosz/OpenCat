@@ -241,7 +241,7 @@ function buildInitialMessages(
       createMessage({
         role: "user",
         content: `${worktreeNotice}${buildForkDirective(options.prompt)}`,
-      }),
+      }, { source: "agent_message" }),
     ];
   }
 
@@ -249,7 +249,7 @@ function buildInitialMessages(
     createMessage({
       role: "user",
       content: `${worktreeNotice}${options.prompt}`,
-    }),
+    }, { source: "agent_message" }),
   ];
 }
 
@@ -331,7 +331,7 @@ async function drainPendingAgentMessagesIntoChildContext(
   const message = createMessage({
     role: "user",
     content: renderPendingAgentMessages(messages),
-  });
+  }, { source: "agent_message" });
   childState.Messages.push(message);
   childRuntime.toolUseContext.messages = childState.Messages;
   await recordTranscriptMessage(childRuntime, message);

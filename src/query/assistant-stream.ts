@@ -1,6 +1,7 @@
 import type { DeepSeekClient } from "../deepseek/client.js";
 import type {
   DeepSeekAssistantMessage,
+  DeepSeekChatCompletionResponse,
   DeepSeekCreateRequest,
   DeepSeekDeltaToolCall,
   DeepSeekStreamEnvelope,
@@ -9,14 +10,22 @@ import type {
 
 export type AssistantStreamUpdate =
   | { type: "model_stream_event"; event: DeepSeekStreamEnvelope }
+  | { type: "assistant_reasoning_delta"; text: string }
   | { type: "assistant_text_delta"; text: string }
-  | { type: "assistant_message_ready"; message: DeepSeekAssistantMessage };
+  | {
+    type: "assistant_message_ready";
+    message: DeepSeekAssistantMessage;
+    hadContent: boolean;
+    finishReason: DeepSeekChatCompletionResponse["choices"][number]["finish_reason"];
+  };
 
 export async function* streamAssistantMessage(
   client: DeepSeekClient,
   request: DeepSeekCreateRequest & { stream: true },
 ): AsyncGenerator<AssistantStreamUpdate, void, void> {
   const assistantMessage = createEmptyAssistantMessage();
+  let finishReason: DeepSeekChatCompletionResponse["choices"][number]["finish_reason"] =
+    "stop";
 
   for await (const event of client.stream(request)) {
     yield { type: "model_stream_event", event };
@@ -28,6 +37,10 @@ export async function* streamAssistantMessage(
     for (const choice of event.chunk.choices) {
       const delta = choice.delta;
 
+      if (choice.finish_reason) {
+        finishReason = choice.finish_reason;
+      }
+
       if (typeof delta.content === "string") {
         assistantMessage.content =
           (assistantMessage.content ?? "") + delta.content;
@@ -37,6 +50,7 @@ export async function* streamAssistantMessage(
       if (typeof delta.reasoning_content === "string") {
         assistantMessage.reasoning_content =
           (assistantMessage.reasoning_content ?? "") + delta.reasoning_content;
+        yield { type: "assistant_reasoning_delta", text: delta.reasoning_content };
       }
 
       if (delta.tool_calls?.length) {
@@ -46,8 +60,14 @@ export async function* streamAssistantMessage(
     }
   }
 
+  const hadContent = Boolean(assistantMessage.content);
   normalizeAssistantMessage(assistantMessage);
-  yield { type: "assistant_message_ready", message: assistantMessage };
+  yield {
+    type: "assistant_message_ready",
+    message: assistantMessage,
+    hadContent,
+    finishReason,
+  };
 }
 
 function createEmptyAssistantMessage(): DeepSeekAssistantMessage {
@@ -61,7 +81,13 @@ function createEmptyAssistantMessage(): DeepSeekAssistantMessage {
 
 function normalizeAssistantMessage(message: DeepSeekAssistantMessage): void {
   if (!message.content) {
-    message.content = message.tool_calls?.length ? null : "";
+    message.content = message.tool_calls?.length ? null
+      : message.reasoning_content
+      ? [
+        "The model returned internal reasoning but did not produce a final answer.",
+        "This usually means the response token budget was exhausted before final text was generated. Try again with a higher OPENCAT_MAX_TOKENS value or a lower reasoning effort.",
+      ].join(" ")
+      : "";
   }
 
   if (message.tool_calls?.length === 0) {

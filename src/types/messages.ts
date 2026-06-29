@@ -10,9 +10,23 @@ import type {
 export type MessageId = `msg_${string}`;
 export type ToolResultId = `tool_result_${string}`;
 
+export type MessageSource =
+  | "user"
+  | "system"
+  | "assistant"
+  | "tool"
+  | "runtime"
+  | "agent_notification"
+  | "agent_message" // sub agent content
+  | "auto_compress"
+  | "file_restore"
+  | "long_term_memory"
+  | "dynamic_skill";
+
 type MessageMeta = {
   id: MessageId;
   createdAt: number;
+  source: MessageSource;
 };
 
 export type PersistedToolResult = {
@@ -39,32 +53,53 @@ export type Message =
   | AssistantMessage
   | ToolMessage;
 
-export function createMessage(message: DeepSeekMessage): Message {
+export function createMessage(
+  message: DeepSeekMessage,
+  options: { source?: MessageSource } = {},
+): Message {
   return {
     ...message,
     id: createMessageId(),
     createdAt: Date.now(),
+    source: options.source ?? getDefaultMessageSource(message),
   } as Message;
 }
 
 export function toDeepSeekMessage(message: Message): DeepSeekMessage {
   switch (message.role) {
     case "system": {
-      const { id: _id, createdAt: _createdAt, ...deepSeekMessage } = message;
+      const {
+        id: _id,
+        createdAt: _createdAt,
+        source: _source,
+        ...deepSeekMessage
+      } = message;
       return deepSeekMessage;
     }
     case "user": {
-      const { id: _id, createdAt: _createdAt, ...deepSeekMessage } = message;
+      const {
+        id: _id,
+        createdAt: _createdAt,
+        source: _source,
+        ...deepSeekMessage
+      } = message;
       return deepSeekMessage;
     }
     case "assistant": {
-      const { id: _id, createdAt: _createdAt, ...deepSeekMessage } = message;
+      const {
+        id: _id,
+        createdAt: _createdAt,
+        source: _source,
+        reasoning_content: _reasoningContent,
+        ...deepSeekMessage
+      } = message;
       return deepSeekMessage;
     }
     case "tool": {
       const {
         id: _id,
         createdAt: _createdAt,
+        source: _source,
         toolName: _toolName,
         toolResultId: _toolResultId,
         persistedToolResult: _persistedToolResult,
@@ -77,4 +112,17 @@ export function toDeepSeekMessage(message: Message): DeepSeekMessage {
 
 function createMessageId(): MessageId {
   return `msg_${randomUUID()}`;
+}
+
+function getDefaultMessageSource(message: DeepSeekMessage): MessageSource {
+  switch (message.role) {
+    case "system":
+      return "system";
+    case "user":
+      return "user";
+    case "assistant":
+      return "assistant";
+    case "tool":
+      return "tool";
+  }
 }

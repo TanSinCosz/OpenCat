@@ -50,11 +50,19 @@ test("post auto-compress restore clears and reattaches read file state", async (
   assert.equal(restoredState?.limit, undefined);
   assert.equal(restoredState?.isPartialView, false);
 
-  assert.equal(state.Messages.length, 1);
-  assert.equal(state.Messages[0]?.role, "user");
-  assert.match(state.Messages[0]?.content ?? "", /<post-compact-file-restore>/);
-  assert.match(state.Messages[0]?.content ?? "", /example\.ts/);
-  assert.match(state.Messages[0]?.content ?? "", /1\texport const answer = 42;/);
+  assert.equal(state.Messages.length, 0);
+  assert.equal(state.runtimeContextMessages.length, 1);
+  assert.equal(state.runtimeContextMessages[0]?.role, "user");
+  assert.equal(state.runtimeContextMessages[0]?.source, "file_restore");
+  assert.match(
+    state.runtimeContextMessages[0]?.content ?? "",
+    /<post-compact-file-restore>/,
+  );
+  assert.match(state.runtimeContextMessages[0]?.content ?? "", /example\.ts/);
+  assert.match(
+    state.runtimeContextMessages[0]?.content ?? "",
+    /1\texport const answer = 42;/,
+  );
 });
 
 function createUnusedClient() {

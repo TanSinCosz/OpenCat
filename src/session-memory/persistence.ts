@@ -6,7 +6,6 @@ import {
 } from "../types/session-memory.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
-import { ensureSessionMemoryState } from "./session-memory.js";
 
 const SESSION_MEMORY_STORE_VERSION = 1;
 const SESSION_MEMORY_DIR = ".opencat/session-memory";
@@ -22,7 +21,7 @@ export async function loadPersistedSessionMemory(
   runtime: Runtime,
   state: State,
 ): Promise<{ loaded: true } | { loaded: false; reason: string }> {
-  const current = ensureSessionMemoryState(state);
+  const current = ensurePersistableSessionMemoryState(state);
   if (current.status === "ready" && current.content.trim() !== "") {
     return { loaded: false, reason: "session_memory_already_loaded" };
   }
@@ -58,7 +57,7 @@ export async function savePersistedSessionMemory(
   runtime: Runtime,
   state: State,
 ): Promise<void> {
-  const sessionMemory = ensureSessionMemoryState(state);
+  const sessionMemory = ensurePersistableSessionMemoryState(state);
   await mkdir(getSessionMemoryStateDir(runtime), { recursive: true });
 
   const persisted: PersistedSessionMemory = {
@@ -88,6 +87,15 @@ function getSessionMemoryStateDir(runtime: Runtime): string {
 
 function sanitizeSessionId(sessionId: string): string {
   return sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function ensurePersistableSessionMemoryState(state: State): SessionMemoryState {
+  state.sessionMemory ??= createSessionMemoryState();
+  state.sessionMemory.status ??= "idle";
+  state.sessionMemory.tokensAtLastUpdateAttempt ??= 0;
+  state.sessionMemory.tokensAtLastExtraction ??= 0;
+  state.sessionMemory.config ??= createSessionMemoryState().config;
+  return state.sessionMemory;
 }
 
 function parsePersistedSessionMemory(

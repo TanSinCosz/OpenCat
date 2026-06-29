@@ -12,6 +12,13 @@ export type QueryEvent =
   | { type: "context_ready"; systemPrompt: string; messages: DeepSeekMessage[] }
   | { type: "model_stream_start"; turn: number }
   | { type: "model_stream_event"; event: DeepSeekStreamEnvelope }
+  | {
+    type: "reasoning_continuation";
+    phase: "continue_reasoning" | "force_final_answer";
+    round: number;
+    reasoningChars: number;
+  }
+  | { type: "assistant_reasoning_delta"; text: string }
   | { type: "assistant_text_delta"; text: string }
   | { type: "assistant_message"; message: DeepSeekAssistantMessage }
   | { type: "tool_use"; toolCall: DeepSeekToolCall }

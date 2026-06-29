@@ -10,6 +10,7 @@ import type {
   DeepSeekStreamRequest,
 } from "../src/deepseek/types.js";
 import { query } from "../src/query.js";
+import { createRuntimeContextMessage } from "../src/query/runtime-context.js";
 import { projectMessagesWithAutoCompress } from "../src/auto-compress/index.js";
 import {
   loadStateFromTranscript,
@@ -46,6 +47,7 @@ test("transcript store restores messages and latest state snapshot", async () =>
   assert.ok(restored);
   assert.equal(restored.Messages.length, 1);
   assert.equal(restored.Messages[0]?.id, userMessage.id);
+  assert.equal(restored.Messages[0]?.source, "user");
   assert.equal(restored.mode, "plan");
   assert.equal(restored.sessionMemory.status, "ready");
   assert.match(restored.sessionMemory.content, /Persisted transcript/);
@@ -98,7 +100,9 @@ test("query appends assistant messages to transcript", async () => {
   assert.equal(streamRequests.length, 1);
   assert.equal(messageEntries.length, 2);
   assert.equal(messageEntries[0]?.message.role, "user");
+  assert.equal(messageEntries[0]?.message.source, "user");
   assert.equal(messageEntries[1]?.message.role, "assistant");
+  assert.equal(messageEntries[1]?.message.source, "assistant");
   assert.equal(messageEntries[1]?.message.content, "OK");
 });
 
@@ -216,6 +220,82 @@ test("transcript restore keeps pending agent notifications from snapshots", asyn
   assert.ok(restored);
   assert.equal(restored.agentNotifications.length, 1);
   assert.equal(restored.agentNotifications[0]?.id, "agent_notification_restore");
+});
+
+test("transcript restore keeps runtime context separate from conversation messages", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-runtime-context-transcript-")),
+    sessionId: "session_runtime_context_restore",
+    deepSeekRuntimeConfig: createRuntimeConfig(),
+    deepSeekClient: createNoopClient(),
+    MemoryConfig: createMemoryConfig(),
+  });
+  const state = createState({
+    messages: [
+      createMessage({
+        role: "user",
+        content: "real user prompt",
+      }),
+    ],
+    runtimeContextMessages: [
+      createRuntimeContextMessage({
+        source: "agent_notification",
+        content: "<task-notification>runtime only</task-notification>",
+      }),
+    ],
+  });
+
+  await recordTranscriptMessage(runtime, state.Messages[0]!);
+  await recordTranscriptStateSnapshot(runtime, state, "runtime_context");
+
+  const restored = await loadStateFromTranscript(runtime.transcriptStore!);
+
+  assert.ok(restored);
+  assert.equal(restored.Messages.length, 1);
+  assert.equal(restored.Messages[0]?.content, "real user prompt");
+  assert.equal(restored.runtimeContextMessages.length, 1);
+  assert.equal(
+    restored.runtimeContextMessages[0]?.source,
+    "agent_notification",
+  );
+  assert.match(
+    restored.runtimeContextMessages[0]?.content ?? "",
+    /runtime only/,
+  );
+});
+
+test("transcript restore recovers reasoning-only assistant messages", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-reasoning-only-transcript-")),
+    sessionId: "session_reasoning_only_restore",
+    deepSeekRuntimeConfig: createRuntimeConfig(),
+    deepSeekClient: createNoopClient(),
+    MemoryConfig: createMemoryConfig(),
+  });
+  const message = createMessage({
+    role: "assistant",
+    content: "",
+    reasoning_content: "unfinished reasoning that exhausted output budget",
+  });
+
+  await recordTranscriptMessage(runtime, message);
+
+  const restored = await loadStateFromTranscript(runtime.transcriptStore!, {
+    hydrate: "full",
+  });
+
+  assert.ok(restored);
+  assert.equal(restored.Messages.length, 1);
+  assert.match(
+    restored.Messages[0]?.content ?? "",
+    /recovered so the session can continue/,
+  );
+  assert.equal(
+    restored.Messages[0]?.role === "assistant"
+      ? restored.Messages[0].reasoning_content
+      : "",
+    "unfinished reasoning that exhausted output budget",
+  );
 });
 
 function createAssistantChunk(text: string): DeepSeekStreamEnvelope {
