@@ -26,8 +26,18 @@ export async function executeToolCall(
       return createToolResultMessage(toolCall.id, validation.error);
     }
 
+    const permittedInput = await applyToolPermission(
+      tool,
+      validation.input,
+      runtime,
+      state,
+    );
+    if (permittedInput.ok === false) {
+      return createToolResultMessage(toolCall.id, permittedInput.error);
+    }
+
     const output = await tool.call(
-      validation.input as Record<string, unknown>,
+      permittedInput.input as Record<string, unknown>,
       runtime.toolUseContext,
       runtime,
       state,
@@ -36,6 +46,35 @@ export async function executeToolCall(
   } catch (error) {
     return createToolResultMessage(toolCall.id, stringifyError(error));
   }
+}
+
+async function applyToolPermission(
+  tool: Tool,
+  input: unknown,
+  runtime: Runtime,
+  state: State,
+): Promise<{ ok: true; input: unknown } | { ok: false; error: string }> {
+  const canUseTool = runtime.toolUseContext.canUseTool;
+  if (!canUseTool) {
+    return { ok: true, input };
+  }
+
+  const decision = await canUseTool(
+    tool,
+    input,
+    runtime.toolUseContext,
+    runtime,
+    state,
+  );
+
+  if (decision.behavior === "deny") {
+    return { ok: false, error: decision.message };
+  }
+
+  return {
+    ok: true,
+    input: decision.updatedInput ?? input,
+  };
 }
 
 function findTool(tools: Tools, name: string): Tool | undefined {

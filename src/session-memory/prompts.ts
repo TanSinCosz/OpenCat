@@ -34,7 +34,11 @@ _Step by step, what was attempted, done? Very terse summary for each step_
 `.trim();
 
 export const SESSION_MEMORY_SYSTEM_PROMPT =
-  "You update structured session memory notes. Return only the complete updated markdown file.";
+  [
+    "You are a forked session-memory agent.",
+    "Your only task is to update the session memory notes file using the Edit tool.",
+    "Do not call tools other than Edit. Stop after the edit is complete.",
+  ].join(" ");
 
 /**
  * Builds the model-visible instruction for refreshing session memory.
@@ -46,6 +50,7 @@ export const SESSION_MEMORY_SYSTEM_PROMPT =
  */
 export function buildSessionMemoryUpdatePrompt(input: {
   currentNotes: string;
+  notesPath?: string;
   transcript: string;
 }): string {
   const currentNotes = input.currentNotes.trim() ||
@@ -65,7 +70,10 @@ The current session notes are:
 ${currentNotes}
 </current_notes_content>
 
-Your ONLY task is to return the complete updated session notes markdown. Do not call tools. Do not wrap the answer in code fences.
+Your ONLY task is to use the Edit tool to update the session notes file, then stop. The file path is:
+${input.notesPath ?? "<session-memory-notes-file>"}
+
+The file has already been read for you. Use old_string/new_string replacements against that file. Do not return the full markdown as a normal assistant message.
 
 CRITICAL RULES:
 - Preserve the exact structure with all sections, headers, and italic descriptions intact.
@@ -79,6 +87,7 @@ CRITICAL RULES:
 - Always update "Current State" to reflect the most recent work.
 - For "Key results", include complete exact outputs the user requested when applicable.
 - Keep each section under about ${MAX_SECTION_TOKENS} tokens by condensing older or lower-value details.
+- Use the Edit tool with file_path exactly equal to the path above.
 ${sectionReminders}`;
 }
 

@@ -190,6 +190,18 @@ export function cacheToObject(cache: FileStateCache): Record<string, FileState> 
 
 export type Tools = readonly Tool[]
 
+export type ToolPermissionDecision =
+    | { behavior: "allow"; updatedInput?: unknown }
+    | { behavior: "deny"; message: string };
+
+export type CanUseToolFn = (
+    tool: Tool,
+    input: unknown,
+    context: ToolUseContext,
+    runtime: Runtime,
+    state: State,
+) => MaybePromise<ToolPermissionDecision>;
+
 export type ThinkingConfig =
     | { type: 'enabled' }
     | { type: 'disabled' }
@@ -209,6 +221,7 @@ export type ToolUseContext = {
     getAppState(): AppState
     setAppState(f: (prev: AppState) => AppState): void
     readFileState: FileStateCache
+    canUseTool?: CanUseToolFn
     tokenizer?: Tokenizer
     messages: Message[]
 }
@@ -224,6 +237,7 @@ export type CreateToolUseContextOptions = {
     agentDefinitions?: AgentDefinitionsResult
     thinkingConfig?: ThinkingConfig
     readFileState?: FileStateCache
+    canUseTool?: CanUseToolFn
 }
 
 export function createToolUseContext(
@@ -251,6 +265,7 @@ export function createToolUseContext(
             appState = update(appState)
         },
         readFileState: options.readFileState ?? createFileStateCache(),
+        canUseTool: options.canUseTool,
         tokenizer: options.tokenizer,
         messages: options.messages ?? [],
     }

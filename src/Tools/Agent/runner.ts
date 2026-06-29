@@ -15,11 +15,14 @@ import { createMessage, type Message } from "../../types/messages.js";
 import {
   createRuntime,
   type Runtime,
+  type RuntimeAgentRole,
   type SubAgentId,
 } from "../../types/runtime.js";
 import { createState, type State } from "../../types/state.js";
 import type {
   AppState,
+  CanUseToolFn,
+  FileStateCache,
   PermissionMode,
   ToolPermissionContext,
 } from "../types.js";
@@ -74,6 +77,9 @@ export type RunAgentOptions = {
   agentId?: SubAgentId;
   recordTaskLifecycle?: boolean;
   worktree?: AgentWorktreeSession;
+  canUseTool?: CanUseToolFn;
+  readFileState?: FileStateCache;
+  agentRole?: RuntimeAgentRole;
 };
 
 type AgentWorktreeSession = {
@@ -257,10 +263,42 @@ function createChildAgentState(
   options: RunAgentOptions,
   worktree: AgentWorktreeSession | undefined,
 ): State {
+  const messages = buildInitialMessages(options, worktree);
+
+  if (options.mode === "fork") {
+    return createState({
+      messages,
+      runtimeContextMessages: cloneMessages(options.parentState.runtimeContextMessages),
+      autoCompress: cloneAutoCompressState(options.parentState.autoCompress),
+      sessionMemory: cloneSessionMemoryState(options.parentState.sessionMemory),
+      mode: options.parentState.mode,
+    });
+  }
+
   return createState({
-    messages: buildInitialMessages(options, worktree),
+    messages,
     mode: options.agentDefinition.permissionMode === "plan" ? "plan" : "default",
   });
+}
+
+function cloneMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) => ({ ...message }) as Message);
+}
+
+function cloneAutoCompressState(state: State["autoCompress"]): State["autoCompress"] {
+  return {
+    ...state,
+    summaries: state.summaries.map((summary) => ({ ...summary })),
+  };
+}
+
+function cloneSessionMemoryState(
+  state: State["sessionMemory"],
+): State["sessionMemory"] {
+  return {
+    ...state,
+    config: { ...state.config },
+  };
 }
 
 function createChildAgentRuntime(
@@ -282,7 +320,7 @@ function createChildAgentRuntime(
   return createRuntime({
     sessionId: parent.sessionId,
     agentId,
-    agentRole: "subagent",
+    agentRole: options.agentRole ?? "subagent",
     parentAgentId: parent.agentId,
     agentType: options.agentDefinition.agentType,
     cwd: worktree?.worktreePath ?? parent.cwd,
@@ -311,9 +349,11 @@ function createChildAgentRuntime(
     thinkingConfig: parent.toolUseContext.options.thinkingConfig,
     appState: deriveChildAppState(options),
     systemPrompt: options.mode === "fork" ? parent.systemPrompt : undefined,
-    readFileState: options.mode === "fork" && !worktree
-      ? cloneFileStateCache(parent.toolUseContext.readFileState)
-      : undefined,
+    readFileState: options.readFileState ??
+      (options.mode === "fork" && !worktree
+        ? cloneFileStateCache(parent.toolUseContext.readFileState)
+        : undefined),
+    canUseTool: options.canUseTool,
   });
 }
 

@@ -108,6 +108,43 @@ test("Agent tool fork mode inherits parent messages and read cache", async () =>
   );
 });
 
+test("Agent tool fork mode inherits parent state projection context", async () => {
+  const harness = createHarness({
+    parentMessages: [
+      createMessage({
+        role: "user",
+        content: "parent message",
+      }),
+    ],
+    streams: [[textChunk("fork state complete")]],
+  });
+  harness.state.runtimeContextMessages.push(
+    createMessage({
+      role: "user",
+      content: "<runtime-context>fork-visible context</runtime-context>",
+    }, { source: "runtime" }),
+  );
+  const agent = findAgentTool(harness.runtime);
+
+  const output = await agent.call(
+    {
+      prompt: "inspect inherited state",
+      description: "fork state",
+      execution_mode: "fork",
+    },
+    harness.runtime.toolUseContext,
+    harness.runtime,
+    harness.state,
+  );
+
+  assert.equal(output.status, "completed");
+  assert.equal(output.mode, "fork");
+  assert.match(
+    JSON.stringify(harness.streamRequests[0]?.messages),
+    /fork-visible context/,
+  );
+});
+
 test("Agent tool async mode registers task lifecycle and notification", async () => {
   const { runtime, state } = createHarness({
     streams: [[textChunk("async result")]],

@@ -215,15 +215,15 @@ function renderSessionMemorySummary(sessionMemory: string): string {
   return lines.join("\n");
 }
 
-function findSummaryByThroughMessageId(
+function findSummaryIndexByThroughMessageId(
   autoCompress: AutoCompressState,
   throughMessageId: MessageId | undefined,
-): AutoCompressSummary | undefined {
+): number {
   if (!throughMessageId) {
-    return undefined;
+    return -1;
   }
 
-  return autoCompress.summaries.find(
+  return autoCompress.summaries.findIndex(
     (summary) => summary.throughMessageId === throughMessageId,
   );
 }
@@ -232,17 +232,21 @@ function activateAutoCompressSummary(
   autoCompress: AutoCompressState,
   summary: AutoCompressSummary,
 ): AutoCompressCompressedResult {
-  const existing = findSummaryByThroughMessageId(
+  const existingIndex = findSummaryIndexByThroughMessageId(
     autoCompress,
     summary.throughMessageId,
   );
-  if (existing) {
-    autoCompress.activeSummaryId = existing.id;
+  if (existingIndex !== -1) {
+    const [existing] = autoCompress.summaries.splice(existingIndex, 1);
+    if (!existing) {
+      throw new Error("Auto-compress summary index disappeared during activation.");
+    }
+
+    autoCompress.summaries.push(existing);
     return { status: "compressed", summary: existing };
   }
 
   autoCompress.summaries.push(summary);
-  autoCompress.activeSummaryId = summary.id;
   return { status: "compressed", summary };
 }
 
@@ -253,13 +257,7 @@ function createAutoCompressSummaryId(): AutoCompressSummaryId {
 function getActiveAutoCompressSummary(
   state: State,
 ): AutoCompressSummary | undefined {
-  const autoCompress = state.autoCompress;
-  const activeSummaryId = autoCompress?.activeSummaryId;
-  if (!activeSummaryId) {
-    return undefined;
-  }
-
-  return autoCompress.summaries.find((summary) => summary.id === activeSummaryId);
+  return state.autoCompress?.summaries.at(-1);
 }
 
 function createAutoCompressSummaryMessage(

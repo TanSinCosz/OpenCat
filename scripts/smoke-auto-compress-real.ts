@@ -117,7 +117,7 @@ console.log(
       sessionMemoryLength: state.sessionMemory.content.length,
       sessionMemoryFailureReason: state.sessionMemory.lastFailureReason,
       autoCompressSummaryCount: state.autoCompress.summaries.length,
-      activeSummaryId: state.autoCompress.activeSummaryId,
+      activeSummaryId: state.autoCompress.summaries.at(-1)?.id,
       triggerTokens: process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS,
     },
     null,

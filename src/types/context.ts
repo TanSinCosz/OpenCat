@@ -14,12 +14,10 @@ export interface AutoCompressSummary {
 export interface AutoCompressState {
   summaries: AutoCompressSummary[];
   sessionMemoryUpdated: boolean;
-  activeSummaryId?: AutoCompressSummaryId;
   readFileStateRestoredForSummaryId?: AutoCompressSummaryId;
 }
 
 export interface ContextProjectionState {
-  activeSummaryId?: AutoCompressSummaryId;
   recentMessageCount?: number;
 }
 

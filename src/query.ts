@@ -125,7 +125,7 @@ async function prepareMessagesForQuery(
 ): Promise<MessagesForQuery> {
   if (options.messagesForQueryBuilder) {
     let messagesForQuery = await options.messagesForQueryBuilder(runtime, state);
-    if (shouldApplyAutoCompression(messagesForQuery)) {
+    if (shouldApplyAutoCompression(runtime, messagesForQuery)) {
       const result = await applyAutoCompression(runtime, state);
       if (result.status === "compressed") {
         await recordTranscriptStateSnapshot(runtime, state, "auto_compress");
@@ -145,7 +145,7 @@ async function prepareMessagesForQuery(
     includeRuntimeContext: false,
   });
 
-  if (shouldApplyAutoCompression(projectedMessages)) {
+  if (shouldApplyAutoCompression(runtime, projectedMessages)) {
     const result = await applyAutoCompression(runtime, state);
     if (result.status === "compressed") {
       await recordTranscriptStateSnapshot(runtime, state, "auto_compress");
@@ -161,9 +161,17 @@ async function prepareMessagesForQuery(
   });
 }
 
-function shouldApplyAutoCompression(messagesForQuery: MessagesForQuery): boolean {
-  return estimateMessagesForQueryTokens(messagesForQuery) >=
+function shouldApplyAutoCompression(
+  runtime: Runtime,
+  messagesForQuery: MessagesForQuery,
+): boolean {
+  return canRuntimeAutoCompress(runtime) &&
+    estimateMessagesForQueryTokens(messagesForQuery) >=
     getAutoCompressTriggerTokens();
+}
+
+function canRuntimeAutoCompress(runtime: Runtime): boolean {
+  return runtime.agentRole !== "session" && runtime.agentType !== "session_memory";
 }
 
 function estimateMessagesForQueryTokens(messagesForQuery: MessagesForQuery): number {

@@ -138,6 +138,41 @@ test("subagent transcript store uses the concrete agent id", async () => {
   assert.equal(entry.agentType, "worker");
 });
 
+test("session transcript store uses the session-agent role", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-session-agent-transcript-")),
+    sessionId: "session_with_session_agents",
+    agentId: "agent_session_memory_1",
+    agentRole: "session",
+    parentAgentId: "main",
+    agentType: "session_memory",
+    deepSeekRuntimeConfig: createRuntimeConfig(),
+    deepSeekClient: createNoopClient(),
+    MemoryConfig: createMemoryConfig(),
+  });
+  const message = createMessage({
+    role: "user",
+    content: "session memory prompt",
+  });
+
+  await recordTranscriptMessage(runtime, message);
+
+  assert.match(runtime.transcriptStore!.path, /session_with_session_agents/);
+  assert.match(runtime.transcriptStore!.path, /session-agents/);
+  assert.match(
+    runtime.transcriptStore!.path,
+    /agent-agent_session_memory_1\.jsonl$/,
+  );
+
+  const raw = await readFile(runtime.transcriptStore!.path, "utf8");
+  const entry = JSON.parse(raw.trim());
+
+  assert.equal(entry.agentId, "agent_session_memory_1");
+  assert.equal(entry.agentRole, "session");
+  assert.equal(entry.parentAgentId, "main");
+  assert.equal(entry.agentType, "session_memory");
+});
+
 test("transcript restore hydrates only post auto-compress messages by default", async () => {
   const runtime = createRuntime({
     cwd: await mkdtemp(join(tmpdir(), "opencat-compact-transcript-")),
@@ -162,7 +197,6 @@ test("transcript restore hydrates only post auto-compress messages by default", 
           createdAt: 1,
         },
       ],
-      activeSummaryId: "autocompress_test_summary",
       sessionMemoryUpdated: true,
     },
   });
@@ -180,7 +214,7 @@ test("transcript restore hydrates only post auto-compress messages by default", 
   assert.ok(restored);
   assert.equal(restored.Messages.length, 1);
   assert.equal(restored.Messages[0]?.id, third.id);
-  assert.equal(restored.autoCompress.activeSummaryId, "autocompress_test_summary");
+  assert.equal(restored.autoCompress.summaries.at(-1)?.id, "autocompress_test_summary");
 
   const projected = projectMessagesWithAutoCompress(restored);
   assert.equal(projected.length, 2);

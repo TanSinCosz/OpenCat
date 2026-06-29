@@ -323,14 +323,7 @@ function getDefaultHydratedMessageSource(message: Message): MessageSource {
 function getActiveAutoCompressThroughMessageId(
   snapshot: PersistedStateSnapshot | undefined,
 ): MessageId | undefined {
-  const autoCompress = snapshot?.autoCompress;
-  const activeSummaryId = autoCompress?.activeSummaryId;
-  if (!activeSummaryId) {
-    return undefined;
-  }
-
-  return autoCompress.summaries.find((summary) => summary.id === activeSummaryId)
-    ?.throughMessageId;
+  return snapshot?.autoCompress?.summaries.at(-1)?.throughMessageId;
 }
 
 function parseTranscriptEntry(line: string): TranscriptEntry | null {
@@ -372,6 +365,15 @@ function getTranscriptPath(
   const safeSessionId = sanitizeSessionId(options.sessionId);
   if (options.agentRole === "main") {
     return join(directory, `${safeSessionId}.jsonl`);
+  }
+
+  if (options.agentRole === "session") {
+    return join(
+      directory,
+      safeSessionId,
+      "session-agents",
+      `agent-${sanitizeSessionId(options.agentId)}.jsonl`,
+    );
   }
 
   return join(

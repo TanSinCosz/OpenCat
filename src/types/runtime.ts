@@ -17,6 +17,7 @@ import {
   createToolUseContext,
   type AgentDefinitionsResult,
   type AppState,
+  type CanUseToolFn,
   type FileStateCache,
   type ThinkingConfig,
   type Tools,
@@ -34,7 +35,7 @@ import type { Message } from "./messages.js";
 export type MainAgentId = "main";
 export type SubAgentId = `agent_${string}`;
 export type RuntimeAgentId = MainAgentId | SubAgentId;
-export type RuntimeAgentRole = "main" | "subagent";
+export type RuntimeAgentRole = "main" | "subagent" | "session";
 
 export interface Runtime {
   // Runtime identity.
@@ -91,6 +92,7 @@ export interface CreateRuntimeOptions {
   thinkingConfig?: ThinkingConfig;
   appState?: AppState;
   readFileState?: FileStateCache;
+  canUseTool?: CanUseToolFn;
 }
 
 export function createRuntime(options: CreateRuntimeOptions): Runtime {
@@ -151,6 +153,7 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
       agentDefinitions,
       thinkingConfig: options.thinkingConfig,
       readFileState: options.readFileState,
+      canUseTool: options.canUseTool,
     }),
   };
 }

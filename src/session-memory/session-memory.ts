@@ -1,4 +1,8 @@
-import type { DeepSeekCreateRequest } from "../deepseek/types.js";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, normalize } from "node:path";
+import { FileStateCache } from "../Tools/types.js";
+import type { CanUseToolFn } from "../Tools/types.js";
+import type { AgentDefinition } from "../Tools/Agent/definitions.js";
 import type { Message } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import {
@@ -9,10 +13,10 @@ import type { State } from "../types/state.js";
 import {
   buildSessionMemoryUpdatePrompt,
   DEFAULT_SESSION_MEMORY_TEMPLATE,
-  SESSION_MEMORY_SYSTEM_PROMPT,
 } from "./prompts.js";
 import { savePersistedSessionMemory } from "./persistence.js";
 import { recordTranscriptStateSnapshot } from "../transcript/persistence.js";
+import { getFileModificationTimeAsync } from "../Tools/utils/fileState.js";
 
 export type SessionMemoryUpdateResult =
   | { status: "updated"; content: string }
@@ -31,6 +35,10 @@ export async function updateSessionMemoryForAutoCompress(
   runtime: Runtime,
   state: State,
 ): Promise<SessionMemoryUpdateResult> {
+  if (runtime.agentRole !== "main") {
+    return { status: "skipped", reason: "session_memory_updates_main_only" };
+  }
+
   const sessionMemory = ensureSessionMemoryState(state);
 
   if (state.Messages.length === 0) {
@@ -44,34 +52,36 @@ export async function updateSessionMemoryForAutoCompress(
     state.Messages,
     sessionMemory.config.maxTranscriptChars,
   );
+  const notesPath = getSessionMemoryNotesPath(runtime);
+  const currentNotes = sessionMemory.content || DEFAULT_SESSION_MEMORY_TEMPLATE;
+  const readFileState = await prepareSessionMemoryNotesFile(
+    notesPath,
+    currentNotes,
+  );
   const prompt = buildSessionMemoryUpdatePrompt({
-    currentNotes: sessionMemory.content || DEFAULT_SESSION_MEMORY_TEMPLATE,
+    currentNotes,
+    notesPath,
     transcript,
   });
   let content: string | undefined;
 
   try {
-    const response = await runtime.deepSeekClient.create({
-      model: runtime.deepSeekRuntimeConfig.model as DeepSeekCreateRequest["model"],
-      messages: [
-        {
-          role: "system",
-          content: SESSION_MEMORY_SYSTEM_PROMPT,
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      max_tokens: runtime.deepSeekRuntimeConfig.maxTokens,
-      reasoning_effort:
-        runtime.deepSeekRuntimeConfig.reasoningEffort === "high" ||
-        runtime.deepSeekRuntimeConfig.reasoningEffort === "max"
-          ? runtime.deepSeekRuntimeConfig.reasoningEffort
-          : undefined,
-      temperature: 0,
+    const { runAgentTask } = await import("../Tools/Agent/runner.js");
+    await runAgentTask({
+      parentRuntime: runtime,
+      parentState: state,
+      agentDefinition: createSessionMemoryAgentDefinition(),
+      prompt,
+      description: "Update session memory notes",
+      mode: "fork",
+      isolation: "none",
+      maxTurns: 4,
+      recordTaskLifecycle: false,
+      agentRole: "session",
+      readFileState,
+      canUseTool: createSessionMemoryCanUseTool(notesPath),
     });
-    content = response.choices[0]?.message.content?.trim();
+    content = (await readFile(notesPath, "utf8")).trim();
   } catch (error) {
     sessionMemory.status = "failed";
     sessionMemory.lastFailedAt = Date.now();
@@ -108,6 +118,75 @@ export async function updateSessionMemoryForAutoCompress(
   await recordTranscriptStateSnapshot(runtime, state, "session_memory");
 
   return { status: "updated", content };
+}
+
+function createSessionMemoryAgentDefinition(): AgentDefinition {
+  return {
+    agentType: "session_memory",
+    category: "worker",
+    source: "built-in",
+    whenToUse: "Internal agent used to update rolling session memory notes.",
+    tools: ["Edit"],
+    disallowedTools: ["Agent", "Bash", "Write", "Read", "MemorySave", "SendMessage"],
+    model: "inherit",
+    permissionMode: "default",
+    maxTurns: 4,
+    getSystemPrompt: () =>
+      [
+        "You are a forked session-memory agent.",
+        "Update only the existing session memory notes file.",
+        "Use the Edit tool and stop after the edit is complete.",
+        "Do not answer the user and do not modify project files.",
+      ].join("\n"),
+  };
+}
+
+function createSessionMemoryCanUseTool(notesPath: string): CanUseToolFn {
+  const normalizedNotesPath = normalize(notesPath);
+
+  return (tool, input) => {
+    if (
+      tool.name === "Edit" &&
+      typeof input === "object" &&
+      input !== null &&
+      "file_path" in input &&
+      typeof input.file_path === "string" &&
+      normalize(input.file_path) === normalizedNotesPath
+    ) {
+      return { behavior: "allow" };
+    }
+
+    return {
+      behavior: "deny",
+      message: `Session memory agent may only use Edit on ${notesPath}.`,
+    };
+  };
+}
+
+async function prepareSessionMemoryNotesFile(
+  notesPath: string,
+  content: string,
+): Promise<FileStateCache> {
+  await mkdir(dirname(notesPath), { recursive: true });
+  await writeFile(notesPath, `${content.trim()}\n`, "utf8");
+  const timestamp = await getFileModificationTimeAsync(notesPath);
+  const readFileState = new FileStateCache(4, 1024 * 1024);
+  readFileState.set(notesPath, {
+    content: `${content.trim()}\n`,
+    timestamp,
+    offset: undefined,
+    limit: undefined,
+  });
+  return readFileState;
+}
+
+function getSessionMemoryNotesPath(runtime: Runtime): string {
+  return join(
+    runtime.cwd,
+    ".opencat",
+    "session-memory",
+    `${runtime.sessionId}.md`,
+  );
 }
 
 /**
