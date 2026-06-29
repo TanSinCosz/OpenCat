@@ -6,8 +6,12 @@ import {
 import {
   loadPersistedSessionMemory,
 } from "../session-memory/persistence.js";
-import { updateSessionMemoryForAutoCompress } from "../session-memory/session-memory.js";
+import {
+  formatMessagesForSessionMemory,
+  updateSessionMemoryForAutoCompress,
+} from "../session-memory/session-memory.js";
 import { restoreReadFileStateAfterAutoCompress } from "./read-file-restore.js";
+import type { DeepSeekCreateRequest } from "../deepseek/types.js";
 import type {
   AutoCompressState,
   AutoCompressSummary,
@@ -26,6 +30,7 @@ const TARGET_RECENT_TAIL_TOKENS = 30_000;
 const MAX_RECENT_TAIL_TOKENS = 40_000;
 const MIN_RECENT_TEXT_MESSAGES = 5;
 const MIN_RECENT_API_MESSAGES = 12;
+const LOCAL_COMPACT_MAX_TRANSCRIPT_CHARS = 120_000;
 
 export type AutoCompressResult =
   | AutoCompressCompressedResult
@@ -44,6 +49,21 @@ type AutoCompressCompressedResult = {
  * AutoCompressSummary that a later projection pass can render into the request.
  */
 export async function applyAutoCompression(
+  runtime: Runtime,
+  state: State,
+): Promise<AutoCompressResult> {
+  if (runtime.agentRole === "session") {
+    return { status: "skipped", reason: "session_runtime" };
+  }
+
+  if (runtime.agentRole !== "main") {
+    return applySubagentLocalCompression(runtime, state);
+  }
+
+  return applyMainSessionMemoryCompression(runtime, state);
+}
+
+async function applyMainSessionMemoryCompression(
   runtime: Runtime,
   state: State,
 ): Promise<AutoCompressResult> {
@@ -88,6 +108,43 @@ export async function applyAutoCompression(
   }
 
   const result = activateAutoCompressSummary(autoCompress, summary);
+  await restoreReadFileStateAfterAutoCompress(
+    runtime,
+    state,
+    result.summary.id,
+    projectMessagesWithAutoCompress(state),
+  );
+  return result;
+}
+
+async function applySubagentLocalCompression(
+  runtime: Runtime,
+  state: State,
+): Promise<AutoCompressResult> {
+  ensureAutoCompressState(state);
+  const existingSummary = getActiveAutoCompressSummary(state);
+
+  if (existingSummary && isSummaryCurrentForLatestMessage(existingSummary, state)) {
+    return activateAndRestoreAutoCompressSummary(runtime, state, existingSummary);
+  }
+
+  const summary = await createLocalAutoCompressSummary(runtime, state);
+  if (!summary) {
+    return { status: "skipped", reason: "local_compact_not_usable" };
+  }
+
+  return activateAndRestoreAutoCompressSummary(runtime, state, summary);
+}
+
+async function activateAndRestoreAutoCompressSummary(
+  runtime: Runtime,
+  state: State,
+  summary: AutoCompressSummary,
+): Promise<AutoCompressCompressedResult> {
+  const result = activateAutoCompressSummary(
+    ensureAutoCompressState(state),
+    summary,
+  );
   await restoreReadFileStateAfterAutoCompress(
     runtime,
     state,
@@ -170,6 +227,121 @@ function createSessionMemoryAutoCompressSummary(
     messageCount: throughIndex + 1,
     createdAt: Date.now(),
   };
+}
+
+async function createLocalAutoCompressSummary(
+  runtime: Runtime,
+  state: State,
+): Promise<AutoCompressSummary | null> {
+  if (state.Messages.length < 2) {
+    return null;
+  }
+
+  const tailStart = calculateRecentTailStartFromEnd(state.Messages);
+  if (tailStart <= 0 || tailStart >= state.Messages.length) {
+    return null;
+  }
+
+  const throughIndex = tailStart - 1;
+  const compactedMessages = state.Messages.slice(0, tailStart);
+  const content = await summarizeLocalCompactMessages(runtime, compactedMessages);
+  if (!content) {
+    return null;
+  }
+
+  return {
+    id: createAutoCompressSummaryId(),
+    content: renderLocalCompactSummary(content),
+    fromMessageId: state.Messages[0]?.id,
+    throughMessageId: state.Messages[throughIndex]?.id,
+    messageCount: compactedMessages.length,
+    createdAt: Date.now(),
+  };
+}
+
+async function summarizeLocalCompactMessages(
+  runtime: Runtime,
+  messages: Message[],
+): Promise<string | null> {
+  const transcript = formatMessagesForSessionMemory(
+    messages,
+    LOCAL_COMPACT_MAX_TRANSCRIPT_CHARS,
+  );
+  const response = await runtime.deepSeekClient.create({
+    model: runtime.deepSeekRuntimeConfig.model as DeepSeekCreateRequest["model"],
+    messages: [
+      {
+        role: "system",
+        content: LOCAL_COMPACT_SYSTEM_PROMPT,
+      },
+      {
+        role: "user",
+        content: buildLocalCompactPrompt(transcript),
+      },
+    ],
+    max_tokens: runtime.deepSeekRuntimeConfig.maxTokens,
+    reasoning_effort:
+      runtime.deepSeekRuntimeConfig.reasoningEffort === "high" ||
+      runtime.deepSeekRuntimeConfig.reasoningEffort === "max"
+        ? runtime.deepSeekRuntimeConfig.reasoningEffort
+        : undefined,
+    temperature: 0,
+    tool_choice: "none",
+  });
+
+  return response.choices[0]?.message.content?.trim() || null;
+}
+
+const LOCAL_COMPACT_SYSTEM_PROMPT = [
+  "You compact older context for a forked subagent.",
+  "Return only a concise but complete continuation summary.",
+  "Do not invent details. Preserve exact file paths, commands, decisions, errors, and pending next steps when they matter.",
+].join(" ");
+
+function buildLocalCompactPrompt(transcript: string): string {
+  return `IMPORTANT: This is an internal context compaction request for a forked subagent. The recent conversation tail will be preserved verbatim after your summary, so summarize only the older transcript below.
+
+<older_conversation_transcript>
+${transcript}
+</older_conversation_transcript>
+
+Return a compact markdown summary with exactly these sections:
+
+# Objective
+_Original user goal and the subagent's assigned directive._
+
+# Current State
+_What has been completed, what is in progress, and what should happen next._
+
+# Files and Functions
+_Important files, symbols, paths, and why they matter._
+
+# Tool Results
+_Important tool outputs, persisted result references, errors, and corrections._
+
+# Decisions and Constraints
+_Design decisions, user corrections, constraints, and things to avoid._
+
+# Next Steps
+_Concrete next actions for the forked subagent._
+
+Rules:
+- Keep the summary dense and factual.
+- Include enough detail for the subagent to continue without the older raw messages.
+- Do not mention these compaction instructions.
+- Do not wrap the answer in code fences.`;
+}
+
+function renderLocalCompactSummary(summary: string): string {
+  return [
+    "This forked subagent conversation has been compacted. The summary below covers the older portion of the subagent context.",
+    "",
+    "<local_compact_summary>",
+    summary.trim(),
+    "</local_compact_summary>",
+    "",
+    "Recent messages after this summary are preserved verbatim.",
+  ].join("\n");
 }
 
 function resetSessionMemoryUpdateFlagIfSummaryHasTail(
@@ -284,6 +456,30 @@ function calculateRecentTailStart(
 ): number {
   let start = Math.min(throughIndex + 1, messages.length);
   const stats = calculateRecentTailStats(messages, start);
+
+  while (start > 0) {
+    if (isRecentTailLargeEnough(stats)) {
+      break;
+    }
+
+    if (stats.tokens >= MAX_RECENT_TAIL_TOKENS) {
+      break;
+    }
+
+    start--;
+    addMessageToRecentTailStats(stats, messages[start]!);
+  }
+
+  return moveToSafeRecentTailBoundary(messages, start);
+}
+
+function calculateRecentTailStartFromEnd(messages: Message[]): number {
+  let start = messages.length;
+  const stats: RecentTailStats = {
+    tokens: 0,
+    apiMessages: 0,
+    textMessages: 0,
+  };
 
   while (start > 0) {
     if (isRecentTailLargeEnough(stats)) {

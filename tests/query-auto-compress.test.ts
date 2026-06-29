@@ -236,6 +236,96 @@ test("session runtime does not trigger nested auto-compression", async () => {
   assert.notEqual(state.sessionMemory.status, "ready");
 });
 
+test("subagent auto-compresses with a local compact summary", async () => {
+  const createRequests: DeepSeekCreateRequest[] = [];
+  const streamRequests: DeepSeekStreamRequest[] = [];
+  const client: DeepSeekClient = {
+    async create(input) {
+      createRequests.push(input);
+      return {
+        id: "local-compact-response",
+        object: "chat.completion",
+        created: 0,
+        model: "deepseek-v4-flash",
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: [
+                "# Objective",
+                "Continue a forked subagent task after compacting older context.",
+                "",
+                "# Current State",
+                "The older subagent transcript was locally summarized.",
+              ].join("\n"),
+            },
+          },
+        ],
+      };
+    },
+    async *stream(input) {
+      streamRequests.push(input);
+      yield createAssistantChunk("subagent continued");
+      yield {
+        chunk: null,
+        raw: "[DONE]",
+        done: true,
+      };
+    },
+    async collectStream() {
+      throw new Error("collectStream is not used in this test");
+    },
+  };
+  const state = createState({
+    messages: createLargeConversation(),
+  });
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-subagent-local-compact-")),
+    sessionId: "session_subagent_local_compact",
+    agentId: "agent_worker_local_compact",
+    parentAgentId: "main",
+    agentRole: "subagent",
+    agentType: "worker",
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    deepSeekClient: client,
+    MemoryConfig: createMemoryConfig(),
+    messages: state.Messages,
+  });
+
+  for await (const _event of query(runtime, state, { maxTurns: 1 })) {
+    // Drain the query stream.
+  }
+
+  assert.equal(createRequests.length, 1);
+  assert.equal(streamRequests.length, 1);
+  assert.equal(state.autoCompress.summaries.length, 1);
+  assert.notEqual(state.sessionMemory.status, "ready");
+
+  const summary = state.autoCompress.summaries.at(-1);
+  assert.ok(summary);
+  assert.match(summary.content, /<local_compact_summary>/);
+  assert.doesNotMatch(summary.content, /<session_memory>/);
+
+  const requestMessages = streamRequests[0]!.messages;
+  const summaryMessage = requestMessages.find(
+    (message) =>
+      message.role === "user" &&
+      message.content.includes("<local_compact_summary>"),
+  );
+  assert.ok(summaryMessage);
+  assert.ok(requestMessages.length < state.Messages.length);
+
+  const compactPrompt = JSON.stringify(createRequests[0]!.messages);
+  assert.match(compactPrompt, /older_conversation_transcript/);
+  assert.doesNotMatch(compactPrompt, /session notes file/);
+});
+
 function createLargeConversation() {
   return Array.from({ length: 220 }, (_, index) =>
     createMessage({

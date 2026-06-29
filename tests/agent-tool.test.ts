@@ -21,6 +21,8 @@ import type {
   DeepSeekStreamEnvelope,
   DeepSeekStreamRequest,
 } from "../src/deepseek/types.js";
+import { buildMessagesForQuery } from "../src/query/messages.js";
+import { createStreamRequest } from "../src/query/request.js";
 import { createMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
@@ -142,6 +144,58 @@ test("Agent tool fork mode inherits parent state projection context", async () =
   assert.match(
     JSON.stringify(harness.streamRequests[0]?.messages),
     /fork-visible context/,
+  );
+});
+
+test("Agent tool fork request preserves parent prompt prefix for cache reuse", async () => {
+  const harness = createHarness({
+    parentMessages: [
+      createMessage({
+        role: "user",
+        content: "stable parent context for cache prefix",
+      }),
+      createMessage({
+        role: "assistant",
+        content: "stable assistant context for cache prefix",
+      }),
+      createMessage({
+        role: "user",
+        content: "latest parent instruction before fork",
+      }),
+    ],
+    streams: [[textChunk("fork cache complete")]],
+  });
+  const parentMessagesForQuery = await buildMessagesForQuery(
+    harness.runtime,
+    harness.state,
+  );
+  const parentRequest = await createStreamRequest(
+    harness.runtime,
+    parentMessagesForQuery.messages,
+  );
+  const agent = findAgentTool(harness.runtime);
+
+  await agent.call(
+    {
+      prompt: "continue from inherited context",
+      description: "fork cache prefix",
+      execution_mode: "fork",
+    },
+    harness.runtime.toolUseContext,
+    harness.runtime,
+    harness.state,
+  );
+
+  const childRequest = harness.streamRequests[0];
+  assert.ok(childRequest);
+  assert.deepEqual(childRequest.tools, parentRequest.tools);
+  assert.deepEqual(
+    childRequest.messages.slice(0, parentRequest.messages.length),
+    parentRequest.messages,
+  );
+  assert.match(
+    childRequest.messages[parentRequest.messages.length]?.content ?? "",
+    /<fork_worker>/,
   );
 });
 
