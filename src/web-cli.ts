@@ -71,6 +71,7 @@ async function createWebCliSession(
     MemoryConfig: createMemoryConfig({ cwd: process.cwd() }),
     longTermMemoryConfig: {
       autoInject: true,
+      autoExtract: true,
     },
     tools,
     mcpConnections,

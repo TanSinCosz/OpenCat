@@ -75,11 +75,6 @@ export function createMemoryConfig(
           (process.env.DEEPSEEK_API_KEY ? "deepseek-chat" : "gpt-5-mini"),
       },
     },
-    historyDbPath: resolveConfigPath(
-      cwd,
-      envFirst("OPENCAT_MEMORY_HISTORY_DB_PATH"),
-      ".opencat/memory/history.db",
-    ),
   };
 }
 

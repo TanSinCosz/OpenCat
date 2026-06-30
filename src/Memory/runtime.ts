@@ -11,6 +11,7 @@ export type LongTermMemoryScope = "user" | "agent" | "run";
 export interface LongTermMemoryRuntimeConfig {
   enabled: boolean;
   autoInject: boolean;
+  autoExtract: boolean;
   autoInjectTopK: number;
   searchThreshold: number;
   maxInjectedChars: number;
@@ -35,6 +36,7 @@ export function createLongTermMemoryRuntimeConfig(
   return {
     enabled: options?.enabled ?? true,
     autoInject: options?.autoInject ?? false,
+    autoExtract: options?.autoExtract ?? false,
     autoInjectTopK: options?.autoInjectTopK ?? 6,
     searchThreshold: options?.searchThreshold ?? 0.1,
     maxInjectedChars: options?.maxInjectedChars ?? 8_000,

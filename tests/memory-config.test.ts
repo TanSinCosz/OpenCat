@@ -19,7 +19,6 @@ const MEMORY_ENV_KEYS = [
   "OPENCAT_MEMORY_VECTOR_DB_PATH",
   "OPENCAT_MEMORY_VECTOR_DIMENSION",
   "OPENCAT_MEMORY_VECTOR_DIMS",
-  "OPENCAT_MEMORY_HISTORY_DB_PATH",
   "OPENCAT_MEMORY_LLM_API_KEY",
   "OPENCAT_LLM_API_KEY",
   "OPENCAT_MEMORY_LLM_BASE_URL",
@@ -40,10 +39,6 @@ test("createMemoryConfig uses project-local memory databases by default", () => 
     assert.equal(
       config.vectorStore.config.dbPath,
       path.resolve("C:/repo", ".opencat/memory/vector_store.db"),
-    );
-    assert.equal(
-      config.historyDbPath,
-      path.resolve("C:/repo", ".opencat/memory/history.db"),
     );
   });
 });

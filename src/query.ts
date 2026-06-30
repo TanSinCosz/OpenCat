@@ -7,6 +7,7 @@ import { streamAssistantWithReasoningContinuation } from "./query/reasoning-cont
 import { buildMessagesForQuery } from "./query/messages.js";
 import { createStreamRequest } from "./query/request.js";
 import type { MessagesForQuery, QueryEvent, QueryOptions } from "./query/types.js";
+import { extractLongTermMemoryForCompletedQuery } from "./query/long-term-memory.js";
 import {
   clearRuntimeContextAfterModelRequest,
   loadRuntimeContextForQuery,
@@ -51,6 +52,8 @@ export async function* _query(
   options: QueryOptions = {},
 ): AsyncGenerator<QueryEvent, void, void> {
   const maxTurns = options.maxTurns ?? 100;
+  const turnStartMessageId = state.Messages.at(-1)?.id;
+  const turnStartedAt = Date.now();
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     const messagesForQuery = await prepareMessagesForQuery(
@@ -82,6 +85,10 @@ export async function* _query(
     const toolCalls = assistantMessage.tool_calls ?? [];
     if (toolCalls.length === 0) {
       yield { type: "turn_end", turn, hasToolUse: false };
+      await extractLongTermMemoryForCompletedQuery(runtime, state, {
+        turnStartMessageId,
+        turnStartedAt,
+      });
       yield { type: "done", reason: "completed" };
       return;
     }

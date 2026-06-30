@@ -65,7 +65,7 @@ export class MemorySave
         source: "MemorySave",
         ...(input.reason ? { reason: input.reason } : {}),
       },
-      infer: false,
+      infer: true,
       userId: filters.user_id,
       agentId: filters.agent_id,
       runId: filters.run_id,

@@ -4,8 +4,6 @@ import { OpenAIEmbedder } from "./Embedding/Embedding.js";
 import { MemoryConfig, AddMemoryOptions, SearchResult, SearchFilters, MemoryItem } from "./type.js";
 import { VectorStore } from "./VectorStore/base.js";
 import { MemoryVectorStore } from "./VectorStore/VectorStore.js";
-import { HistoryManager } from "./HistoryStore/base.js";
-import { SQLiteManager } from "./HistoryStore/HistoryStore.js";
 import { Message } from "./type.js";
 import { v4 as uuidv4 } from "uuid";
 import { createHash } from "crypto";
@@ -39,7 +37,6 @@ export class MemoryTool {
     private embedder: OpenAIEmbedder;
     private llm: OpenAIStructuredLLM;
     private vectorStore!: VectorStore;
-    private db: HistoryManager;
     telemetryId: string
     private _entityStore?: VectorStore;
     private customInstructions: string | undefined;
@@ -47,19 +44,11 @@ export class MemoryTool {
     constructor(config: MemoryConfig) {
         this.config = config;
         this.embedder = new OpenAIEmbedder(config.embedder.config);
-        this.db = new SQLiteManager(config.historyDbPath || ":memory:")
 
         this.llm = new OpenAIStructuredLLM(config.llm.config)
         this.vectorStore = new MemoryVectorStore(this.config.vectorStore.config);
+        this.customInstructions = config.customInstructions;
         this.telemetryId = "anonymous";
-    }
-    private buildSessionScope(filters: SearchFilters): string {
-        const parts: string[] = [];
-        for (const key of ["agent_id", "run_id", "user_id"].sort()) {
-            const val = (filters as any)[key];
-            if (val) parts.push(`${key}=${val}`);
-        }
-        return parts.join("&");
     }
 
     async search(
@@ -304,7 +293,15 @@ export class MemoryTool {
             );
         }
 
-        const { metadata = {}, filters = {}, infer = true } = config;
+        const {
+            metadata = {},
+            filters = {},
+            infer = true,
+            contextMessages = [],
+            observationDate,
+            currentDate,
+            customInstructions,
+        } = config;
 
         // Validate and trim entity IDs
         const userId = validateAndTrimEntityId(config.userId, "userId");
@@ -334,6 +331,12 @@ export class MemoryTool {
             metadata,
             filters,
             infer,
+            {
+                contextMessages,
+                observationDate,
+                currentDate,
+                customInstructions,
+            },
         );
 
         return {
@@ -358,13 +361,6 @@ export class MemoryTool {
         };
 
         await this.vectorStore.insert([embedding], [memoryId], [memoryMetadata]);
-        await this.db.addHistory(
-            memoryId,
-            null,
-            data,
-            "ADD",
-            memoryMetadata.createdAt,
-        );
 
         return memoryId;
     }
@@ -375,6 +371,12 @@ export class MemoryTool {
         metadata: Record<string, any>,
         filters: SearchFilters,
         infer: boolean,
+        extractionContext: {
+            contextMessages?: Message[];
+            observationDate?: string;
+            currentDate?: string;
+            customInstructions?: string;
+        } = {},
     ): Promise<MemoryItem[]> {
         if (!infer) {
             const returnedMemories: MemoryItem[] = [];
@@ -399,20 +401,11 @@ export class MemoryTool {
         // === V3 PHASED BATCH PIPELINE ===
 
         // Phase 0: Context gathering
-        const sessionScope = this.buildSessionScope(filters);
-        let lastMessages: Array<{
-            role: string;
-            content: string;
-            name?: string;
-        }> = [];
-        if (typeof this.db.getLastMessages === "function") {
-            try {
-                lastMessages = await this.db.getLastMessages(sessionScope, 10);
-            } catch {
-                // getLastMessages not supported — proceed without context
-            }
-        }
-        const parsedMessages = messages.map((m) => m.content).join("\n");
+        // Chat-history context is supplied by the caller from transcript state.
+        const lastMessages = normalizeMessagesForExtraction(
+            extractionContext.contextMessages ?? [],
+        ).slice(-20);
+        const parsedMessages = serializeMessagesForExtraction(messages);
 
         // Phase 1: Existing memory retrieval
         const queryEmbedding = await this.embedder.embed(parsedMessages);
@@ -445,7 +438,10 @@ export class MemoryTool {
             existingMemories,
             newMessages: parsedMessages,
             lastKMessages: lastMessages,
-            customInstructions: this.customInstructions,
+            customInstructions:
+                extractionContext.customInstructions ?? this.customInstructions,
+            observationDate: extractionContext.observationDate,
+            currentDate: extractionContext.currentDate,
         });
 
         let response: string;
@@ -488,18 +484,6 @@ export class MemoryTool {
         }
 
         if (extractedMemories.length === 0) {
-            // Save messages even if nothing extracted
-            if (typeof this.db.saveMessages === "function") {
-                try {
-                    await this.db.saveMessages(
-                        messages.map((m) => ({
-                            role: m.role,
-                            content: m.content as string,
-                        })),
-                        sessionScope,
-                    );
-                } catch { }
-            }
             return [];
         }
 
@@ -577,17 +561,6 @@ export class MemoryTool {
         }
 
         if (records.length === 0) {
-            if (typeof this.db.saveMessages === "function") {
-                try {
-                    await this.db.saveMessages(
-                        messages.map((m) => ({
-                            role: m.role,
-                            content: m.content as string,
-                        })),
-                        sessionScope,
-                    );
-                } catch { }
-            }
             return [];
         }
 
@@ -609,52 +582,6 @@ export class MemoryTool {
                     );
                 } catch (e) {
                     console.error(`Failed to insert memory ${allIds[i]}: ${e}`);
-                }
-            }
-        }
-
-        // Batch history
-        const historyRecords = records.map((r) => ({
-            memoryId: r.memoryId,
-            previousValue: null as string | null,
-            newValue: r.text as string | null,
-            action: "ADD",
-            createdAt: r.payload.createdAt as string | undefined,
-            updatedAt: undefined as string | undefined,
-            isDeleted: 0,
-        }));
-
-        if (typeof this.db.batchAddHistory === "function") {
-            try {
-                await this.db.batchAddHistory(historyRecords);
-            } catch {
-                // Fallback: add one by one
-                for (const hr of historyRecords) {
-                    try {
-                        await this.db.addHistory(
-                            hr.memoryId,
-                            null,
-                            hr.newValue,
-                            "ADD",
-                            hr.createdAt,
-                        );
-                    } catch (e) {
-                        console.error(`Failed to add history for ${hr.memoryId}: ${e}`);
-                    }
-                }
-            }
-        } else {
-            for (const hr of historyRecords) {
-                try {
-                    await this.db.addHistory(
-                        hr.memoryId,
-                        null,
-                        hr.newValue,
-                        "ADD",
-                        hr.createdAt,
-                    );
-                } catch (e) {
-                    console.error(`Failed to add history for ${hr.memoryId}: ${e}`);
                 }
             }
         }
@@ -784,19 +711,8 @@ export class MemoryTool {
             console.warn(`Batch entity linking failed: ${e}`);
         }
 
-        // Phase 8: Save messages + return
-        if (typeof this.db.saveMessages === "function") {
-            try {
-                await this.db.saveMessages(
-                    messages.map((m) => ({
-                        role: m.role,
-                        content: m.content as string,
-                    })),
-                    sessionScope,
-                );
-            } catch { }
-        }
-
+        // Phase 8: Return saved memories. Chat transcript persistence belongs
+        // to the host runtime, not this memory service.
         return records.map((r) => ({
             id: r.memoryId,
             memory: r.text,
@@ -986,6 +902,29 @@ function validateAndTrimEntityId(
     }
     return trimmed;
 
+}
+
+function serializeMessagesForExtraction(messages: Message[]): string {
+    return JSON.stringify(normalizeMessagesForExtraction(messages));
+}
+
+function normalizeMessagesForExtraction(
+    messages: Message[],
+): Array<{ role: string; content: string }> {
+    return messages
+        .map((message) => ({
+            role: String(message.role ?? "user"),
+            content: normalizeMessageContent(message.content),
+        }))
+        .filter((message) => message.content.trim().length > 0);
+}
+
+function normalizeMessageContent(content: Message["content"]): string {
+    if (typeof content === "string") {
+        return content;
+    }
+
+    return JSON.stringify(content);
 }
 
 /**

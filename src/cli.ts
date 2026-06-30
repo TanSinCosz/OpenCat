@@ -22,6 +22,7 @@ export async function runCli(args: string[]): Promise<void> {
     MemoryConfig: createMemoryConfig({ cwd: process.cwd() }),
     longTermMemoryConfig: {
       autoInject: true,
+      autoExtract: true,
     },
     tools,
     mcpConnections,

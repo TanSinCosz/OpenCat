@@ -36,16 +36,6 @@ export interface VectorStoreConfig {
   [key: string]: any;
 }
 
-export interface HistoryStoreConfig {
-  provider: string;
-  config: {
-    historyDbPath?: string;
-    supabaseUrl?: string;
-    supabaseKey?: string;
-    tableName?: string;
-  };
-}
-
 export interface LLMConfig {
   provider?: string;
   baseURL?: string;
@@ -79,9 +69,6 @@ export interface MemoryConfig {
     provider: string;
     config: LLMConfig;
   };
-  historyStore?: HistoryStoreConfig;
-  disableHistory?: boolean;
-  historyDbPath?: string;
   customInstructions?: string;
 }
 
@@ -147,14 +134,7 @@ export const MemoryConfigSchema = z.object({
       timeout: z.number().optional(),
     }),
   }),
-  historyDbPath: z.string().optional(),
   customInstructions: z.string().optional(),
-  historyStore: z.object({
-      provider: z.string(),
-      config: z.record(z.string(), z.any()),
-    })
-    .optional(),
-  disableHistory: z.boolean().optional(),
 });
 
 
@@ -169,6 +149,14 @@ export interface AddMemoryOptions extends Entity {
   metadata?: Record<string, any>;
   filters?: SearchFilters;
   infer?: boolean;
+  /**
+   * Explicit prior messages supplied by the host runtime for reference
+   * resolution. MemoryTool does not read chat history from its own database.
+   */
+  contextMessages?: Message[];
+  observationDate?: string;
+  currentDate?: string;
+  customInstructions?: string;
 }
 
 export interface SearchMemoryOptions {
@@ -184,4 +172,3 @@ export interface GetAllMemoryOptions {
 }
 
 export interface DeleteAllMemoryOptions extends Entity {}
-
