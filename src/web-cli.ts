@@ -164,6 +164,7 @@ const server = createServer(async (request, response) => {
         model: session.runtime.deepSeekRuntimeConfig.model,
         messageCount: session.state.Messages.length,
         tools: session.runtime.tools.map((tool) => tool.name),
+        usage: session.runtime.usage,
         busy: session.busy,
         restored: session.loadInfo.restored,
         hydrate: session.loadInfo.hydrate,
@@ -266,6 +267,18 @@ async function handleQuery(
   }
 
   session.busy = true;
+  const previousAbortController = session.runtime.toolUseContext.abortController;
+  const queryAbortController = new AbortController();
+  session.runtime.toolUseContext.abortController = queryAbortController;
+  let responseCompleted = false;
+  const abortQuery = () => {
+    if (!responseCompleted && !queryAbortController.signal.aborted) {
+      queryAbortController.abort(new Error("Web client disconnected."));
+    }
+  };
+  request.once("aborted", abortQuery);
+  response.once("close", abortQuery);
+
   response.writeHead(200, {
     "Content-Type": "application/x-ndjson; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -298,13 +311,21 @@ async function handleQuery(
       }
     }
   } catch (error) {
-    writeEvent(response, {
-      type: "error",
-      error: stringifyError(error),
-    });
+    if (!queryAbortController.signal.aborted) {
+      writeEvent(response, {
+        type: "error",
+        error: stringifyError(error),
+      });
+    }
   } finally {
     session.busy = false;
-    response.end();
+    session.runtime.toolUseContext.abortController = previousAbortController;
+    request.off("aborted", abortQuery);
+    response.off("close", abortQuery);
+    responseCompleted = true;
+    if (!response.destroyed && !response.writableEnded) {
+      response.end();
+    }
   }
 }
 
@@ -325,6 +346,20 @@ function normalizeQueryEvent(
       };
     case "model_stream_event":
       return undefined;
+    case "model_usage":
+      return {
+        type: event.type,
+        promptTokens: event.usage.prompt_tokens,
+        completionTokens: event.usage.completion_tokens,
+        totalTokens: event.usage.total_tokens,
+        promptCacheHitTokens: event.usage.prompt_cache_hit_tokens ?? 0,
+        promptCacheMissTokens: event.usage.prompt_cache_miss_tokens ?? 0,
+        sessionPromptTokens: event.sessionUsage.promptTokens,
+        sessionCompletionTokens: event.sessionUsage.completionTokens,
+        sessionTotalTokens: event.sessionUsage.totalTokens,
+        sessionPromptCacheHitTokens: event.sessionUsage.promptCacheHitTokens,
+        sessionPromptCacheMissTokens: event.sessionUsage.promptCacheMissTokens,
+      };
     case "assistant_message":
       return {
         type: event.type,
@@ -439,6 +474,10 @@ async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
 }
 
 function writeEvent(response: ServerResponse, event: unknown): void {
+  if (response.destroyed || response.writableEnded) {
+    return;
+  }
+
   response.write(`${JSON.stringify(event)}\n`);
 }
 
@@ -483,533 +522,1582 @@ function renderHtml(): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenCat Debug CLI</title>
+  <title>OpenCat</title>
   <style nonce="${nonce}">
-    body { margin: 0; height: 100vh; display: flex; flex-direction: column; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; background: #111; color: #eee; }
-    header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #333; }
-    main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; flex: 1; min-height: 0; }
-    #chat, #events { overflow: auto; padding: 12px; }
-    #events { border-left: 1px solid #333; background: #0b0b0b; }
-    form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #333; }
-    textarea { flex: 1; min-height: 72px; resize: vertical; background: #191919; color: #eee; border: 1px solid #444; padding: 8px; }
-    button, label, select { background: #222; color: #eee; border: 1px solid #555; padding: 8px 10px; }
-    label { display: inline-flex; gap: 6px; align-items: center; }
-    select { min-width: 220px; max-width: 360px; }
-    button:disabled, textarea:disabled, select:disabled { opacity: .6; }
-    .pane { display: flex; min-height: 0; flex-direction: column; }
-    .message { white-space: pre-wrap; border-bottom: 1px solid #262626; padding: 10px 0; }
-    .role { color: #8ab4f8; }
-    .reasoning { margin-top: 8px; color: #9aa0a6; }
-    .reasoning summary { cursor: pointer; color: #9aa0a6; }
-    .reasoning pre { margin: 8px 0 0 16px; color: #8d949e; max-height: 260px; overflow: auto; }
-    .reasoning .hidden { margin: 6px 0 0 16px; color: #777; }
-    .tool { color: #fbbc04; }
-    .tool-message { padding: 0; }
-    .tool-message summary { cursor: pointer; padding: 10px 0; }
-    .tool-name { margin-left: 8px; color: #eee; }
-    .tool-detail { margin: 0 0 10px 20px; color: #aaa; }
-    .tool-result { color: #c9d1d9; }
-    .error { color: #ff7b72; }
-    pre { white-space: pre-wrap; word-break: break-word; margin: 0 0 10px; color: #aaa; }
-    .meta { color: #999; font-size: 12px; }
+    /* ===== Theme Variables ===== */
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --bg-inset: #0b0f14;
+      --border-default: #30363d;
+      --border-muted: #21262d;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --text-muted: #6e7681;
+      --accent-blue: #58a6ff;
+      --accent-green: #3fb950;
+      --accent-orange: #d29922;
+      --accent-red: #f85149;
+      --accent-purple: #a371f7;
+      --accent-pink: #db61a2;
+      --radius-sm: 6px;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --transition-fast: 120ms ease;
+      --transition-normal: 200ms ease;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      font-family: var(--font-sans);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      overflow: hidden;
+    }
+
+    /* ===== Scrollbar ===== */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+    /* ===== Top Bar ===== */
+    #topbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px;
+      height: 44px;
+      min-height: 44px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-default);
+      z-index: 20;
+    }
+    #topbar-brand {
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text-primary);
+      letter-spacing: -0.2px;
+      white-space: nowrap;
+    }
+    #topbar-brand span { color: var(--accent-blue); }
+    #topbar-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    #status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      flex-shrink: 0;
+    }
+    #status-dot.busy { background: var(--accent-orange); animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+    #topbar-info {
+      font-size: 12px;
+      color: var(--text-muted);
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #usage-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      white-space: nowrap;
+    }
+    #usage-badge .hit { color: var(--accent-green); }
+    #usage-badge .miss { color: var(--accent-orange); }
+    #topbar-actions {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+
+    /* ===== Buttons ===== */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      height: 28px;
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 500;
+      font-family: var(--font-sans);
+      color: var(--text-secondary);
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      white-space: nowrap;
+    }
+    .btn:hover { color: var(--text-primary); background: #292e36; border-color: var(--text-muted); }
+    .btn:active { background: #1c2128; }
+    .btn:disabled { opacity: .4; pointer-events: none; }
+    .btn-primary { color: #fff; background: #238636; border-color: #2ea043; }
+    .btn-primary:hover { background: #2ea043; }
+    .btn-danger { color: var(--accent-red); }
+    .btn-icon { width: 28px; padding: 0; font-size: 15px; }
+
+    /* ===== Layout ===== */
+    #layout {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      position: relative;
+    }
+
+    /* ===== Sidebar ===== */
+    #sidebar {
+      width: 260px;
+      min-width: 260px;
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border-default);
+      display: flex;
+      flex-direction: column;
+      transition: margin var(--transition-normal), opacity var(--transition-normal);
+    }
+    #sidebar.collapsed {
+      margin-left: -260px;
+      opacity: 0;
+      pointer-events: none;
+    }
+    #sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .6px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border-muted);
+    }
+    #session-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px;
+    }
+    .session-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 8px 10px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background var(--transition-fast);
+      font-size: 12px;
+    }
+    .session-item:hover { background: var(--bg-tertiary); }
+    .session-item.active { background: #1f2937; border: 1px solid var(--border-default); }
+    .session-item .id { font-family: var(--font-mono); font-size: 11px; color: var(--text-primary); word-break: break-all; }
+    .session-item .date { font-size: 11px; color: var(--text-muted); }
+    .session-item .meta { display: flex; gap: 8px; font-size: 10px; color: var(--text-secondary); margin-top: 2px; }
+
+    /* ===== Main Chat Area ===== */
+    #main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    #chat-container {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    #chat {
+      height: 100%;
+      overflow-y: auto;
+      padding: 16px 20px;
+      scroll-behavior: smooth;
+    }
+    #welcome {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 12px;
+      color: var(--text-muted);
+      text-align: center;
+      padding: 40px;
+      pointer-events: none;
+    }
+    #welcome.hidden { display: none; }
+    #welcome-icon { font-size: 40px; margin-bottom: 8px; }
+    #welcome-title { font-size: 18px; font-weight: 600; color: var(--text-secondary); }
+    #welcome-sub { font-size: 13px; max-width: 360px; line-height: 1.5; }
+    #welcome-hint { font-size: 11px; color: var(--text-muted); margin-top: 8px; }
+
+    /* ===== Messages ===== */
+    .msg {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 16px;
+      animation: fadeIn .2s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    .msg-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .msg-role {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px; height: 20px;
+      border-radius: 50%;
+      font-size: 11px;
+    }
+    .msg-role.user { background: var(--accent-blue); color: #fff; }
+    .msg-role.assistant { background: var(--accent-purple); color: #fff; }
+    .msg-role.error { background: var(--accent-red); color: #fff; }
+    .msg-label { text-transform: uppercase; letter-spacing: .4px; }
+    .msg-label.user { color: var(--accent-blue); }
+    .msg-label.assistant { color: var(--accent-purple); }
+    .msg-label.error { color: var(--accent-red); }
+    .msg-time { font-weight: 400; color: var(--text-muted); margin-left: auto; }
+    .msg-body {
+      padding: 10px 14px;
+      border-radius: var(--radius-md);
+      font-size: 13px;
+      line-height: 1.6;
+      word-break: break-word;
+      font-family: var(--font-sans);
+    }
+    .msg-body.streaming { white-space: pre-wrap; }
+    .msg.user .msg-body { background: #1a2332; border: 1px solid #1f3550; margin-left: 28px; }
+    .msg.assistant .msg-body { background: transparent; border: none; padding: 4px 0 4px 28px; }
+    .msg.error .msg-body { background: #2d1114; border: 1px solid #4a1c1e; color: var(--accent-red); margin-left: 28px; }
+
+    /* ---------- Markdown rendered content ---------- */
+    .msg-body p { margin: 0 0 8px; }
+    .msg-body p:last-child { margin-bottom: 0; }
+    .msg-body h1, .msg-body h2, .msg-body h3, .msg-body h4, .msg-body h5, .msg-body h6 {
+      margin: 14px 0 6px;
+      font-weight: 600;
+      line-height: 1.3;
+      color: var(--text-primary);
+    }
+    .msg-body h1 { font-size: 1.25em; border-bottom: 1px solid var(--border-default); padding-bottom: 4px; }
+    .msg-body h2 { font-size: 1.15em; border-bottom: 1px solid var(--border-muted); padding-bottom: 3px; }
+    .msg-body h3 { font-size: 1.05em; }
+    .msg-body h4 { font-size: 1em; color: var(--text-secondary); }
+    .msg-body h5, .msg-body h6 { font-size: .95em; color: var(--text-muted); }
+
+    .msg-body ul, .msg-body ol { margin: 0 0 8px; padding-left: 22px; }
+    .msg-body li { margin-bottom: 2px; }
+    .msg-body li > ul, .msg-body li > ol { margin-bottom: 0; margin-top: 2px; }
+
+    .msg-body code {
+      font-family: var(--font-mono);
+      font-size: .88em;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-default);
+      border-radius: 3px;
+      padding: 1px 5px;
+      color: var(--accent-orange);
+    }
+    .msg-body pre {
+      margin: 8px 0;
+      border-radius: var(--radius-md);
+      overflow: hidden;
+    }
+    .msg-body pre code {
+      display: block;
+      padding: 10px 14px;
+      overflow-x: auto;
+      font-size: .85em;
+      line-height: 1.5;
+      color: var(--text-primary);
+      background: var(--bg-inset);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+    }
+    .msg-body .md-code-lang {
+      display: inline-block;
+      padding: 3px 10px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+    }
+
+    .msg-body blockquote {
+      margin: 8px 0;
+      padding: 4px 12px;
+      border-left: 3px solid var(--accent-blue);
+      color: var(--text-secondary);
+      background: rgba(88,166,255,.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    }
+    .msg-body blockquote p { margin: 4px 0; }
+
+    .msg-body hr { margin: 12px 0; border: none; border-top: 1px solid var(--border-default); }
+
+    .msg-body strong { color: var(--text-primary); font-weight: 600; }
+    .msg-body em { font-style: italic; }
+
+    .msg-body a { color: var(--accent-blue); text-decoration: none; }
+    .msg-body a:hover { text-decoration: underline; }
+
+    .msg-body table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: .9em; }
+    .msg-body th, .msg-body td { border: 1px solid var(--border-default); padding: 6px 10px; text-align: left; }
+    .msg-body th { background: var(--bg-tertiary); font-weight: 600; }
+
+    /* ===== Reasoning Block ===== */
+    .reasoning-block {
+      margin: 6px 0 4px 28px;
+      border-left: 2px solid var(--text-muted);
+      padding-left: 12px;
+    }
+    .reasoning-block summary {
+      cursor: pointer;
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      padding: 4px 0;
+      user-select: none;
+    }
+    .reasoning-block summary:hover { color: var(--text-secondary); }
+    .reasoning-block pre {
+      margin: 6px 0;
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      white-space: pre-wrap;
+      max-height: 200px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+    .reasoning-block .hidden-note {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-style: italic;
+      margin-top: 2px;
+    }
+
+    /* ===== Tool Call Card ===== */
+    .tool-card {
+      margin: 4px 0 8px 28px;
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      background: var(--bg-secondary);
+      overflow: hidden;
+    }
+    .tool-card summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      user-select: none;
+      transition: background var(--transition-fast);
+    }
+    .tool-card summary:hover { background: var(--bg-tertiary); }
+    .tool-card .tool-indicator {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent-orange);
+      flex-shrink: 0;
+    }
+    .tool-card .tool-indicator.done { background: var(--accent-green); }
+    .tool-card .tool-name {
+      font-weight: 600;
+      color: var(--accent-orange);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .tool-card .tool-status {
+      margin-left: auto;
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .tool-card .tool-status.done { color: var(--accent-green); }
+    .tool-card .tool-input,
+    .tool-card .tool-result {
+      padding: 8px 12px 8px 28px;
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 180px;
+      overflow-y: auto;
+      border-top: 1px solid var(--border-muted);
+      line-height: 1.45;
+    }
+    .tool-card .tool-result { color: var(--text-primary); }
+
+    /* ===== Events Panel ===== */
+    #events-panel {
+      width: 360px;
+      min-width: 360px;
+      background: var(--bg-inset);
+      border-left: 1px solid var(--border-default);
+      display: flex;
+      flex-direction: column;
+      transition: width var(--transition-normal), min-width var(--transition-normal), opacity var(--transition-normal);
+    }
+    #events-panel.collapsed { width: 0; min-width: 0; opacity: 0; pointer-events: none; overflow: hidden; }
+    #events-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .6px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border-muted);
+    }
+    #events {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    #events pre {
+      margin: 0 0 4px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.4;
+      padding: 6px 8px;
+      background: var(--bg-primary);
+      border-radius: var(--radius-sm);
+      border: 1px solid transparent;
+    }
+    #events pre:hover { border-color: var(--border-default); }
+
+    /* ===== Input Area ===== */
+    #input-area {
+      padding: 12px 16px;
+      border-top: 1px solid var(--border-default);
+      background: var(--bg-secondary);
+    }
+    #form {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    #input-wrapper {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    #prompt {
+      width: 100%;
+      min-height: 56px;
+      max-height: 200px;
+      resize: none;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 10px 14px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.5;
+      outline: none;
+      transition: border-color var(--transition-fast);
+    }
+    #prompt:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 2px rgba(88,166,255,.15); }
+    #prompt::placeholder { color: var(--text-muted); }
+    #prompt:disabled { opacity: .5; cursor: not-allowed; background: var(--bg-inset); }
+    #input-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-muted);
+      padding: 0 4px;
+    }
+    #char-count.warn { color: var(--accent-orange); }
+    #send {
+      height: 40px;
+      padding: 0 20px;
+      font-size: 13px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    #stop-btn { display: none; }
+    #stop-btn.visible { display: inline-flex; }
+
+    /* ===== Toast ===== */
+    #toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1f2937;
+      color: var(--text-primary);
+      border: 1px solid var(--border-default);
+      padding: 8px 18px;
+      border-radius: 20px;
+      font-size: 12px;
+      z-index: 100;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity var(--transition-normal);
+      font-family: var(--font-sans);
+    }
+    #toast.show { opacity: 1; }
+
+    /* ===== Responsive ===== */
+    @media (max-width: 900px) {
+      #sidebar { display: none; }
+      #events-panel { width: 280px; min-width: 280px; }
+    }
+    @media (max-width: 640px) {
+      #events-panel { display: none; }
+      #topbar-info { display: none; }
+      #usage-badge { display: none; }
+      #chat { padding: 10px 12px; }
+      #input-area { padding: 8px 10px; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <strong>OpenCat Debug CLI</strong>
-    <span id="session" class="meta">loading...</span>
-    <select id="session-select" aria-label="Session"></select>
-    <button id="load-session" type="button">load</button>
-    <button id="reset" type="button">reset</button>
-    <button id="clear-events" type="button">clear events</button>
-    <label><input id="raw" type="checkbox"> raw events</label>
+  <!-- Top Bar -->
+  <header id="topbar">
+    <button id="sidebar-toggle" class="btn btn-icon" title="Toggle sessions sidebar">&#9776;</button>
+    <div id="topbar-brand">Open<span>Cat</span></div>
+    <div id="topbar-status">
+      <span id="status-dot"></span>
+      <span id="status-text">ready</span>
+    </div>
+    <div id="topbar-info">loading...</div>
+    <div id="usage-badge" title="Session token usage and prompt cache hit rate">usage --</div>
+    <div id="topbar-actions">
+      <button id="events-toggle" class="btn" title="Toggle events panel">Events</button>
+      <label class="btn" title="Show raw stream events" style="cursor:pointer">
+        <input id="raw" type="checkbox" style="margin:0"> raw
+      </label>
+      <button id="reset-btn" class="btn btn-danger" title="Start a new session">New</button>
+    </div>
   </header>
-  <main>
-    <section class="pane">
-      <div id="chat"></div>
-      <form id="form">
-        <textarea id="prompt" placeholder="Type a prompt. Shift+Enter for newline. Enter to send."></textarea>
-        <button id="send" type="submit">send</button>
-      </form>
-    </section>
-    <section id="events"></section>
-  </main>
+
+  <!-- Layout -->
+  <div id="layout">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <span>Sessions</span>
+        <button id="refresh-sessions" class="btn" style="height:22px;padding:0 6px;font-size:10px">&#8635;</button>
+      </div>
+      <div id="session-list"></div>
+      <div style="padding:8px;border-top:1px solid var(--border-muted);font-size:10px;color:var(--text-muted);text-align:center">
+        &darr; Click a session to load &darr;
+      </div>
+    </aside>
+
+    <!-- Main Chat -->
+    <div id="main">
+      <div id="chat-container">
+        <div id="chat"></div>
+        <div id="welcome">
+          <div id="welcome-icon">&#128049;</div>
+          <div id="welcome-title">OpenCat</div>
+          <div id="welcome-sub">AI coding agent powered by DeepSeek. Ask questions, run tools, edit files, and build software.</div>
+          <div id="welcome-hint">Shift+Enter for newline &middot; Enter to send &middot; Ctrl+Enter to force send</div>
+        </div>
+      </div>
+      <div id="input-area">
+        <form id="form">
+          <div id="input-wrapper">
+            <textarea id="prompt" rows="2" placeholder="Type your prompt here..." autofocus></textarea>
+            <div id="input-meta">
+              <span id="model-badge"></span>
+              <span id="char-count">0</span>
+            </div>
+          </div>
+          <button id="send" class="btn btn-primary" type="submit">Send</button>
+          <button id="stop-btn" class="btn btn-danger" type="button" title="Stop generation">Stop</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Events Panel -->
+    <aside id="events-panel">
+      <div id="events-header">
+        <span>Events</span>
+        <button id="clear-events" class="btn" style="height:22px;padding:0 6px;font-size:10px">Clear</button>
+      </div>
+      <div id="events"></div>
+    </aside>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast"></div>
+
   <script nonce="${nonce}">
-    const chat = document.querySelector("#chat");
-    const events = document.querySelector("#events");
-    const form = document.querySelector("#form");
-    const promptInput = document.querySelector("#prompt");
-    const sendButton = document.querySelector("#send");
-    const rawInput = document.querySelector("#raw");
-    const resetButton = document.querySelector("#reset");
-    const sessionSelect = document.querySelector("#session-select");
-    const loadSessionButton = document.querySelector("#load-session");
-    const clearEventsButton = document.querySelector("#clear-events");
-    const sessionLabel = document.querySelector("#session");
-    const MAX_EVENT_NODES = 160;
-    const MAX_EVENT_TEXT_CHARS = 12000;
-    const MAX_REASONING_RENDER_CHARS = 4000;
+    (function() {
+      // --- Elements ---
+      const chat = document.querySelector("#chat");
+      const welcome = document.querySelector("#welcome");
+      const events = document.querySelector("#events");
+      const form = document.querySelector("#form");
+      const promptInput = document.querySelector("#prompt");
+      const sendButton = document.querySelector("#send");
+      const stopButton = document.querySelector("#stop-btn");
+      const rawInput = document.querySelector("#raw");
+      const resetButton = document.querySelector("#reset-btn");
+      const sessionList = document.querySelector("#session-list");
+      const clearEventsButton = document.querySelector("#clear-events");
+      const sidebarToggle = document.querySelector("#sidebar-toggle");
+      const eventsToggle = document.querySelector("#events-toggle");
+      const sidebar = document.querySelector("#sidebar");
+      const eventsPanel = document.querySelector("#events-panel");
+      const statusDot = document.querySelector("#status-dot");
+      const statusText = document.querySelector("#status-text");
+      const topbarInfo = document.querySelector("#topbar-info");
+      const usageBadge = document.querySelector("#usage-badge");
+      const charCount = document.querySelector("#char-count");
+      const modelBadge = document.querySelector("#model-badge");
+      const toast = document.querySelector("#toast");
+      const refreshSessionsBtn = document.querySelector("#refresh-sessions");
 
-    let currentAssistant = null;
-    let currentReasoning = null;
-    let reasoningTextBuffer = "";
-    let reasoningRenderFrame = 0;
-    let assistantTextBuffer = "";
-    let assistantRenderFrame = 0;
-    let currentSessionId = "";
-    const toolMessages = new Map();
+      const MAX_EVENT_NODES = 160;
+      const MAX_EVENT_TEXT_CHARS = 12000;
+      const MAX_REASONING_RENDER_CHARS = 4000;
+      const MAX_CHAR_WARN = 4000;
 
-    init();
+      let currentAssistant = null;
+      let currentReasoning = null;
+      let reasoningTextBuffer = "";
+      let reasoningRenderFrame = 0;
+      let assistantTextBuffer = "";
+      let assistantRenderFrame = 0;
+      let currentSessionId = "";
+      let isBusy = false;
+      let isSessionLoading = false;
+      let abortController = null;
+      let latestUsage = null;
+      const toolMessages = new Map();
 
-    async function init() {
-      await refreshSession(true);
-      promptInput.focus();
-    }
+      // --- Init ---
+      init();
 
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const prompt = promptInput.value.trim();
-      if (!prompt) return;
-
-      appendMessage("user", prompt);
-      promptInput.value = "";
-      currentAssistant = appendMessage("assistant", "");
-      currentReasoning = null;
-      reasoningTextBuffer = "";
-      setBusy(true);
-
-      try {
-        const response = await fetch("/api/query", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            prompt,
-            includeRawEvents: rawInput.checked,
-          }),
-        });
-
-        if (!response.ok || !response.body) {
-          appendMessage("error", await response.text());
-          return;
+      async function init() {
+        try {
+          await refreshSession(true);
+        } finally {
+          setBusy(false);
+          updateCharCount();
+          promptInput.focus();
         }
-
-        await readNdjson(response.body, handleServerEvent);
-        flushAssistantText();
-        flushReasoningText();
-      } catch (error) {
-        appendMessage("error", String(error));
-      } finally {
-        flushAssistantText();
-        flushReasoningText();
-        setBusy(false);
-        await refreshSession();
       }
-    });
 
-    promptInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
+      // --- Toast ---
+      function showToast(text, ms) {
+        toast.textContent = text;
+        toast.classList.add("show");
+        setTimeout(function() { toast.classList.remove("show"); }, ms || 1800);
+      }
+
+      // --- Char count ---
+      promptInput.addEventListener("input", updateCharCount);
+      function updateCharCount() {
+        var len = promptInput.value.length;
+        charCount.textContent = len;
+        charCount.classList.toggle("warn", len > MAX_CHAR_WARN);
+      }
+
+      // --- Auto-resize textarea ---
+      promptInput.addEventListener("input", function() {
+        promptInput.style.height = "auto";
+        promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + "px";
+      });
+
+      // --- Sidebar toggle ---
+      sidebarToggle.addEventListener("click", function() {
+        sidebar.classList.toggle("collapsed");
+      });
+
+      // --- Events toggle ---
+      eventsToggle.addEventListener("click", function() {
+        eventsPanel.classList.toggle("collapsed");
+      });
+
+      // --- Refresh sessions ---
+      refreshSessionsBtn.addEventListener("click", async function() {
+        await populateSessionList(currentSessionId);
+        showToast("Sessions refreshed");
+      });
+
+      // --- Form submit ---
+      form.addEventListener("submit", async function(event) {
         event.preventDefault();
-        form.requestSubmit();
-      }
-    });
+        if (isBusy) return;
+        var prompt = promptInput.value.trim();
+        if (!prompt) return;
 
-    resetButton.addEventListener("click", async () => {
-      await fetch("/api/reset", { method: "POST" });
-      events.textContent = "";
-      await refreshSession(true);
-    });
+        hideWelcome();
+        appendMessage("user", prompt);
+        promptInput.value = "";
+        promptInput.style.height = "auto";
+        updateCharCount();
+        currentAssistant = appendMessage("assistant", "");
+        currentReasoning = null;
+        reasoningTextBuffer = "";
+        setBusy(true);
 
-    loadSessionButton.addEventListener("click", async () => {
-      const sessionId = sessionSelect.value;
-      if (!sessionId || sessionId === currentSessionId) return;
+        try {
+          abortController = new AbortController();
+          var response = await fetch("/api/query", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: prompt, includeRawEvents: rawInput.checked }),
+            signal: abortController.signal,
+          });
 
-      setBusy(true);
-      try {
-        const response = await fetch("/api/session/load", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId }),
-        });
+          if (!response.ok || !response.body) {
+            var errText = await response.text();
+            appendMessage("error", errText.slice(0, 1000));
+            return;
+          }
 
-        if (!response.ok) {
-          appendMessage("error", await response.text());
-          return;
+          await readNdjson(response.body, handleServerEvent);
+          safeFlushAssistantText();
+          safeFlushReasoningText();
+        } catch (error) {
+          if (error.name !== "AbortError") {
+            appendMessage("error", String(error));
+          }
+        } finally {
+          safeFlushAssistantText();
+          safeFlushReasoningText();
+          closeReasoningBlock();
+          setBusy(false);
+          abortController = null;
+          promptInput.focus();
+          try { await refreshSession(); } catch (e) { /* ignore */ }
         }
+      });
 
+      // --- Keyboard shortcuts ---
+      promptInput.addEventListener("keydown", function(event) {
+        if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey) {
+          event.preventDefault();
+          form.requestSubmit();
+        }
+        if (event.key === "Enter" && event.ctrlKey) {
+          event.preventDefault();
+          form.requestSubmit();
+        }
+      });
+
+      // --- Stop button ---
+      stopButton.addEventListener("click", function() {
+        if (abortController) {
+          abortController.abort();
+          showToast("Stopped");
+        }
+      });
+
+      // --- Reset ---
+      resetButton.addEventListener("click", async function() {
+        if (isBusy || isSessionLoading) return;
+        setSessionLoading(true);
+        try {
+          var response = await fetch("/api/reset", { method: "POST" });
+          if (!response.ok) {
+            showToast("Failed to create session");
+            return;
+          }
+
+          events.textContent = "";
+          chat.textContent = "";
+          welcome.classList.remove("hidden");
+          toolMessages.clear();
+          currentAssistant = null;
+          currentReasoning = null;
+          assistantTextBuffer = "";
+          reasoningTextBuffer = "";
+          await refreshSession(true);
+          showToast("New session created");
+        } catch (e) {
+          showToast("Failed to create session");
+        } finally {
+          setSessionLoading(false);
+          restoreInputReadyState();
+        }
+      });
+
+      // --- Clear events ---
+      clearEventsButton.addEventListener("click", function() {
         events.textContent = "";
-        await refreshSession(true);
-      } finally {
-        setBusy(false);
-      }
-    });
+      });
 
-    clearEventsButton.addEventListener("click", () => {
-      events.textContent = "";
-    });
+      // --- Refresh session ---
+      async function refreshSession(reloadHistory) {
+        try {
+          var response = await fetch("/api/session");
+          if (!response.ok) return;
+          var session = await response.json();
+          currentSessionId = session.sessionId;
+          modelBadge.textContent = session.model || "";
 
-    async function refreshSession(reloadHistory = false) {
-      const response = await fetch("/api/session");
-      const session = await response.json();
-      currentSessionId = session.sessionId;
-      sessionLabel.textContent = [
-        "session=" + session.sessionId,
-        "model=" + session.model,
-        "messages=" + session.messageCount,
-        "tools=" + session.tools.length,
-        session.restored ? "restored" : "new",
-        "hydrate=" + session.hydrate,
-      ].join(" | ");
-      await refreshSessionList(session.sessionId);
+          statusText.textContent = session.busy ? "streaming" : "ready";
+          statusDot.classList.toggle("busy", session.busy);
 
-      if (reloadHistory) {
-        await renderSessionHistory();
-      }
-    }
+          topbarInfo.textContent = [
+            session.sessionId ? session.sessionId.slice(0, 8) + "..." : "",
+            (session.messageCount || 0) + " msg",
+            (session.tools || []).length + " tools",
+            session.restored ? "restored" : "new",
+          ].filter(Boolean).join(" \u00b7 ");
+          updateUsageBadge(session.usage);
 
-    async function refreshSessionList(selectedSessionId) {
-      const response = await fetch("/api/sessions");
-      const payload = await response.json();
-      sessionSelect.textContent = "";
+          await populateSessionList(session.sessionId);
 
-      const sessions = payload.sessions ?? [];
-      if (!sessions.some((item) => item.sessionId === selectedSessionId)) {
-        sessions.unshift({
-          sessionId: selectedSessionId,
-          modifiedAt: Date.now(),
-          size: 0,
-        });
+          if (reloadHistory) {
+            await renderSessionHistory();
+          }
+        } catch (e) {
+          // ignore
+        }
       }
 
-      for (const item of sessions) {
-        const option = document.createElement("option");
-        option.value = item.sessionId;
-        option.textContent = item.sessionId + " | " +
-          new Date(item.modifiedAt).toLocaleString();
-        option.selected = item.sessionId === selectedSessionId;
-        sessionSelect.append(option);
+      // --- Session list ---
+      async function populateSessionList(selectedSessionId) {
+        try {
+          var response = await fetch("/api/sessions");
+          var payload = await response.json();
+          var sessions = payload.sessions || [];
+          if (!sessions.some(function(item) { return item.sessionId === selectedSessionId; })) {
+            sessions.unshift({ sessionId: selectedSessionId, modifiedAt: Date.now(), size: 0 });
+          }
+
+          sessionList.textContent = "";
+
+          for (var i = 0; i < sessions.length; i++) {
+            var item = sessions[i];
+            var div = document.createElement("div");
+            div.className = "session-item" + (item.sessionId === selectedSessionId ? " active" : "");
+            div.innerHTML =
+              '<div class="id">' + escapeHtml(item.sessionId) + '</div>' +
+              '<div class="date">' + new Date(item.modifiedAt).toLocaleString() + '</div>' +
+              '<div class="meta"><span>' + formatBytes(item.size || 0) + '</span></div>';
+            div.addEventListener("click", function(sid) {
+              return function() { loadSession(sid); };
+            }(item.sessionId));
+            sessionList.append(div);
+          }
+        } catch (e) {
+          // ignore
+        }
       }
-    }
 
-    async function renderSessionHistory() {
-      const response = await fetch("/api/session/messages");
-      const payload = await response.json();
-      chat.textContent = "";
-      currentAssistant = null;
-      currentReasoning = null;
-      assistantTextBuffer = "";
-      reasoningTextBuffer = "";
-      toolMessages.clear();
+      async function loadSession(sessionId) {
+        if (!sessionId || sessionId === currentSessionId || isBusy || isSessionLoading) return;
+        setSessionLoading(true);
+        try {
+          var response = await fetch("/api/session/load", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId: sessionId }),
+          });
+          if (!response.ok) {
+            showToast("Session not found");
+            return;
+          }
+          events.textContent = "";
+          chat.textContent = "";
+          toolMessages.clear();
+          currentAssistant = null;
+          currentReasoning = null;
+          await refreshSession(true);
+          showToast("Session loaded");
+        } catch (e) {
+          showToast("Failed to load session");
+        } finally {
+          setSessionLoading(false);
+          restoreInputReadyState();
+        }
+      }
 
-      for (const message of payload.messages ?? []) {
-        if (message.role === "user" || message.role === "assistant") {
-          if (message.content || message.reasoningContent || message.role === "assistant") {
-            const body = appendMessage(message.role, message.content ?? "");
-            if (message.role === "assistant") {
-              currentAssistant = body;
-              currentReasoning = null;
-              if (message.reasoningContent) {
-                appendReasoningText(message.reasoningContent, message.reasoningChars);
+      // --- History rendering ---
+      async function renderSessionHistory() {
+        chat.textContent = "";
+        welcome.classList.add("hidden");
+        currentAssistant = null;
+        currentReasoning = null;
+        assistantTextBuffer = "";
+        reasoningTextBuffer = "";
+        toolMessages.clear();
+
+        try {
+          var response = await fetch("/api/session/messages");
+          var payload = await response.json();
+          var messages = payload.messages || [];
+
+          if (messages.length === 0) {
+            welcome.classList.remove("hidden");
+            return;
+          }
+
+          welcome.classList.add("hidden");
+
+          for (var i = 0; i < messages.length; i++) {
+            var msg = messages[i];
+            if (msg.role === "user" || msg.role === "assistant") {
+              if (msg.content || msg.reasoningContent || msg.role === "assistant") {
+                var body = appendMessage(msg.role, msg.content || "");
+                if (msg.role === "assistant") {
+                  currentAssistant = body;
+                  currentReasoning = null;
+                  finalizeAssistantBody(body);
+                  if (msg.reasoningContent) {
+                    appendReasoningText(msg.reasoningContent, msg.reasoningChars);
+                    closeReasoningBlock();
+                  }
+                }
               }
+              if (msg.toolCalls) {
+                for (var j = 0; j < msg.toolCalls.length; j++) {
+                  appendToolUse(msg.toolCalls[j]);
+                }
+              }
+            } else if (msg.role === "tool") {
+              completeToolUse({
+                toolCallId: msg.toolCallId,
+                toolName: msg.toolName,
+                contentPreview: msg.contentPreview,
+              });
             }
           }
 
-          for (const toolCall of message.toolCalls ?? []) {
-            appendToolUse(toolCall);
-          }
-          continue;
-        }
-
-        if (message.role === "tool") {
-          completeToolUse({
-            toolCallId: message.toolCallId,
-            toolName: message.toolName,
-            contentPreview: message.contentPreview,
-          });
+          scrollToBottom(chat);
+        } catch (e) {
+          // ignore
         }
       }
 
-      scrollToBottom(chat);
-    }
+      // --- Server event handler ---
+      function handleServerEvent(event) {
+        if (shouldLogEvent(event)) {
+          appendEvent(event);
+        }
 
-    function handleServerEvent(event) {
-      if (shouldLogEvent(event)) {
-        appendEvent(event);
+        switch (event.type) {
+          case "assistant_text_delta":
+            queueAssistantText(event.text);
+            break;
+          case "assistant_reasoning_delta":
+            queueReasoningText(event.text);
+            break;
+          case "assistant_message":
+            flushAssistantText();
+            flushReasoningText();
+            closeReasoningBlock();
+            if (event.message && event.message.content && currentAssistant) {
+              if (!currentAssistant.textContent.trim()) {
+                currentAssistant.textContent = event.message.content;
+              }
+            }
+            finalizeAssistantBody(currentAssistant);
+            scrollToBottom(chat);
+            break;
+          case "tool_use":
+            appendToolUse(event.toolCall);
+            break;
+          case "tool_result":
+            completeToolUse(event);
+            break;
+          case "model_usage":
+            updateUsageBadgeFromEvent(event);
+            break;
+          case "done":
+            if (event.sessionUsage) {
+              updateUsageBadge(event.sessionUsage);
+            }
+            closeReasoningBlock();
+            finalizeAssistantBody(currentAssistant);
+            break;
+          case "context_ready":
+            hideWelcome();
+            break;
+          case "user_message":
+            hideWelcome();
+            break;
+          case "error":
+            appendMessage("error", event.error);
+            break;
+        }
       }
 
-      if (event.type === "assistant_text_delta") {
-        queueAssistantText(event.text);
-        return;
+      function shouldLogEvent(event) {
+        if (rawInput.checked) return true;
+        return event.type !== "assistant_text_delta" &&
+          event.type !== "assistant_reasoning_delta" &&
+          event.type !== "model_stream_event";
       }
 
-      if (event.type === "assistant_reasoning_delta") {
-        queueReasoningText(event.text);
-        return;
+      // --- Streaming helpers ---
+      function queueAssistantText(text) {
+        assistantTextBuffer += text;
+        if (!assistantRenderFrame) {
+          assistantRenderFrame = requestAnimationFrame(flushAssistantText);
+        }
       }
 
-      if (event.type === "assistant_message" && event.message?.content && !currentAssistant.textContent) {
-        flushAssistantText();
-      }
-
-      if (event.type === "assistant_message" && event.message?.content && !currentAssistant.textContent) {
-        currentAssistant.textContent = event.message.content;
+      function flushAssistantText() {
+        if (assistantRenderFrame) {
+          cancelAnimationFrame(assistantRenderFrame);
+          assistantRenderFrame = 0;
+        }
+        if (!currentAssistant || !assistantTextBuffer) return;
+        currentAssistant.textContent += assistantTextBuffer;
+        assistantTextBuffer = "";
         scrollToBottom(chat);
-        return;
       }
 
-      if (event.type === "tool_use") {
-        appendToolUse(event.toolCall);
-        return;
+      function queueReasoningText(text) {
+        reasoningTextBuffer += text;
+        if (!reasoningRenderFrame) {
+          reasoningRenderFrame = requestAnimationFrame(flushReasoningText);
+        }
       }
 
-      if (event.type === "tool_result") {
-        completeToolUse(event);
-        return;
+      function flushReasoningText() {
+        if (reasoningRenderFrame) {
+          cancelAnimationFrame(reasoningRenderFrame);
+          reasoningRenderFrame = 0;
+        }
+        if (!reasoningTextBuffer) return;
+        appendReasoningText(reasoningTextBuffer);
+        reasoningTextBuffer = "";
       }
 
-      if (event.type === "error") {
-        appendMessage("error", event.error);
-      }
-    }
+      function appendReasoningText(text, totalChars) {
+        if (!currentAssistant) return;
+        var entry = getOrCreateReasoningBlock();
+        var chunkChars = Number.isFinite(totalChars) ? totalChars : text.length;
+        entry.totalChars += chunkChars;
 
-    function shouldLogEvent(event) {
-      if (rawInput.checked) {
-        return true;
-      }
+        if (entry.renderedChars < MAX_REASONING_RENDER_CHARS) {
+          var remaining = MAX_REASONING_RENDER_CHARS - entry.renderedChars;
+          var visible = text.slice(0, remaining);
+          entry.body.textContent += visible;
+          entry.renderedChars += visible.length;
+        }
 
-      return event.type !== "assistant_text_delta" &&
-        event.type !== "assistant_reasoning_delta" &&
-        event.type !== "model_stream_event";
-    }
-
-    function queueAssistantText(text) {
-      assistantTextBuffer += text;
-
-      if (assistantRenderFrame) {
-        return;
-      }
-
-      assistantRenderFrame = requestAnimationFrame(flushAssistantText);
-    }
-
-    function flushAssistantText() {
-      if (assistantRenderFrame) {
-        cancelAnimationFrame(assistantRenderFrame);
-        assistantRenderFrame = 0;
+        var hiddenChars = Math.max(0, entry.totalChars - entry.renderedChars);
+        entry.hidden.textContent = hiddenChars > 0
+          ? "... [" + hiddenChars + " reasoning chars hidden]"
+          : "";
+        entry.summary.textContent = entry.totalChars + " reasoning chars";
+        scrollToBottom(chat);
       }
 
-      if (!currentAssistant || !assistantTextBuffer) {
-        return;
-      }
+      function getOrCreateReasoningBlock() {
+        if (currentReasoning && !currentReasoning.closed) return currentReasoning;
 
-      currentAssistant.textContent += assistantTextBuffer;
-      assistantTextBuffer = "";
-      scrollToBottom(chat);
-    }
+        var details = document.createElement("details");
+        details.className = "reasoning-block";
+        details.open = false;
+        var summary = document.createElement("summary");
+        summary.textContent = "0 reasoning chars";
+        var body = document.createElement("pre");
+        var hidden = document.createElement("div");
+        hidden.className = "hidden-note";
+        details.append(summary, body, hidden);
 
-    function queueReasoningText(text) {
-      reasoningTextBuffer += text;
+        var parent = currentAssistant ? currentAssistant.closest(".msg") : null;
+        if (parent) {
+          parent.append(details);
+        } else {
+          chat.append(details);
+        }
 
-      if (reasoningRenderFrame) {
-        return;
-      }
-
-      reasoningRenderFrame = requestAnimationFrame(flushReasoningText);
-    }
-
-    function flushReasoningText() {
-      if (reasoningRenderFrame) {
-        cancelAnimationFrame(reasoningRenderFrame);
-        reasoningRenderFrame = 0;
-      }
-
-      if (!reasoningTextBuffer) {
-        return;
-      }
-
-      appendReasoningText(reasoningTextBuffer);
-      reasoningTextBuffer = "";
-    }
-
-    function appendReasoningText(text, totalChars) {
-      const entry = getOrCreateReasoningBlock();
-      const chunkChars = Number.isFinite(totalChars) ? totalChars : text.length;
-      entry.totalChars += chunkChars;
-
-      if (entry.renderedChars < MAX_REASONING_RENDER_CHARS) {
-        const remaining = MAX_REASONING_RENDER_CHARS - entry.renderedChars;
-        const visible = text.slice(0, remaining);
-        entry.body.textContent += visible;
-        entry.renderedChars += visible.length;
-      }
-
-      const hiddenChars = Math.max(0, entry.totalChars - entry.renderedChars);
-      entry.hidden.textContent = hiddenChars > 0
-        ? "... [" + hiddenChars + " reasoning chars hidden from UI]"
-        : "";
-      entry.summary.textContent = "thinking> " + entry.totalChars + " chars";
-      scrollToBottom(chat);
-    }
-
-    function getOrCreateReasoningBlock() {
-      if (currentReasoning) {
+        currentReasoning = { details: details, summary: summary, body: body, hidden: hidden, totalChars: 0, renderedChars: 0, closed: false };
         return currentReasoning;
       }
 
-      const details = document.createElement("details");
-      details.className = "reasoning";
-      const summary = document.createElement("summary");
-      summary.textContent = "thinking> 0 chars";
-      const body = document.createElement("pre");
-      const hidden = document.createElement("div");
-      hidden.className = "hidden";
-      details.append(summary, body, hidden);
-
-      const container = currentAssistant?.parentElement ?? chat;
-      container.append(details);
-      currentReasoning = {
-        details,
-        summary,
-        body,
-        hidden,
-        totalChars: 0,
-        renderedChars: 0,
-      };
-      return currentReasoning;
-    }
-
-    async function readNdjson(body, onEvent) {
-      const reader = body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let newlineIndex;
-        while ((newlineIndex = buffer.indexOf("\\n")) >= 0) {
-          const line = buffer.slice(0, newlineIndex).trim();
-          buffer = buffer.slice(newlineIndex + 1);
-          if (line) onEvent(JSON.parse(line));
+      function closeReasoningBlock() {
+        if (currentReasoning) {
+          currentReasoning.closed = true;
+          currentReasoning = null;
         }
       }
 
-      const tail = buffer.trim();
-      if (tail) onEvent(JSON.parse(tail));
-    }
+      // --- NDJSON reader ---
+      async function readNdjson(body, onEvent) {
+        var reader = body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
 
-    function appendMessage(role, text) {
-      const wrapper = document.createElement("div");
-      wrapper.className = "message";
-      const title = document.createElement("div");
-      title.className = role === "error" ? "error" : role === "tool" ? "tool" : "role";
-      title.textContent = role + ">";
-      const body = document.createElement("div");
-      body.textContent = text;
-      wrapper.append(title, body);
-      chat.append(wrapper);
-      scrollToBottom(chat);
-      return body;
-    }
+        while (true) {
+          var result = await reader.read();
+          var value = result.value, done = result.done;
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
 
-    function appendToolUse(toolCall) {
-      const toolCallId = toolCall?.id ?? "tool-" + crypto.randomUUID();
-      const existing = toolMessages.get(toolCallId);
-      if (existing) {
-        return existing;
+          var idx;
+          while ((idx = buffer.indexOf("\\n")) >= 0) {
+            var line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            if (line) {
+              try { onEvent(JSON.parse(line)); } catch(e) { /* skip malformed */ }
+            }
+          }
+        }
+
+        var tail = buffer.trim();
+        if (tail) {
+          try { onEvent(JSON.parse(tail)); } catch(e) { /* skip malformed */ }
+        }
       }
 
-      const details = document.createElement("details");
-      details.className = "message tool-message";
-      const summary = document.createElement("summary");
-      const role = document.createElement("span");
-      role.className = "tool";
-      role.textContent = "tool>";
-      const name = document.createElement("span");
-      name.className = "tool-name";
-      name.textContent = toolCall?.function?.name ?? "tool";
-      summary.append(role, name);
+      // --- Message rendering ---
+      function appendMessage(role, text) {
+        hideWelcome();
 
-      const input = document.createElement("pre");
-      input.className = "tool-detail";
-      input.textContent = formatToolArguments(toolCall?.function?.arguments);
-      const result = document.createElement("pre");
-      result.className = "tool-detail tool-result";
-      details.append(summary, input, result);
-      chat.append(details);
+        var wrapper = document.createElement("div");
+        wrapper.className = "msg " + role;
 
-      const entry = { details, summary, result };
-      toolMessages.set(toolCallId, entry);
-      scrollToBottom(chat);
-      return entry;
-    }
+        var header = document.createElement("div");
+        header.className = "msg-header";
 
-    function completeToolUse(event) {
-      const toolCallId = event.toolCallId ?? event.toolCall?.id;
-      const entry = toolCallId
-        ? toolMessages.get(toolCallId) ??
-          appendToolUse({
-            id: toolCallId,
-            function: { name: event.toolName ?? event.toolCall?.function?.name },
-          })
-        : appendToolUse({
-            function: { name: event.toolName ?? "tool" },
-          });
-      const content = event.contentPreview ??
-        event.message?.content ??
-        "";
-      entry.result.textContent = typeof content === "string"
-        ? content
-        : JSON.stringify(content, null, 2);
-    }
+        var icon = document.createElement("span");
+        icon.className = "msg-role " + role;
+        icon.textContent = role === "user" ? "U" : role === "assistant" ? "A" : "!";
 
-    function formatToolArguments(value) {
-      if (!value) return "";
+        var label = document.createElement("span");
+        label.className = "msg-label " + role;
+        label.textContent = role;
 
-      try {
-        return JSON.stringify(JSON.parse(value), null, 2);
-      } catch {
-        return String(value);
-      }
-    }
+        var time = document.createElement("span");
+        time.className = "msg-time";
+        time.textContent = formatTime(new Date());
 
-    function appendEvent(event) {
-      const pre = document.createElement("pre");
-      pre.textContent = formatEvent(event);
-      events.append(pre);
-      trimEventLog();
-      scrollToBottom(events);
-    }
+        header.append(icon, label, time);
 
-    function formatEvent(event) {
-      const text = JSON.stringify(event, null, 2);
+        var body = document.createElement("div");
+        body.className = "msg-body";
+        if (role === "assistant") {
+          body.classList.add("streaming");
+        }
+        body.textContent = text || "";
 
-      if (text.length <= MAX_EVENT_TEXT_CHARS) {
-        return text;
+        wrapper.append(header, body);
+        chat.append(wrapper);
+        scrollToBottom(chat);
+        return body;
       }
 
-      return text.slice(0, MAX_EVENT_TEXT_CHARS) + "\\n... [event truncated]";
-    }
-
-    function trimEventLog() {
-      while (events.childElementCount > MAX_EVENT_NODES) {
-        events.firstElementChild?.remove();
+      // --- Finalize an assistant body into rendered Markdown ---
+      function finalizeAssistantBody(body) {
+        if (!body) return;
+        body.classList.remove("streaming");
+        var raw = body.textContent || "";
+        if (!raw.trim()) return;
+        body.innerHTML = renderMarkdown(raw);
+        scrollToBottom(chat);
       }
-    }
 
-    function setBusy(value) {
-      promptInput.disabled = value;
-      sendButton.disabled = value;
-      resetButton.disabled = value;
-      sessionSelect.disabled = value;
-      loadSessionButton.disabled = value;
-      clearEventsButton.disabled = value;
-    }
+      // --- Tool rendering ---
+      function appendToolUse(toolCall) {
+        hideWelcome();
 
-    function scrollToBottom(element) {
-      element.scrollTop = element.scrollHeight;
-    }
+        var toolCallId = toolCall && toolCall.id ? toolCall.id : "tool-" + generateId();
+        var existing = toolMessages.get(toolCallId);
+        if (existing) return existing;
+
+        var details = document.createElement("details");
+        details.className = "tool-card";
+        details.open = false;
+
+        var summary = document.createElement("summary");
+        var indicator = document.createElement("span");
+        indicator.className = "tool-indicator";
+        var toolName = document.createElement("span");
+        toolName.className = "tool-name";
+        toolName.textContent = (toolCall && toolCall.function && toolCall.function.name) || "tool";
+        var status = document.createElement("span");
+        status.className = "tool-status";
+        status.textContent = "running...";
+
+        summary.append(indicator, toolName, status);
+
+        var input = document.createElement("div");
+        input.className = "tool-input";
+        input.textContent = formatToolArguments(toolCall && toolCall.function && toolCall.function.arguments);
+        var result = document.createElement("div");
+        result.className = "tool-result";
+
+        details.append(summary, input, result);
+        chat.append(details);
+
+        var entry = { details: details, summary: summary, indicator: indicator, status: status, result: result };
+        toolMessages.set(toolCallId, entry);
+        scrollToBottom(chat);
+        return entry;
+      }
+
+      function completeToolUse(event) {
+        var toolCallId = event.toolCallId || (event.toolCall && event.toolCall.id);
+        var entry = toolCallId
+          ? (toolMessages.get(toolCallId) || appendToolUse({ id: toolCallId, function: { name: event.toolName || (event.toolCall && event.toolCall.function && event.toolCall.function.name) } }))
+          : appendToolUse({ function: { name: event.toolName || "tool" } });
+
+        var content = event.contentPreview || (event.message && event.message.content) || "";
+        entry.result.textContent = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+        entry.indicator.classList.add("done");
+        entry.status.classList.add("done");
+        entry.status.textContent = "done";
+        entry.details.open = false;
+        scrollToBottom(chat);
+      }
+
+      function formatToolArguments(value) {
+        if (!value) return "";
+        try { return JSON.stringify(JSON.parse(value), null, 2); } catch(e) { return String(value); }
+      }
+
+      // --- Event log ---
+      function appendEvent(event) {
+        var pre = document.createElement("pre");
+        pre.textContent = formatEvent(event);
+        events.append(pre);
+        trimEventLog();
+        scrollToBottom(events);
+      }
+
+      function formatEvent(event) {
+        var text = JSON.stringify(event, null, 2);
+        if (text.length <= MAX_EVENT_TEXT_CHARS) return text;
+        return text.slice(0, MAX_EVENT_TEXT_CHARS) + "\\n... [truncated]";
+      }
+
+      function trimEventLog() {
+        while (events.childElementCount > MAX_EVENT_NODES) {
+          if (events.firstElementChild) events.firstElementChild.remove();
+        }
+      }
+
+      // --- Busy state ---
+      function setBusy(value) {
+        isBusy = value;
+        promptInput.disabled = value;
+        sendButton.disabled = value;
+        stopButton.classList.toggle("visible", value);
+        resetButton.disabled = value;
+        if (value) {
+          statusDot.classList.add("busy");
+          statusText.textContent = "streaming";
+        } else {
+          statusDot.classList.remove("busy");
+          statusText.textContent = "ready";
+          promptInput.focus();
+        }
+      }
+
+      function setSessionLoading(value) {
+        isSessionLoading = value;
+        sessionList.classList.toggle("loading", value);
+        refreshSessionsBtn.disabled = value;
+        statusText.textContent = value ? "loading session" : (isBusy ? "streaming" : "ready");
+      }
+
+      function restoreInputReadyState() {
+        if (isBusy || isSessionLoading) return;
+        promptInput.disabled = false;
+        sendButton.disabled = false;
+        resetButton.disabled = false;
+        stopButton.classList.remove("visible");
+        statusDot.classList.remove("busy");
+        statusText.textContent = "ready";
+        promptInput.focus();
+      }
+
+      function updateUsageBadgeFromEvent(event) {
+        latestUsage = event.sessionUsage
+          ? normalizeUsage(event.sessionUsage)
+          : {
+            promptTokens: event.sessionPromptTokens || 0,
+            completionTokens: event.sessionCompletionTokens || 0,
+            totalTokens: event.sessionTotalTokens || 0,
+            promptCacheHitTokens: event.sessionPromptCacheHitTokens || 0,
+            promptCacheMissTokens: event.sessionPromptCacheMissTokens || 0,
+          };
+        updateUsageBadge(latestUsage);
+      }
+
+      function updateUsageBadge(usage) {
+        if (!usageBadge) return;
+        latestUsage = normalizeUsage(usage || latestUsage);
+        if (!latestUsage || latestUsage.totalTokens === 0) {
+          usageBadge.textContent = "usage --";
+          usageBadge.title = "No model usage reported yet.";
+          return;
+        }
+
+        var cacheTotal = latestUsage.promptCacheHitTokens + latestUsage.promptCacheMissTokens;
+        var hitRate = cacheTotal > 0
+          ? Math.round((latestUsage.promptCacheHitTokens / cacheTotal) * 100)
+          : 0;
+        usageBadge.innerHTML =
+          '<span>' + formatCompactNumber(latestUsage.totalTokens) + ' tok</span>' +
+          '<span class="hit">' + hitRate + '% hit</span>' +
+          '<span class="miss">' + formatCompactNumber(latestUsage.promptCacheMissTokens) + ' miss</span>';
+        usageBadge.title = [
+          "Session usage",
+          "Prompt tokens: " + latestUsage.promptTokens,
+          "Completion tokens: " + latestUsage.completionTokens,
+          "Total tokens: " + latestUsage.totalTokens,
+          "Prompt cache hit tokens: " + latestUsage.promptCacheHitTokens,
+          "Prompt cache miss tokens: " + latestUsage.promptCacheMissTokens,
+        ].join("\\n");
+      }
+
+      function normalizeUsage(usage) {
+        if (!usage) return null;
+        return {
+          promptTokens: Number(usage.promptTokens || usage.prompt_tokens || 0),
+          completionTokens: Number(usage.completionTokens || usage.completion_tokens || 0),
+          totalTokens: Number(usage.totalTokens || usage.total_tokens || 0),
+          promptCacheHitTokens: Number(usage.promptCacheHitTokens || usage.prompt_cache_hit_tokens || 0),
+          promptCacheMissTokens: Number(usage.promptCacheMissTokens || usage.prompt_cache_miss_tokens || 0),
+        };
+      }
+
+      function formatCompactNumber(value) {
+        var n = Number(value || 0);
+        if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\\.0$/, "") + "M";
+        if (n >= 1000) return (n / 1000).toFixed(1).replace(/\\.0$/, "") + "k";
+        return String(n);
+      }
+
+      // --- Safe flush wrappers (never throw) ---
+      function safeFlushAssistantText() {
+        try { flushAssistantText(); } catch (e) { /* ignore */ }
+      }
+      function safeFlushReasoningText() {
+        try { flushReasoningText(); } catch (e) { /* ignore */ }
+      }
+
+      // --- Helpers ---
+      function hideWelcome() {
+        welcome.classList.add("hidden");
+      }
+
+      function scrollToBottom(el) {
+        el.scrollTop = el.scrollHeight;
+      }
+
+      function formatTime(date) {
+        var h = date.getHours(), m = date.getMinutes();
+        return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m;
+      }
+
+      function formatBytes(bytes) {
+        if (!bytes || bytes === 0) return "0 B";
+        var units = ["B", "KB", "MB", "GB"];
+        var i = Math.floor(Math.log(bytes) / Math.log(1024));
+        return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + " " + units[i];
+      }
+
+      function escapeHtml(str) {
+        return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      function generateId() {
+        return "id-" + Math.random().toString(36).slice(2, 10);
+      }
+
+      // --- Markdown renderer (zero-dependency, handles the main DeepSeek output patterns) ---
+      function renderMarkdown(src) {
+        if (!src) return "";
+        // Normalise line endings
+        var s = String(src).replace(/\\r\\n/g, "\\n").replace(/\\r/g, "\\n");
+
+        // ------ Step 1: Extract fenced code blocks to placeholders ------
+        var fences = [];
+        s = s.replace(/\x60\x60\x60(\\S*)\\n?([\\s\\S]*?)\x60\x60\x60/g, function(_, lang, body) {
+          var idx = fences.length;
+          // Strip trailing newline from body
+          var clean = body.replace(/\\n$/, "");
+          var langLabel = lang ? '<span class="md-code-lang">' + escapeHtml(lang) + '</span>' : "";
+          fences[idx] = langLabel + '<pre><code>' + escapeHtml(clean) + '</code></pre>';
+          return "\x00FENCE" + idx + "\x00";
+        });
+
+        // ------ Step 2: Escape HTML in remaining text ------
+        s = escapeHtml(s);
+
+        // ------ Step 3: Inline code (backticks) ------
+        // Common Markdown escape form for showing fence markers inline:
+        // a two-marker code span can wrap a three-marker fence literal.
+        // Handle that form before the generic two-marker rule.
+        s = s.replace(/\x60\x60\\s?(\x60{3,})\\s?\x60\x60/g, function(_, code) {
+          return '<code>' + code + '</code>';
+        });
+        s = s.replace(/\x60\x60([\\s\\S]*?)\x60\x60/g, function(_, code) {
+          return '<code>' + code + '</code>';
+        });
+        s = s.replace(/\x60([^\x60\\n]+?)\x60/g, function(_, code) {
+          return '<code>' + code + '</code>';
+        });
+
+        // ------ Step 4: Bold & Italic ------
+        // bold+italic
+        s = s.replace(/\\*\\*\\*(.+?)\\*\\*\\*/g, '<strong><em>$1</em></strong>');
+        s = s.replace(/___(.+?)___/g, '<strong><em>$1</em></strong>');
+        // bold
+        s = s.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+        s = s.replace(/__(.+?)__/g, '<strong>$1</strong>');
+        // italic
+        s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+        s = s.replace(/_(.+?)_/g, '<em>$1</em>');
+
+        // ------ Step 5: Images (before links, since pattern overlaps) ------
+        s = s.replace(/!\\[([^\\]]*)\\]\\(([^)\\s]+)(?:\\s+"([^"]*)")?\\)/g,
+          '<img src="$2" alt="$1" title="$3" style="max-width:100%">');
+
+        // ------ Step 6: Links ------
+        s = s.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)(?:\\s+"([^"]*)")?\\)/g,
+          '<a href="$2" title="$3" target="_blank" rel="noopener">$1</a>');
+
+        // ------ Step 7: Auto-link bare URLs ------
+        s = s.replace(/(https?:\\/\\/[^\\s<>"']+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+
+        // ------ Step 8: Split into lines, process block-level ------
+        var lines = s.split("\\n");
+        var out = [];
+        var inList = null;   // "ul" | "ol" | null
+        var inBlockquote = false;
+        var i = 0;
+
+        while (i < lines.length) {
+          var raw = lines[i];
+
+          // Blockquote
+          if (/^&gt;/.test(raw)) {
+            if (!inBlockquote) { out.push('<blockquote>'); inBlockquote = true; }
+            var qtext = raw.replace(/^&gt;\\s?/, "");
+            out.push('<p>' + (qtext || "&nbsp;") + '</p>');
+            i++;
+            continue;
+          } else if (inBlockquote) {
+            out.push('</blockquote>');
+            inBlockquote = false;
+            continue; // re-process this line
+          }
+
+          // HR
+          if (/^(-{3,}|\\*{3,}|_{3,})\\s*$/.test(raw)) {
+            flushList();
+            out.push('<hr>');
+            i++;
+            continue;
+          }
+
+          // Heading
+          var hMatch = raw.match(/^(#{1,6})\\s+(.+)/);
+          if (hMatch) {
+            flushList();
+            var level = hMatch[1].length;
+            out.push('<h' + level + '>' + hMatch[2] + '</h' + level + '>');
+            i++;
+            continue;
+          }
+
+          // Unordered list
+          var ulMatch = raw.match(/^( {0,3})([-*+])\\s+(.+)/);
+          if (ulMatch) {
+            ensureList("ul");
+            out.push('<li>' + ulMatch[3] + '</li>');
+            i++;
+            continue;
+          }
+
+          // Ordered list
+          var olMatch = raw.match(/^( {0,3})(\\d+)\\.\\s+(.+)/);
+          if (olMatch) {
+            ensureList("ol");
+            out.push('<li>' + olMatch[3] + '</li>');
+            i++;
+            continue;
+          }
+
+          // Not a list item – flush
+          flushList();
+
+          // Empty line -> paragraph break
+          if (/^\\s*$/.test(raw)) {
+            i++;
+            continue;
+          }
+
+          // Normal paragraph
+          out.push('<p>' + raw + '</p>');
+          i++;
+        }
+
+        flushList();
+        if (inBlockquote) out.push('</blockquote>');
+
+        var html = out.join("\\n");
+
+        // ------ Step 9: Restore fenced code blocks ------
+        html = html.replace(/\x00FENCE(\\d+)\x00/g, function(_, idx) {
+          return fences[+idx] || "";
+        });
+
+        return html;
+
+        function ensureList(type) {
+          if (inList === type) return;
+          if (inList) out.push('</' + inList + '>');
+          inList = type;
+          out.push('<' + type + '>');
+        }
+        function flushList() {
+          if (inList) { out.push('</' + inList + '>'); inList = null; }
+        }
+      }
+    })();
   </script>
 </body>
 </html>`;

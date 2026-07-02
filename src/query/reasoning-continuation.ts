@@ -5,8 +5,10 @@ import type {
   DeepSeekStreamRequest,
 } from "../deepseek/types.js";
 import type { Runtime } from "../types/runtime.js";
+import { emitRunEvent } from "../telemetry/observer.js";
 import { streamAssistantMessage, type AssistantStreamUpdate } from "./assistant-stream.js";
 import type { QueryEvent } from "./types.js";
+import { recordModelUsage } from "./usage.js";
 
 type AssistantReady = Extract<
   AssistantStreamUpdate,
@@ -39,6 +41,7 @@ export async function* streamAssistantWithReasoningContinuation(
 ): AsyncGenerator<QueryEvent, DeepSeekAssistantMessage, void> {
   const options = getReasoningContinuationOptions();
   const primaryResult = yield* streamAssistantOnce(
+    runtime,
     runtime.deepSeekClient,
     request,
   );
@@ -60,6 +63,7 @@ export async function* streamAssistantWithReasoningContinuation(
     };
 
     result = yield* streamAssistantOnce(
+      runtime,
       continuationClient,
       createReasoningContinuationRequest(runtime, request, reasoningTrail, options),
     );
@@ -81,6 +85,7 @@ export async function* streamAssistantWithReasoningContinuation(
   };
 
   result = yield* streamAssistantOnce(
+    runtime,
     continuationClient,
     createFinalAnswerPrefixRequest(runtime, request, reasoningTrail, options),
   );
@@ -92,6 +97,7 @@ export async function* streamAssistantWithReasoningContinuation(
 }
 
 async function* streamAssistantOnce(
+  runtime: Runtime,
   client: DeepSeekClient,
   request: DeepSeekCreateRequest & { stream: true },
 ): AsyncGenerator<QueryEvent, AssistantReady, void> {
@@ -101,6 +107,27 @@ async function* streamAssistantOnce(
     if (update.type === "assistant_message_ready") {
       assistantResult = update;
       continue;
+    }
+
+    if (update.type === "model_stream_event" && update.event.chunk?.usage) {
+      const usage = update.event.chunk.usage;
+      const sessionUsage = recordModelUsage(runtime, usage);
+      await emitRunEvent(runtime, {
+        type: "model_usage",
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
+        totalTokens: usage.total_tokens,
+        promptCacheHitTokens: usage.prompt_cache_hit_tokens ?? 0,
+        promptCacheMissTokens: usage.prompt_cache_miss_tokens ?? 0,
+        sessionTotalTokens: sessionUsage.totalTokens,
+        sessionPromptCacheHitTokens: sessionUsage.promptCacheHitTokens,
+        sessionPromptCacheMissTokens: sessionUsage.promptCacheMissTokens,
+      });
+      yield {
+        type: "model_usage",
+        usage,
+        sessionUsage,
+      };
     }
 
     yield update;

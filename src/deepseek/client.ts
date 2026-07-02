@@ -73,7 +73,9 @@ export function createDeepSeekClient(
     input: DeepSeekCreateRequest
   ): Promise<DeepSeekChatCompletionResponse> {
     const sdkRequest = toOpenAICreateRequest(input);
-    const sdkResponse = await sendDeepSeekSdkRequest(runtimeConfig, sdkRequest);
+    const sdkResponse = await sendDeepSeekSdkRequest(runtimeConfig, sdkRequest, {
+      signal: input.signal,
+    });
     return fromOpenAIResponse(sdkResponse);
   }
 
@@ -82,7 +84,11 @@ export function createDeepSeekClient(
   ): AsyncGenerator<DeepSeekStreamEnvelope, void, void> {
     const sdkRequest = toOpenAIStreamRequest(input);
 
-    for await (const chunk of streamDeepSeekSdkRequest(runtimeConfig, sdkRequest)) {
+    for await (
+      const chunk of streamDeepSeekSdkRequest(runtimeConfig, sdkRequest, {
+        signal: input.signal,
+      })
+    ) {
       yield {
         chunk: fromOpenAIChunk(chunk),
         raw: JSON.stringify(chunk),

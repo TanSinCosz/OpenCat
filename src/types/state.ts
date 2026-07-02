@@ -11,6 +11,16 @@ import {
   type SessionMemoryState,
 } from "./session-memory.js";
 
+export interface InvokedSkill {
+  name: string;
+  description: string;
+  content: string;
+  invokedAt: number;
+  agentId: string | null;
+  skillDir?: string;
+  skillPath?: string;
+}
+
 export interface State {
   Messages: Message[];
   runtimeContextMessages: Message[];
@@ -19,6 +29,7 @@ export interface State {
   mode: "default" | "plan";
   agentTasks: AgentTasksState;
   agentNotifications: AgentNotification[];
+  invokedSkills: InvokedSkill[];
 }
 
 export interface CreateStateOptions {
@@ -29,6 +40,7 @@ export interface CreateStateOptions {
   mode?: State["mode"];
   agentTasks?: AgentTasksState;
   agentNotifications?: AgentNotification[];
+  invokedSkills?: InvokedSkill[];
 }
 
 export function createState(options: CreateStateOptions = {}): State {
@@ -44,5 +56,6 @@ export function createState(options: CreateStateOptions = {}): State {
     agentTasks: options.agentTasks ?? createAgentTasksState(),
     agentNotifications: options.agentNotifications ??
       createAgentNotificationsState(),
+    invokedSkills: options.invokedSkills ?? [],
   };
 }

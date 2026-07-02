@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildMessagesForQuery, loadRuntimeContextForQuery } from "../src/query.js";
+import { buildMessagesForQuery, loadRuntimeContextForQuery, query } from "../src/query.js";
 import type { DeepSeekClient } from "../src/deepseek/client.js";
 import type {
   DeepSeekChatCompletionResponse,
@@ -156,6 +156,69 @@ test("runtime context is projected at request build time", async () => {
     withRuntime.messages.at(-1)?.content ?? "",
     /<task-notification>projected<\/task-notification>/,
   );
+  assert.match(withRuntime.messages.at(-1)?.content ?? "", /<opencat_context>/);
+  assert.equal(
+    withRuntime.messages.filter((message) =>
+      message.role === "user" &&
+      typeof message.content === "string" &&
+      message.content.includes("<opencat_context>")
+    ).length,
+    1,
+  );
+});
+
+test("query materializes runtime context into durable messages", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-runtime-context-materialized-")),
+    sessionId: "session_runtime_context_materialized",
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    deepSeekClient: createTextClient("OK"),
+    MemoryConfig: createMemoryConfig(),
+    longTermMemoryConfig: {
+      enabled: false,
+    },
+    tools: [],
+  });
+  const state = createState({
+    messages: [
+      createMessage({
+        role: "user",
+        content: "real user prompt",
+      }),
+    ],
+    agentNotifications: [
+      {
+        id: "agent_notification_materialized",
+        agentTaskId: "agent_1",
+        agentType: "worker",
+        description: "materialized",
+        status: "completed",
+        createdAt: 1,
+        message: "<task-notification>persist me</task-notification>",
+      },
+    ],
+  });
+
+  for await (const _event of query(runtime, state, { maxTurns: 1 })) {
+    // Drain query stream.
+  }
+
+  assert.equal(state.runtimeContextMessages.length, 0);
+  const contextMessage = state.Messages.find((message) =>
+    message.role === "user" &&
+    message.source === "runtime" &&
+    message.name === "opencat_context"
+  );
+  assert.ok(contextMessage);
+  const contextContent = typeof contextMessage.content === "string"
+    ? contextMessage.content
+    : "";
+  assert.match(contextContent, /<opencat_context>/);
+  assert.match(contextContent, /<task-notification>persist me<\/task-notification>/);
 });
 
 function createNoopClient(): DeepSeekClient {
@@ -165,6 +228,44 @@ function createNoopClient(): DeepSeekClient {
     },
     async *stream(_input: DeepSeekStreamRequest): AsyncGenerator<DeepSeekStreamEnvelope> {
       throw new Error("stream is not used in this test");
+    },
+    async collectStream(): Promise<never> {
+      throw new Error("collectStream is not used in this test");
+    },
+  };
+}
+
+function createTextClient(content: string): DeepSeekClient {
+  return {
+    async create(_input: DeepSeekCreateRequest): Promise<DeepSeekChatCompletionResponse> {
+      throw new Error("create is not used in this test");
+    },
+    async *stream(_input: DeepSeekStreamRequest): AsyncGenerator<DeepSeekStreamEnvelope> {
+      yield {
+        raw: content,
+        done: false,
+        chunk: {
+          id: "assistant-content",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "deepseek-v4-flash",
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: "assistant",
+                content,
+              },
+              finish_reason: "stop",
+            },
+          ],
+        },
+      };
+      yield {
+        raw: "[DONE]",
+        done: true,
+        chunk: null,
+      };
     },
     async collectStream(): Promise<never> {
       throw new Error("collectStream is not used in this test");

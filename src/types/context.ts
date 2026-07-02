@@ -15,6 +15,7 @@ export interface AutoCompressState {
   summaries: AutoCompressSummary[];
   sessionMemoryUpdated: boolean;
   readFileStateRestoredForSummaryId?: AutoCompressSummaryId;
+  invokedSkillsRestoredForSummaryId?: AutoCompressSummaryId;
 }
 
 export interface ContextProjectionState {

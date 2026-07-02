@@ -11,6 +11,7 @@ import {
   updateSessionMemoryForAutoCompress,
 } from "../session-memory/session-memory.js";
 import { restoreReadFileStateAfterAutoCompress } from "./read-file-restore.js";
+import { restoreInvokedSkillsAfterAutoCompress } from "./invoked-skill-restore.js";
 import type { DeepSeekCreateRequest } from "../deepseek/types.js";
 import type {
   AutoCompressState,
@@ -74,12 +75,7 @@ async function applyMainSessionMemoryCompression(
   const existingSummary = createSessionMemoryAutoCompressSummary(state);
   if (existingSummary && isSummaryCurrentForLatestMessage(existingSummary, state)) {
     const result = activateAutoCompressSummary(autoCompress, existingSummary);
-    await restoreReadFileStateAfterAutoCompress(
-      runtime,
-      state,
-      result.summary.id,
-      projectMessagesWithAutoCompress(state),
-    );
+    await restorePostAutoCompressContext(runtime, state, result.summary.id);
     return result;
   }
 
@@ -96,24 +92,14 @@ async function applyMainSessionMemoryCompression(
   if (!summary) {
     if (existingSummary) {
       const result = activateAutoCompressSummary(autoCompress, existingSummary);
-      await restoreReadFileStateAfterAutoCompress(
-        runtime,
-        state,
-        result.summary.id,
-        projectMessagesWithAutoCompress(state),
-      );
+      await restorePostAutoCompressContext(runtime, state, result.summary.id);
       return result;
     }
     return { status: "skipped", reason: "session_memory_not_usable" };
   }
 
   const result = activateAutoCompressSummary(autoCompress, summary);
-  await restoreReadFileStateAfterAutoCompress(
-    runtime,
-    state,
-    result.summary.id,
-    projectMessagesWithAutoCompress(state),
-  );
+  await restorePostAutoCompressContext(runtime, state, result.summary.id);
   return result;
 }
 
@@ -145,13 +131,28 @@ async function activateAndRestoreAutoCompressSummary(
     ensureAutoCompressState(state),
     summary,
   );
+  await restorePostAutoCompressContext(runtime, state, result.summary.id);
+  return result;
+}
+
+async function restorePostAutoCompressContext(
+  runtime: Runtime,
+  state: State,
+  summaryId: AutoCompressSummaryId,
+): Promise<void> {
+  const preservedMessages = projectMessagesWithAutoCompress(state);
   await restoreReadFileStateAfterAutoCompress(
     runtime,
     state,
-    result.summary.id,
-    projectMessagesWithAutoCompress(state),
+    summaryId,
+    preservedMessages,
   );
-  return result;
+  restoreInvokedSkillsAfterAutoCompress(
+    runtime,
+    state,
+    summaryId,
+    preservedMessages,
+  );
 }
 
 export function ensureAutoCompressState(state: State): AutoCompressState {

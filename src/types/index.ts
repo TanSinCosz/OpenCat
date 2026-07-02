@@ -36,8 +36,10 @@ export {
 } from "./messages.js";
 export {
   createRuntime,
+  createRuntimeUsageStats,
   type CreateRuntimeOptions,
   type Runtime,
+  type RuntimeUsageStats,
 } from "./runtime.js";
 export {
   createTranscriptStore,
@@ -57,6 +59,12 @@ export {
   persistLargeToolResultIfNeeded,
   type PersistToolResultOptions,
 } from "../tool-results/persistence.js";
+export type { EvaluationEvent } from "../telemetry/events.js";
+export { JsonlRunObserver } from "../telemetry/jsonl.js";
+export {
+  emitRunEvent,
+  type RunObserver,
+} from "../telemetry/observer.js";
 export {
   createSessionMemoryState,
   DEFAULT_SESSION_MEMORY_CONFIG,

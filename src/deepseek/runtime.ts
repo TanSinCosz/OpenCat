@@ -33,11 +33,14 @@ export function createDeepSeekOpenAIClient(
 
 export async function sendDeepSeekSdkRequest(
   config: DeepSeekRuntimeConfig,
-  request: ChatCompletionCreateParamsNonStreaming
+  request: ChatCompletionCreateParamsNonStreaming,
+  options: { signal?: AbortSignal } = {},
 ): Promise<ChatCompletion> {
   const client = createDeepSeekOpenAIClient(config);
   try {
-    return await client.chat.completions.create(request);
+    return await client.chat.completions.create(request, {
+      signal: options.signal,
+    });
   } catch (error) {
     throw normalizeDeepSeekApiError(error);
   }
@@ -45,12 +48,15 @@ export async function sendDeepSeekSdkRequest(
 
 export async function* streamDeepSeekSdkRequest(
   config: DeepSeekRuntimeConfig,
-  request: ChatCompletionCreateParamsStreaming
+  request: ChatCompletionCreateParamsStreaming,
+  options: { signal?: AbortSignal } = {},
 ): AsyncGenerator<ChatCompletionChunk, void, void> {
   const client = createDeepSeekOpenAIClient(config);
   let stream: AsyncIterable<ChatCompletionChunk>;
   try {
-    stream = await client.chat.completions.create(request);
+    stream = await client.chat.completions.create(request, {
+      signal: options.signal,
+    });
   } catch (error) {
     throw normalizeDeepSeekApiError(error);
   }

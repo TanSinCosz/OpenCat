@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { query } from "../../query.js";
 import { buildMessagesForQuery } from "../../query/messages.js";
+import { emitRunEvent } from "../../telemetry/observer.js";
 import {
   recordTranscriptMessage,
   recordTranscriptStateSnapshot,
@@ -177,6 +178,7 @@ async function runAgentSynchronously(
   );
   const childState = createChildAgentState(
     options,
+    agentId,
     worktree,
     agentToolPolicyPrompt,
   );
@@ -190,6 +192,18 @@ async function runAgentSynchronously(
 
   let result = "";
   let finalizedWorktree: FinalizedWorktree = worktreeToOutput(worktree);
+  const startedAt = Date.now();
+
+  await emitRunEvent(options.parentRuntime, {
+    type: "agent_started",
+    childAgentId: agentId,
+    childAgentType: options.agentDefinition.agentType,
+    mode: options.mode,
+    isolation: options.isolation,
+    allowedTools: resolvedAgentTools.resolvedTools.map((tool) => tool.name),
+    worktreePath: worktree?.worktreePath,
+    worktreeBranch: worktree?.worktreeBranch,
+  });
 
   try {
     for await (const event of query(childRuntime, childState, {
@@ -226,6 +240,17 @@ async function runAgentSynchronously(
     if (shouldRecordLifecycle) {
       await completeAgentTask(options, agentId, result, undefined, finalizedWorktree);
     }
+    await emitRunEvent(options.parentRuntime, {
+      type: "agent_finished",
+      childAgentId: agentId,
+      childAgentType: options.agentDefinition.agentType,
+      mode: options.mode,
+      durationMs: Date.now() - startedAt,
+      messageCount: childState.Messages.length,
+      changedFiles: finalizedWorktree.changedFiles,
+      worktreePath: finalizedWorktree.worktreePath,
+      worktreeBranch: finalizedWorktree.worktreeBranch,
+    });
 
     return {
       status: "completed",
@@ -249,6 +274,17 @@ async function runAgentSynchronously(
         finalizedWorktree,
       );
     }
+    await emitRunEvent(options.parentRuntime, {
+      type: "agent_failed",
+      childAgentId: agentId,
+      childAgentType: options.agentDefinition.agentType,
+      mode: options.mode,
+      durationMs: Date.now() - startedAt,
+      error: stringifyError(error),
+      changedFiles: finalizedWorktree.changedFiles,
+      worktreePath: finalizedWorktree.worktreePath,
+      worktreeBranch: finalizedWorktree.worktreeBranch,
+    });
 
     throw error;
   }
@@ -286,6 +322,7 @@ function buildInitialMessages(
 
 function createChildAgentState(
   options: RunAgentOptions,
+  agentId: SubAgentId,
   worktree: AgentWorktreeSession | undefined,
   agentToolPolicyPrompt: string,
 ): State {
@@ -297,6 +334,11 @@ function createChildAgentState(
       runtimeContextMessages: cloneMessages(options.parentState.runtimeContextMessages),
       autoCompress: cloneAutoCompressState(options.parentState.autoCompress),
       sessionMemory: cloneSessionMemoryState(options.parentState.sessionMemory),
+      invokedSkills: cloneInvokedSkillsForFork(
+        options.parentState.invokedSkills,
+        options.parentRuntime.agentId,
+        agentId,
+      ),
       mode: options.parentState.mode,
     });
   }
@@ -309,6 +351,17 @@ function createChildAgentState(
 
 function cloneMessages(messages: readonly Message[]): Message[] {
   return messages.map((message) => ({ ...message }) as Message);
+}
+
+function cloneInvokedSkillsForFork(
+  skills: readonly State["invokedSkills"][number][],
+  parentAgentId: string,
+  childAgentId: string,
+): State["invokedSkills"] {
+  return skills.map((skill) => ({
+    ...skill,
+    agentId: skill.agentId === parentAgentId ? childAgentId : skill.agentId,
+  }));
 }
 
 function cloneAutoCompressState(state: State["autoCompress"]): State["autoCompress"] {
@@ -361,6 +414,8 @@ function createChildAgentRuntime(
       agentId,
     },
     tools: childTools,
+    observer: parent.observer,
+    usage: parent.usage,
     messages: childState.Messages,
     tokenizer: parent.toolUseContext.tokenizer,
     isNonInteractiveSession: parent.toolUseContext.options.isNonInteractiveSession,
@@ -395,6 +450,11 @@ async function drainPendingAgentMessagesIntoChildContext(
   childState.Messages.push(message);
   childRuntime.toolUseContext.messages = childState.Messages;
   await recordTranscriptMessage(childRuntime, message);
+  await emitRunEvent(childRuntime, {
+    type: "agent_message_drained",
+    childAgentId: agentId,
+    messageCount: messages.length,
+  });
 
   return messages.length;
 }

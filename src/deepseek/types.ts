@@ -91,6 +91,7 @@ export type DeepSeekMessage =
 export interface DeepSeekCreateRequest {
   model: "deepseek-v4-flash" | "deepseek-v4-pro";
   messages: DeepSeekMessage[];
+  signal?: AbortSignal;
   thinking?: DeepSeekThinkingConfig | null;
   reasoning_effort?: "high" | "max";
   max_tokens?: number | null;

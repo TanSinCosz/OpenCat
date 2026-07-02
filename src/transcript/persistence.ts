@@ -44,6 +44,7 @@ export type PersistedStateSnapshot = {
   agentTasks: AgentTasksState;
   agentNotifications: AgentNotification[];
   runtimeContextMessages: Message[];
+  invokedSkills: State["invokedSkills"];
   messageCount: number;
   latestMessageId?: MessageId;
 };
@@ -209,6 +210,7 @@ export async function loadStateFromTranscript(
     mode: latestSnapshot?.mode,
     agentTasks: latestSnapshot?.agentTasks,
     agentNotifications: latestSnapshot?.agentNotifications,
+    invokedSkills: latestSnapshot?.invokedSkills,
   });
 }
 
@@ -236,6 +238,7 @@ function createPersistedStateSnapshot(state: State): PersistedStateSnapshot {
     agentTasks: state.agentTasks,
     agentNotifications: state.agentNotifications,
     runtimeContextMessages: state.runtimeContextMessages,
+    invokedSkills: state.invokedSkills,
     messageCount: state.Messages.length,
     latestMessageId: state.Messages.at(-1)?.id,
   };

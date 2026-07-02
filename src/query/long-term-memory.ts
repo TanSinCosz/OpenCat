@@ -3,6 +3,7 @@ import type { Message as MemoryInputMessage } from "../Memory/type.js";
 import { getOrCreateLongTermMemory } from "../Memory/runtime.js";
 import { searchLongTermMemory } from "../Memory/runtime.js";
 import { loadStateFromTranscript } from "../transcript/persistence.js";
+import { emitRunEvent } from "../telemetry/observer.js";
 import type { Message, MessageId } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
@@ -43,12 +44,20 @@ export async function createLongTermMemoryContextMessage(
       return null;
     }
 
+    const content = renderLongTermMemoryContext(
+      result.results,
+      config.maxInjectedChars,
+    );
+    await emitRunEvent(runtime, {
+      type: "long_term_memory_injected",
+      queryChars: query.length,
+      resultCount: result.results.length,
+      injectedChars: content.length,
+    });
+
     return {
       role: "user",
-      content: renderLongTermMemoryContext(
-        result.results,
-        config.maxInjectedChars,
-      ),
+      content,
     };
   } catch {
     // Memory search is helpful context, not a hard dependency for answering.

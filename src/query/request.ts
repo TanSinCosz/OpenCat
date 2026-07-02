@@ -1,6 +1,7 @@
 import type {
   DeepSeekCreateRequest,
   DeepSeekMessage,
+  DeepSeekStreamRequest,
   DeepSeekToolDefinition,
 } from "../deepseek/types.js";
 import type { Runtime } from "../types/runtime.js";
@@ -10,10 +11,11 @@ import { z } from "zod";
 export async function createStreamRequest(
   runtime: Runtime,
   messages: DeepSeekMessage[],
-): Promise<DeepSeekCreateRequest & { stream: true }> {
+): Promise<DeepSeekStreamRequest> {
   return {
     model: runtime.deepSeekRuntimeConfig.model as DeepSeekCreateRequest["model"],
     messages,
+    signal: runtime.toolUseContext.abortController.signal,
     max_tokens: runtime.deepSeekRuntimeConfig.maxTokens,
     reasoning_effort:
       runtime.deepSeekRuntimeConfig.reasoningEffort === "high" ||
@@ -23,6 +25,9 @@ export async function createStreamRequest(
     tools: await toDeepSeekTools(runtime.tools),
     tool_choice: runtime.tools.length > 0 ? "auto" : undefined,
     stream: true,
+    stream_options: {
+      include_usage: true,
+    },
   };
 }
 

@@ -5,6 +5,7 @@ import {
   type SystemPromptOptions,
 } from "../system-prompt.js";
 import { createLongTermMemoryContextMessage } from "./long-term-memory.js";
+import { createProjectionContextMessage } from "./runtime-context.js";
 import type { ToolResultBudgetState } from "../types/context.js";
 import { toDeepSeekMessage } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
@@ -40,29 +41,45 @@ export async function buildMessagesForQuery(
     steps?: readonly MessageCompressionStep[];
     applyRequestLimits?: boolean;
     includeRuntimeContext?: boolean;
+    includeProjectionContext?: boolean;
   } = {},
 ): Promise<MessagesForQuery> {
   const promptOptions = options.promptOptions ?? {};
   const applyRequestLimits = options.applyRequestLimits ?? true;
   const includeRuntimeContext = options.includeRuntimeContext ?? true;
+  const includeProjectionContext = options.includeProjectionContext ?? true;
   const systemPrompt = await getOrCreateSystemPrompt(runtime, promptOptions);
   const projectedMessages = projectMessagesWithAutoCompress(state);
   const runtimeContextMessages = includeRuntimeContext
     ? state.runtimeContextMessages
     : [];
-  const longTermMemoryMessage = await createLongTermMemoryContextMessage(
-    runtime,
-    projectedMessages,
-  );
+  const longTermMemoryMessage = includeProjectionContext
+    ? await createLongTermMemoryContextMessage(runtime, projectedMessages)
+    : null;
+  const projectionContextMessage = includeProjectionContext
+    ? createProjectionContextMessage([
+      ...(longTermMemoryMessage
+        ? [{
+          source: "long_term_memory" as const,
+          content: typeof longTermMemoryMessage.content === "string"
+            ? longTermMemoryMessage.content
+            : "",
+        }]
+        : []),
+      ...runtimeContextMessages.map((message) => ({
+        source: message.source,
+        content: typeof message.content === "string" ? message.content : "",
+      })),
+    ])
+    : null;
 
   let messages: DeepSeekMessage[] = [
     {
       role: "system",
       content: systemPrompt,
     },
-    ...(longTermMemoryMessage ? [longTermMemoryMessage] : []),
     ...projectedMessages.map(toDeepSeekMessage),
-    ...runtimeContextMessages.map(toDeepSeekMessage),
+    ...(projectionContextMessage ? [projectionContextMessage] : []),
   ];
 
   if (applyRequestLimits) {

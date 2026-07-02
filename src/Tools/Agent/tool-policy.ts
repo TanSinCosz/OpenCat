@@ -15,6 +15,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "Grep",
   "WebSearch",
   "WebFetch",
+  "ReadSkill",
 ]);
 
 const VERIFY_TOOL_NAMES = new Set([

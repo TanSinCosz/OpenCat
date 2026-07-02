@@ -1,7 +1,8 @@
 
 # Dependencies
 node_modules/
-
+resume/
+ARCHITECTURE.md
 # Build output
 dist/
 build/

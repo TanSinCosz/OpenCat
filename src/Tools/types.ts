@@ -276,6 +276,8 @@ export type SkillCommand = {
     description: string
     content: string
     paths?: string[]
+    skillDir?: string
+    skillPath?: string
 }
 
 
@@ -284,6 +286,7 @@ export type SkillRuntimeState = {
     dynamicSkills: Map<string, SkillCommand>
     conditionalSkills: Map<string, SkillCommand>
     activatedConditionalSkillNames: Set<string>
+    sentDynamicSkillNames: Set<string>
 }
 
 export function createSkillRuntimeState(): SkillRuntimeState {
@@ -292,6 +295,7 @@ export function createSkillRuntimeState(): SkillRuntimeState {
         dynamicSkills: new Map(),
         conditionalSkills: new Map(),
         activatedConditionalSkillNames: new Set(),
+        sentDynamicSkillNames: new Set(),
     }
 }
 

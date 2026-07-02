@@ -127,7 +127,7 @@ function createSessionMemoryAgentDefinition(): AgentDefinition {
     source: "built-in",
     whenToUse: "Internal agent used to update rolling session memory notes.",
     tools: ["Edit"],
-    disallowedTools: ["Agent", "Bash", "Write", "Read", "MemorySave", "SendMessage"],
+    disallowedTools: ["Agent", "Bash", "Write", "Read", "ReadSkill", "MemorySave", "SendMessage"],
     model: "inherit",
     permissionMode: "default",
     maxTurns: 4,

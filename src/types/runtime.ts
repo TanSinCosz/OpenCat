@@ -31,11 +31,20 @@ import {
 } from "./config.js";
 import type { ContextProjectionState, ToolResultBudgetState } from "./context.js";
 import type { Message } from "./messages.js";
+import type { RunObserver } from "../telemetry/observer.js";
 
 export type MainAgentId = "main";
 export type SubAgentId = `agent_${string}`;
 export type RuntimeAgentId = MainAgentId | SubAgentId;
 export type RuntimeAgentRole = "main" | "subagent" | "session";
+
+export interface RuntimeUsageStats {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  promptCacheHitTokens: number;
+  promptCacheMissTokens: number;
+}
 
 export interface Runtime {
   // Runtime identity.
@@ -56,6 +65,8 @@ export interface Runtime {
   longTermMemory?: MemoryTool;
   longTermMemoryConfig: LongTermMemoryRuntimeConfig;
   transcriptStore?: TranscriptStore;
+  observer?: RunObserver;
+  usage: RuntimeUsageStats;
 
   tools: Tools;
   toolUseContext: ToolUseContext;
@@ -79,6 +90,8 @@ export interface CreateRuntimeOptions {
   longTermMemory?: MemoryTool;
   longTermMemoryConfig?: CreateLongTermMemoryRuntimeConfigOptions;
   transcriptStore?: TranscriptStore | false;
+  observer?: RunObserver;
+  usage?: RuntimeUsageStats;
   tools?: Tools;
   mcpConnections?: readonly McpConnection[];
 
@@ -140,6 +153,8 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
       { sessionId, agentId },
     ),
     transcriptStore,
+    observer: options.observer,
+    usage: options.usage ?? createRuntimeUsageStats(),
     tools,
     mcpConnections: options.mcpConnections ?? [],
     toolUseContext: createToolUseContext({
@@ -155,5 +170,15 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
       readFileState: options.readFileState,
       canUseTool: options.canUseTool,
     }),
+  };
+}
+
+export function createRuntimeUsageStats(): RuntimeUsageStats {
+  return {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    promptCacheHitTokens: 0,
+    promptCacheMissTokens: 0,
   };
 }

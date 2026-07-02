@@ -258,11 +258,11 @@ test("read-only agents only receive read tools", async () => {
   assert.equal(output.status, "completed");
   assert.deepEqual(
     getRequestToolNames(streamRequests[0]),
-    ["Read", "Glob", "Grep", "WebSearch", "WebFetch"],
+    ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "ReadSkill"],
   );
   const systemPrompt = streamRequests[0]?.messages[0]?.content ?? "";
   assert.match(systemPrompt, /<agent_tool_policy>/);
-  assert.match(systemPrompt, /Available tools: Read, Glob, Grep, WebSearch, WebFetch/);
+  assert.match(systemPrompt, /Available tools: Read, Glob, Grep, WebSearch, WebFetch, ReadSkill/);
   assert.match(systemPrompt, /Unavailable tools: .*Agent/);
   assert.match(systemPrompt, /Unavailable tools: .*Edit/);
   assert.match(systemPrompt, /Unavailable tools: .*Write/);
@@ -290,11 +290,11 @@ test("verification agents receive Bash for checks but not editing tools", async 
   assert.equal(output.status, "completed");
   assert.deepEqual(
     getRequestToolNames(streamRequests[0]),
-    ["Bash", "Read", "Glob", "Grep", "WebSearch", "WebFetch"],
+    ["Bash", "Read", "Glob", "Grep", "WebSearch", "WebFetch", "ReadSkill"],
   );
   const systemPrompt = streamRequests[0]?.messages[0]?.content ?? "";
   assert.match(systemPrompt, /<agent_tool_policy>/);
-  assert.match(systemPrompt, /Available tools: Bash, Read, Glob, Grep, WebSearch, WebFetch/);
+  assert.match(systemPrompt, /Available tools: Bash, Read, Glob, Grep, WebSearch, WebFetch, ReadSkill/);
   assert.match(systemPrompt, /Unavailable tools: .*Agent/);
   assert.match(systemPrompt, /Unavailable tools: .*Edit/);
   assert.match(systemPrompt, /Unavailable tools: .*Write/);

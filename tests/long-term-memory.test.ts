@@ -68,15 +68,16 @@ test("buildMessagesForQuery injects long-term memory as projection only", async 
   assert.equal(state.Messages.length, 1);
   assert.equal(projection.messages[0]?.role, "system");
   assert.equal(projection.messages[1]?.role, "user");
-  assert.match(projection.messages[1]?.content ?? "", /<long_term_memory>/);
-  assert.match(
-    projection.messages[1]?.content ?? "",
-    /repo-grounded implementation notes/,
+  assert.equal(
+    projection.messages[1]?.content,
+    "What conventions should I follow in this repo?",
   );
   assert.equal(projection.messages[2]?.role, "user");
-  assert.equal(
-    projection.messages[2]?.content,
-    "What conventions should I follow in this repo?",
+  assert.match(projection.messages[2]?.content ?? "", /<opencat_context>/);
+  assert.match(projection.messages[2]?.content ?? "", /<long_term_memory>/);
+  assert.match(
+    projection.messages[2]?.content ?? "",
+    /repo-grounded implementation notes/,
   );
 });
 

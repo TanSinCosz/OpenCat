@@ -119,11 +119,12 @@ async function loadSkillsFromDirectory(dir: string): Promise<SkillCommand[]> {
         if (!entry.isDirectory()) continue
 
         const skillName = entry.name
-        const skillFile = join(dir, skillName, 'SKILL.md')
+        const skillDir = join(dir, skillName)
+        const skillFile = join(skillDir, 'SKILL.md')
 
         try {
             const content = await readFile(skillFile, 'utf8')
-            skills.push(parseSkillFile(skillName, content))
+            skills.push(parseSkillFile(skillName, content, skillDir, skillFile))
         } catch {
             // Directory without SKILL.md is not a skill.
         }
@@ -132,7 +133,12 @@ async function loadSkillsFromDirectory(dir: string): Promise<SkillCommand[]> {
     return skills
 }
 
-function parseSkillFile(name: string, raw: string,): SkillCommand {
+function parseSkillFile(
+    name: string,
+    raw: string,
+    skillDir: string,
+    skillPath: string,
+): SkillCommand {
     const { frontmatter, body } = parseFrontmatter(raw)
 
     return {
@@ -140,6 +146,8 @@ function parseSkillFile(name: string, raw: string,): SkillCommand {
         description: frontmatter.description ?? name,
         content: body.trim(),
         paths: frontmatter.paths?.split(',').map(p => p.trim()).filter(Boolean),
+        skillDir,
+        skillPath,
     }
 }
 
