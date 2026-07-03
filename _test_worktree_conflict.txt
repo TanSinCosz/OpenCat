@@ -1,9 +1,9 @@
 === WORKTREE CONFLICT TEST ===
 This file is used to test worktree isolation and conflict resolution.
 
-ORIGINAL CONTENT - Line 3
-ORIGINAL CONTENT - Line 4
-ORIGINAL CONTENT - Line 5
+MAIN AGENT MODIFIED - Line 3
+MAIN AGENT MODIFIED - Line 4
+MAIN AGENT MODIFIED - Line 5
 ORIGINAL CONTENT - Line 6
 ORIGINAL CONTENT - Line 7
 
