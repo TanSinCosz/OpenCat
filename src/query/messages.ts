@@ -9,7 +9,7 @@ import type {
   HistorySnipId,
   ToolResultBudgetState,
 } from "../types/context.js";
-import { toDeepSeekMessage, type Message } from "../types/messages.js";
+import { createMessage, toDeepSeekMessage, type Message } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
 import type { MessagesForQuery } from "./types.js";
@@ -25,24 +25,21 @@ export async function buildMessagesForQuery(
 ): Promise<MessagesForQuery> {
   const systemPrompt = await getOrCreateSystemPrompt(runtime);
   const autoCompressedMessages = projectMessagesWithAutoCompress(state);
+  let budgetedMessages = applyToolResultBudget(
+    cloneMessages(autoCompressedMessages),
+    runtime,
+  );
   let projectedMessages = projectMessagesWithHistorySnips(
     state,
-    autoCompressedMessages,
+    budgetedMessages,
   );
+  // Progressive compression pipeline: tool result budget →
+  // history snip boundary projection → micro-compress.
+  let snipedMessages = applyHistorySnip(projectedMessages);
   let messages = await createDeepSeekMessagesForProjection({
     systemPrompt,
-    projectedMessages,
+    projectedMessages: snipedMessages,
   });
-
-  // Progressive compression pipeline: tool result budget →
-  // micro-compress → history snip boundary.
-  let toolResultBudgetKeysByMessageIndex =
-    createToolResultBudgetKeysByMessageIndex(projectedMessages);
-  messages = applyToolResultBudget(messages, runtime, {
-    toolResultBudgetKeysByMessageIndex,
-  });
-
-  messages = applyHistorySnip(messages);
 
   const historySnipBoundary = createHistorySnipBoundaryIfNeeded(
     messages,
@@ -51,23 +48,26 @@ export async function buildMessagesForQuery(
 
   if (historySnipBoundary) {
     getHistorySnipBoundaries(state).push(historySnipBoundary);
+    budgetedMessages = applyToolResultBudget(
+      cloneMessages(autoCompressedMessages),
+      runtime,
+    );
     projectedMessages = projectMessagesWithHistorySnips(
       state,
-      autoCompressedMessages,
+      budgetedMessages,
     );
+    snipedMessages = applyHistorySnip(projectedMessages);
     messages = await createDeepSeekMessagesForProjection({
       systemPrompt,
-      projectedMessages,
+      projectedMessages: snipedMessages,
     });
-    toolResultBudgetKeysByMessageIndex =
-      createToolResultBudgetKeysByMessageIndex(projectedMessages);
-    messages = applyToolResultBudget(messages, runtime, {
-      toolResultBudgetKeysByMessageIndex,
-    });
-    messages = applyHistorySnip(messages);
   }
 
   return { systemPrompt, messages };
+}
+
+function cloneMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) => ({ ...message }) as Message);
 }
 
 export async function createDeepSeekMessagesForProjection(options: {
@@ -81,22 +81,6 @@ export async function createDeepSeekMessagesForProjection(options: {
     },
     ...options.projectedMessages.map(toDeepSeekMessage),
   ];
-}
-
-export function createToolResultBudgetKeysByMessageIndex(
-  projectedMessages: Message[],
-): Map<number, string> {
-  const keys = new Map<number, string>();
-
-  for (const [messageIndex, message] of projectedMessages.entries()) {
-    if (message.role === "tool") {
-      // The DeepSeek projection prepends the system message, so business
-      // message index N is wire message index N + 1.
-      keys.set(messageIndex + 1, message.id);
-    }
-  }
-
-  return keys;
 }
 
 export async function getOrCreateSystemPrompt(
@@ -131,9 +115,6 @@ type CandidatePartition = {
 export function applyToolResultBudget(
   messages: Message[],
   runtime: Runtime,
-  options: {
-    toolResultBudgetKeysByMessageIndex?: ReadonlyMap<number, string>;
-  } = {},
 ): Message[] {
   const state = getOrCreateToolResultBudgetState(runtime);
 
@@ -148,11 +129,7 @@ export function applyToolResultBudget(
   const replacementByMessageIndex = new Map<number, string>();
 
   for (
-    const candidates of collectToolResultGroups(
-      messages,
-      toolNameById,
-      options.toolResultBudgetKeysByMessageIndex,
-    )
+    const candidates of collectToolResultGroups(messages, toolNameById)
   ) {
     const { mustReapply, frozen, fresh } = partitionByPriorDecision(
       candidates,
@@ -225,7 +202,7 @@ export function applyToolResultBudget(
   });
 }
 
-export function applyHistorySnip(messages: Message[]): DeepSeekMessage[] {
+export function applyHistorySnip(messages: Message[]): Message[] {
   const maxMessagesForQueryChars = getHistorySnipHardChars();
 
   if (totalMessageSize(messages) <= maxMessagesForQueryChars) {
@@ -612,7 +589,7 @@ function getOrCreateToolResultBudgetState(
   return runtime.toolResultBudgetState;
 }
 
-function buildToolNameById(messages: DeepSeekMessage[]): Map<string, string> {
+function buildToolNameById(messages: Message[]): Map<string, string> {
   const toolNameById = new Map<string, string>();
 
   for (const message of messages) {
@@ -629,9 +606,8 @@ function buildToolNameById(messages: DeepSeekMessage[]): Map<string, string> {
 }
 
 function collectToolResultGroups(
-  messages: DeepSeekMessage[],
+  messages: Message[],
   toolNameById: ReadonlyMap<string, string>,
-  toolResultBudgetKeysByMessageIndex?: ReadonlyMap<number, string>,
 ): ToolResultCandidate[][] {
   const groups: ToolResultCandidate[][] = [];
   let current: ToolResultCandidate[] = [];
@@ -654,8 +630,7 @@ function collectToolResultGroups(
     }
 
     current.push({
-      budgetKey: toolResultBudgetKeysByMessageIndex?.get(messageIndex) ??
-        createFallbackToolResultBudgetKey(message, messageIndex),
+      budgetKey: message.id,
       messageIndex,
       toolCallId: message.tool_call_id,
       toolName: toolNameById.get(message.tool_call_id),
@@ -667,18 +642,6 @@ function collectToolResultGroups(
   flush();
 
   return groups;
-}
-
-function createFallbackToolResultBudgetKey(
-  message: Extract<DeepSeekMessage, { role: "tool" }>,
-  messageIndex: number,
-): string {
-  const contentHash = createHash("sha256")
-    .update(message.content)
-    .digest("hex")
-    .slice(0, 16);
-
-  return `tool_result_budget_${messageIndex}_${message.tool_call_id}_${contentHash}`;
 }
 
 function partitionByPriorDecision(
@@ -777,12 +740,15 @@ function isToolResultAlreadyBudgeted(content: string): boolean {
   return content.startsWith(TOOL_RESULT_BUDGET_TAG);
 }
 
-function createSnipMarkerMessage(removedMessages: number): DeepSeekMessage {
-  return {
-    role: "user",
-    content:
-      `[History snipped: ${removedMessages} earlier messages were removed from this prompt projection to stay within the context budget. The authoritative conversation state was not modified.]`,
-  };
+function createSnipMarkerMessage(removedMessages: number): Message {
+  return createMessage(
+    {
+      role: "user",
+      content:
+        `[History snipped: ${removedMessages} earlier messages were removed from this prompt projection to stay within the context budget. The authoritative conversation state was not modified.]`,
+    },
+    { source: "runtime" },
+  );
 }
 
 function moveToSafeTailBoundary(
