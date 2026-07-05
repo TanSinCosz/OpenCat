@@ -6,7 +6,6 @@ import type {
     AgentDefinitionsResult,
     AgentSource,
 } from "./Agent/definitions.js";
-import type { Message } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
 import type { Tokenizer } from "./utils/Tokenizer.js";
@@ -223,12 +222,10 @@ export type ToolUseContext = {
     readFileState: FileStateCache
     canUseTool?: CanUseToolFn
     tokenizer?: Tokenizer
-    messages: Message[]
 }
 
 export type CreateToolUseContextOptions = {
     tools?: Tools
-    messages?: Message[]
     appState?: AppState
     abortController?: AbortController
     tokenizer?: Tokenizer
@@ -267,7 +264,6 @@ export function createToolUseContext(
         readFileState: options.readFileState ?? createFileStateCache(),
         canUseTool: options.canUseTool,
         tokenizer: options.tokenizer,
-        messages: options.messages ?? [],
     }
 }
 

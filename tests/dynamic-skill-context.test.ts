@@ -37,7 +37,6 @@ test("dynamic skills are materialized into opencat context once", async () => {
     longTermMemoryConfig: {
       enabled: false,
     },
-    messages: state.Messages,
     tools: [],
   });
   runtime.toolUseContext.skillRuntime.dynamicSkills.set("repo-style", {
@@ -66,7 +65,6 @@ test("dynamic skills are materialized into opencat context once", async () => {
     role: "user",
     content: "Continue.",
   }));
-  runtime.toolUseContext.messages = state.Messages;
 
   for await (const _event of query(runtime, state, { maxTurns: 1 })) {
     // Drain query stream.

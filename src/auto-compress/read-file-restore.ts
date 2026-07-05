@@ -54,7 +54,6 @@ export async function restoreReadFileStateAfterAutoCompress(
   );
 
   state.runtimeContextMessages.push(...restored.messages);
-  runtime.toolUseContext.messages = state.Messages;
 
   return {
     candidateCount: candidates.length,

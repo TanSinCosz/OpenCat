@@ -100,6 +100,9 @@ function getToolUseSection(tools: readonly Tool[]): string {
 - Validate tool inputs before calling tools. Tool call implementations can assume they receive post-validation input.
 - Prefer dedicated file tools for file operations instead of shell commands when available.
 - Use search tools before broad reads when looking for unknown files or symbols.
+- Use Glob for broad file pattern matching, Grep for searching file contents, and Read when you know the exact file path.
+- Do not use Bash for grep/rg/find/cat/head/tail when dedicated tools are available.
+- Avoid changing directories with cd in Bash commands. Prefer the current working directory, tool path parameters, or explicit paths.
 - For edit/write operations, respect each tool's safety contract, especially read-before-edit and modified-after-read checks.`;
 }
 

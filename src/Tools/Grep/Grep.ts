@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Tool, ToolUseContext } from "../types.js";
 import { getCwd } from "../utils/cwd.js";
 import { expandPath } from "../utils/path.js";
+import { resolveRipgrepCommand } from "../utils/ripgrep.js";
 import { getDescription, GREP_TOOL_NAME } from "./prompt.js";
 import { inputSchema, outputSchema } from "./type.js";
 
@@ -296,14 +297,16 @@ function isENOENT(error: unknown): boolean {
     return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
-export function runRipgrep(
+export async function runRipgrep(
     args: string[],
     cwd: string,
     signal?: AbortSignal,
     timeoutMs = 30_000,
 ): Promise<string[]> {
+    const ripgrepCommand = await resolveRipgrepCommand();
+
     return new Promise((resolve, reject) => {
-        const child = spawn('rg', args, {
+        const child = spawn(ripgrepCommand, args, {
             cwd,
             signal,
             shell: false,

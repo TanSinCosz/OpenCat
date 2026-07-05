@@ -5,9 +5,6 @@ import type {
   DeepSeekToolCall,
   DeepSeekUsage,
 } from "../deepseek/types.js";
-import type { SystemPromptOptions } from "../system-prompt.js";
-import type { Runtime } from "../types/runtime.js";
-import type { State } from "../types/state.js";
 import type { RuntimeUsageStats } from "../types/runtime.js";
 
 export type QueryEvent =
@@ -27,7 +24,11 @@ export type QueryEvent =
   }
   | { type: "assistant_reasoning_delta"; text: string }
   | { type: "assistant_text_delta"; text: string }
-  | { type: "assistant_message"; message: DeepSeekAssistantMessage }
+  | {
+    type: "assistant_message";
+    message: DeepSeekAssistantMessage;
+    usage?: DeepSeekUsage;
+  }
   | { type: "tool_use"; toolCall: DeepSeekToolCall }
   | { type: "tool_result"; toolCall: DeepSeekToolCall; message: DeepSeekMessage }
   | { type: "turn_end"; turn: number; hasToolUse: boolean }
@@ -39,30 +40,9 @@ export type QueryEvent =
 
 export interface QueryOptions {
   maxTurns?: number;
-  promptOptions?: SystemPromptOptions;
-  messagesForQueryBuilder?: MessagesForQueryBuilder;
 }
 
 export interface MessagesForQuery {
   systemPrompt: string;
   messages: DeepSeekMessage[];
-}
-
-export type MessagesForQueryBuilder = (
-  runtime: Runtime,
-  state: State,
-) => Promise<MessagesForQuery>;
-
-export interface MessageCompressionStep {
-  name: string;
-  apply(
-    messages: DeepSeekMessage[],
-    context: MessageCompressionContext,
-  ): Promise<DeepSeekMessage[]> | DeepSeekMessage[];
-}
-
-export interface MessageCompressionContext {
-  runtime: Runtime;
-  state: State;
-  systemPrompt: string;
 }

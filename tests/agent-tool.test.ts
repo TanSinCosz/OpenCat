@@ -110,6 +110,90 @@ test("Agent tool fork mode inherits parent messages and read cache", async () =>
   );
 });
 
+test("Agent tool fork mode drops incomplete parent tool calls", async () => {
+  const harness = createHarness({
+    parentMessages: [
+      createMessage({
+        role: "user",
+        content: "stable parent context",
+      }),
+      createMessage({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_finished",
+            type: "function",
+            function: {
+              name: "Read",
+              arguments: "{}",
+            },
+          },
+          {
+            id: "call_missing",
+            type: "function",
+            function: {
+              name: "Grep",
+              arguments: "{}",
+            },
+          },
+        ],
+      }),
+      createMessage({
+        role: "tool",
+        content: "partial result only",
+        tool_call_id: "call_finished",
+      }),
+      createMessage({
+        role: "user",
+        content: "latest parent instruction",
+      }),
+    ],
+    streams: [[textChunk("fork filtered complete")]],
+  });
+  const agent = findAgentTool(harness.runtime);
+
+  const output = await agent.call(
+    {
+      prompt: "continue safely",
+      description: "fork filter",
+      execution_mode: "fork",
+    },
+    harness.runtime.toolUseContext,
+    harness.runtime,
+    harness.state,
+  );
+
+  const requestMessages = harness.streamRequests[0]?.messages ?? [];
+  assert.equal(output.status, "completed");
+  assert.equal(output.mode, "fork");
+  assert.ok(
+    requestMessages.some((message) =>
+      message.role === "user" &&
+      message.content.includes("stable parent context")
+    ),
+  );
+  assert.ok(
+    requestMessages.some((message) =>
+      message.role === "user" &&
+      message.content.includes("latest parent instruction")
+    ),
+  );
+  assert.equal(
+    requestMessages.some((message) =>
+      message.role === "assistant" &&
+      message.tool_calls?.some((toolCall) => toolCall.id === "call_missing")
+    ),
+    false,
+  );
+  assert.equal(
+    requestMessages.some((message) =>
+      message.role === "tool" && message.tool_call_id === "call_finished"
+    ),
+    false,
+  );
+});
+
 test("Agent tool fork mode inherits parent state projection context", async () => {
   const harness = createHarness({
     parentMessages: [
@@ -380,7 +464,6 @@ test("Agent tool worktree isolation keeps file edits out of the parent cwd", asy
     },
     deepSeekClient: client,
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
     agentDefinitions,
   });
   const agent = findAgentTool(runtime);
@@ -455,7 +538,6 @@ function createHarness(options: HarnessOptions) {
     },
     deepSeekClient: client,
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
     agentDefinitions,
   });
 

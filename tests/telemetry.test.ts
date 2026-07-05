@@ -43,7 +43,6 @@ test("query emits minimal telemetry events when an observer is configured", asyn
     longTermMemoryConfig: {
       enabled: false,
     },
-    messages: state.Messages,
     tools: [],
     observer,
   });

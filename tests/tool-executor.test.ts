@@ -22,7 +22,6 @@ test("executeToolCall returns a tool result when a tool is unavailable", async (
     MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [createNoopTool("Read")],
-    messages: state.Messages,
   });
 
   const result = await executeToolCall(
@@ -61,7 +60,6 @@ test("executeToolCall returns a permission-denied tool result", async () => {
     MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [createNoopTool("Edit")],
-    messages: state.Messages,
     canUseTool: () => ({
       behavior: "deny",
       message: "Session memory agent may only edit its notes file.",

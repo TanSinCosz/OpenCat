@@ -30,7 +30,6 @@ import {
   type DeepSeekRuntimeSettings,
 } from "./config.js";
 import type { ContextProjectionState, ToolResultBudgetState } from "./context.js";
-import type { Message } from "./messages.js";
 import type { RunObserver } from "../telemetry/observer.js";
 
 export type MainAgentId = "main";
@@ -96,7 +95,6 @@ export interface CreateRuntimeOptions {
   mcpConnections?: readonly McpConnection[];
 
   // ToolUseContext fields.
-  messages?: Message[];
   abortController?: AbortController;
   tokenizer?: Tokenizer;
   isNonInteractiveSession?: boolean;
@@ -159,7 +157,6 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
     mcpConnections: options.mcpConnections ?? [],
     toolUseContext: createToolUseContext({
       tools,
-      messages: options.messages,
       appState: options.appState,
       abortController: options.abortController,
       tokenizer: options.tokenizer,

@@ -46,7 +46,7 @@ ${lineFormat}
       : ''
   }
 - This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.
-- This tool can only read files, not directories. To read a directory, use an ls command via the ${BASH_TOOL_NAME} tool.
+- This tool can only read files, not directories. To discover files or inspect directory contents, prefer Glob. Use an ls command via the ${BASH_TOOL_NAME} tool only for simple directory listings when Glob is not suitable.
 - You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.`
 }

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Tool, ToolUseContext } from "../types.js";
 import { getCwd } from "../utils/cwd.js";
 import { expandPath } from "../utils/path.js";
+import { resolveRipgrepCommand } from "../utils/ripgrep.js";
 import { DESCRIPTION, GLOB_TOOL_NAME } from "./prompt.js";
 import { inputSchema, outputSchema } from "./type.js";
 
@@ -124,8 +125,9 @@ export async function globFiles(
     cwd: string,
     options: GlobFilesOptions,
 ): Promise<string[]> {
+    const ripgrepCommand = await resolveRipgrepCommand();
     const output = await runCommand(
-        "rg",
+        ripgrepCommand,
         ["--files", "--glob", pattern, "--sort=modified", "--no-ignore", "--hidden"],
         cwd,
         options.signal,

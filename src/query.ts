@@ -1,4 +1,5 @@
 import { executeToolCall } from "./Tools/executor.js";
+import { drainAgentMessages } from "./Tools/Agent/state.js";
 import type { DeepSeekAssistantMessage } from "./deepseek/types.js";
 import { createMessage, toDeepSeekMessage, type ToolMessage } from "./types/messages.js";
 import { persistLargeToolResultIfNeeded } from "./tool-results/persistence.js";
@@ -34,14 +35,11 @@ import {
 } from "./telemetry/observer.js";
 
 export type {
-  MessageCompressionContext,
-  MessageCompressionStep,
   MessagesForQuery,
-  MessagesForQueryBuilder,
   QueryEvent,
   QueryOptions,
 } from "./query/types.js";
-export { buildMessagesForQuery, createMessagesForQueryBuilder } from "./query/messages.js";
+export { buildMessagesForQuery } from "./query/messages.js";
 export { createStreamRequest } from "./query/request.js";
 export { applyAutoCompression } from "./auto-compress/index.js";
 export {
@@ -78,11 +76,14 @@ export async function* _query(
   try {
     for (let turn = 1; turn <= maxTurns; turn++) {
       throwIfQueryAborted(runtime);
+      const historySnipCountBefore = state.historySnips?.length ?? 0;
       const messagesForQuery = await prepareMessagesForQuery(
         runtime,
         state,
-        options,
       );
+      if (state.historySnips.length > historySnipCountBefore) {
+        await recordTranscriptStateSnapshot(runtime, state, "history_snip");
+      }
       await emitRunEvent(runtime, {
         type: "context_ready",
         turn,
@@ -107,15 +108,17 @@ export async function* _query(
       await emitRunEvent(runtime, { type: "model_stream_started", turn });
       yield { type: "model_stream_start", turn };
 
-      const assistantMessage = yield* streamAssistantWithReasoningContinuation(
+      const assistantResult = yield* streamAssistantWithReasoningContinuation(
         runtime,
         request,
       );
+      const assistantMessage = assistantResult.message;
 
-      const persistedAssistantMessage = createMessage(assistantMessage);
+      const persistedAssistantMessage = createMessage(assistantMessage, {
+        usage: assistantResult.usage,
+      });
       state.Messages.push(persistedAssistantMessage);
       await recordTranscriptMessage(runtime, persistedAssistantMessage);
-      runtime.toolUseContext.messages = state.Messages;
       await emitRunEvent(runtime, {
         type: "assistant_message",
         turn,
@@ -123,7 +126,11 @@ export async function* _query(
         reasoningChars: assistantMessage.reasoning_content?.length ?? 0,
         toolCallCount: assistantMessage.tool_calls?.length ?? 0,
       });
-      yield { type: "assistant_message", message: assistantMessage };
+      yield {
+        type: "assistant_message",
+        message: assistantMessage,
+        usage: assistantResult.usage,
+      };
       await clearRuntimeContextAfterModelRequest(runtime, state);
 
       const toolCalls = assistantMessage.tool_calls ?? [];
@@ -194,7 +201,6 @@ export async function* _query(
         throwIfQueryAborted(runtime);
         state.Messages.push(persistedToolResultMessage);
         await recordTranscriptMessage(runtime, persistedToolResultMessage);
-        runtime.toolUseContext.messages = state.Messages;
         yield {
           type: "tool_result",
           toolCall,
@@ -233,36 +239,13 @@ export async function* _query(
 async function prepareMessagesForQuery(
   runtime: Runtime,
   state: State,
-  options: QueryOptions,
 ): Promise<MessagesForQuery> {
-  if (options.messagesForQueryBuilder) {
-    let messagesForQuery = await options.messagesForQueryBuilder(runtime, state);
-    if (shouldApplyAutoCompression(runtime, messagesForQuery)) {
-      const result = await applyAutoCompressionWithTelemetry(runtime, state);
-      if (result.status === "compressed") {
-        await recordTranscriptStateSnapshot(runtime, state, "auto_compress");
-        messagesForQuery = await options.messagesForQueryBuilder(runtime, state);
-      }
-    }
-    if (await loadRuntimeContextForQuery(runtime, state) > 0) {
-      runtime.toolUseContext.messages = state.Messages;
-    }
-    if (await loadDynamicSkillContextForQuery(runtime, state) > 0) {
-      runtime.toolUseContext.messages = state.Messages;
-    }
-    if (await materializeProjectionContextForQuery(runtime, state) > 0) {
-      runtime.toolUseContext.messages = state.Messages;
-    }
-    messagesForQuery = await options.messagesForQueryBuilder(runtime, state);
-    return messagesForQuery;
-  }
+  await drainPendingAgentMessagesForRuntime(runtime, state);
 
-  const projectedMessages = await buildMessagesForQuery(runtime, state, {
-    promptOptions: options.promptOptions,
-    applyRequestLimits: false,
-    includeRuntimeContext: false,
-    includeProjectionContext: false,
-  });
+  const projectedMessages = await buildMessagesForAutoCompressionCheck(
+    runtime,
+    state,
+  );
 
   if (shouldApplyAutoCompression(runtime, projectedMessages)) {
     const result = await applyAutoCompressionWithTelemetry(runtime, state);
@@ -271,20 +254,71 @@ async function prepareMessagesForQuery(
     }
   }
 
-  if (await loadRuntimeContextForQuery(runtime, state) > 0) {
-    runtime.toolUseContext.messages = state.Messages;
-  }
-  if (await loadDynamicSkillContextForQuery(runtime, state) > 0) {
-    runtime.toolUseContext.messages = state.Messages;
-  }
-  if (await materializeProjectionContextForQuery(runtime, state) > 0) {
-    runtime.toolUseContext.messages = state.Messages;
+  await loadRuntimeContextForQuery(runtime, state);
+  await loadDynamicSkillContextForQuery(runtime, state);
+  await materializeProjectionContextForQuery(runtime, state);
+
+  return buildMessagesForQuery(runtime, state);
+}
+
+async function drainPendingAgentMessagesForRuntime(
+  runtime: Runtime,
+  state: State,
+): Promise<number> {
+  if (runtime.agentRole !== "subagent") {
+    return 0;
   }
 
-  return buildMessagesForQuery(runtime, state, {
-    promptOptions: options.promptOptions,
-    includeProjectionContext: false,
+  const messages = drainAgentMessages(state.agentTasks, runtime.agentId);
+  if (messages.length === 0) {
+    return 0;
+  }
+
+  const message = createMessage({
+    role: "user",
+    content: renderPendingAgentMessages(messages),
+  }, { source: "agent_message" });
+  state.Messages.push(message);
+  await recordTranscriptMessage(runtime, message);
+  await emitRunEvent(runtime, {
+    type: "agent_message_drained",
+    childAgentId: runtime.agentId,
+    messageCount: messages.length,
   });
+
+  return messages.length;
+}
+
+function renderPendingAgentMessages(messages: readonly string[]): string {
+  const renderedMessages = messages
+    .map((message, index) => [
+      `<message index="${index + 1}">`,
+      message,
+      `</message>`,
+    ].join("\n"))
+    .join("\n\n");
+
+  return [
+    `<agent-messages>`,
+    `The parent agent sent the following queued message${messages.length === 1 ? "" : "s"}.`,
+    `Use the newest instructions together with your original task.`,
+    "",
+    renderedMessages,
+    `</agent-messages>`,
+  ].join("\n");
+}
+
+async function buildMessagesForAutoCompressionCheck(
+  runtime: Runtime,
+  state: State,
+): Promise<MessagesForQuery> {
+  const systemPrompt = runtime.systemPrompt ?? "";
+  const messages = [
+    ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+    ...projectMessagesWithAutoCompress(state).map(toDeepSeekMessage),
+  ];
+
+  return { systemPrompt, messages };
 }
 
 async function materializeProjectionContextForQuery(

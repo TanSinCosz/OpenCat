@@ -5,6 +5,7 @@ import type {
   DeepSeekSystemMessage,
   DeepSeekToolMessage,
   DeepSeekUserMessage,
+  DeepSeekUsage,
 } from "../deepseek/types.js";
 
 export type MessageId = `msg_${string}`;
@@ -27,6 +28,7 @@ type MessageMeta = {
   id: MessageId;
   createdAt: number;
   source: MessageSource;
+  usage?: DeepSeekUsage;
 };
 
 export type PersistedToolResult = {
@@ -55,13 +57,14 @@ export type Message =
 
 export function createMessage(
   message: DeepSeekMessage,
-  options: { source?: MessageSource } = {},
+  options: { source?: MessageSource; usage?: DeepSeekUsage } = {},
 ): Message {
   return {
     ...message,
     id: createMessageId(),
     createdAt: Date.now(),
     source: options.source ?? getDefaultMessageSource(message),
+    ...(options.usage ? { usage: options.usage } : {}),
   } as Message;
 }
 
@@ -72,6 +75,7 @@ export function toDeepSeekMessage(message: Message): DeepSeekMessage {
         id: _id,
         createdAt: _createdAt,
         source: _source,
+        usage: _usage,
         ...deepSeekMessage
       } = message;
       return deepSeekMessage;
@@ -81,6 +85,7 @@ export function toDeepSeekMessage(message: Message): DeepSeekMessage {
         id: _id,
         createdAt: _createdAt,
         source: _source,
+        usage: _usage,
         ...deepSeekMessage
       } = message;
       return deepSeekMessage;
@@ -90,6 +95,7 @@ export function toDeepSeekMessage(message: Message): DeepSeekMessage {
         id: _id,
         createdAt: _createdAt,
         source: _source,
+        usage: _usage,
         reasoning_content: _reasoningContent,
         ...deepSeekMessage
       } = message;
@@ -100,6 +106,7 @@ export function toDeepSeekMessage(message: Message): DeepSeekMessage {
         id: _id,
         createdAt: _createdAt,
         source: _source,
+        usage: _usage,
         toolName: _toolName,
         toolResultId: _toolResultId,
         persistedToolResult: _persistedToolResult,

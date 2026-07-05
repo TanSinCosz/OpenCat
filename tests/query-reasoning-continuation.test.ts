@@ -62,7 +62,6 @@ test("query continues reasoning through beta prefix before forcing final answer"
       },
       deepSeekClient: client,
       MemoryConfig: createMemoryConfig(),
-      messages: state.Messages,
       tools: [],
     });
 

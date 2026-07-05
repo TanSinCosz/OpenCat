@@ -79,7 +79,6 @@ async function runUserPrompt(
   });
   state.Messages.push(userMessage);
   await recordTranscriptMessage(runtime, userMessage);
-  runtime.toolUseContext.messages = state.Messages;
 
   let assistantHasOutput = false;
 

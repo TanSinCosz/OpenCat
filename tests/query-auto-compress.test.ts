@@ -62,7 +62,6 @@ test("query auto-compresses oversized projections with session memory before mod
     },
     deepSeekClient: client,
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   const events = [];
@@ -175,7 +174,6 @@ test("query flushes agent notifications after auto-compression", async () => {
     },
     deepSeekClient: client,
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   for await (const _event of query(runtime, state, { maxTurns: 1 })) {
@@ -232,7 +230,6 @@ test("session runtime does not trigger nested auto-compression", async () => {
     },
     deepSeekClient: client,
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   for await (const _event of query(runtime, state, { maxTurns: 1 })) {
@@ -304,7 +301,6 @@ test("subagent auto-compresses with a local compact summary", async () => {
     },
     deepSeekClient: client,
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   for await (const _event of query(runtime, state, { maxTurns: 1 })) {

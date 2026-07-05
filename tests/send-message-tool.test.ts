@@ -114,7 +114,6 @@ test("SendMessage pending messages are drained into the running agent context", 
     },
     deepSeekClient: client,
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
     agentDefinitions,
     tools: [
       new Agent(agentDefinitions),
@@ -173,7 +172,6 @@ function createHarness() {
     },
     deepSeekClient: createFakeClient(),
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
     transcriptStore: false,
   });
 

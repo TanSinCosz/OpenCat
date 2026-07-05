@@ -298,6 +298,47 @@ test("transcript restore keeps runtime context separate from conversation messag
   );
 });
 
+test("transcript restore keeps history snip boundaries from snapshots", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-history-snip-transcript-")),
+    sessionId: "session_history_snip_restore",
+    deepSeekRuntimeConfig: createRuntimeConfig(),
+    deepSeekClient: createNoopClient(),
+    MemoryConfig: createMemoryConfig(),
+  });
+  const oldMessage = createMessage({
+    role: "user",
+    content: "old snipped message",
+  });
+  const recentMessage = createMessage({
+    role: "user",
+    content: "recent message",
+  });
+  const state = createState({
+    messages: [oldMessage, recentMessage],
+    historySnips: [
+      {
+        id: "history_snip_restore",
+        removedMessageIds: [oldMessage.id],
+        createdAtMessageId: recentMessage.id,
+        reason: "prompt_budget",
+        createdAt: 1,
+      },
+    ],
+  });
+
+  await recordTranscriptMessage(runtime, oldMessage);
+  await recordTranscriptMessage(runtime, recentMessage);
+  await recordTranscriptStateSnapshot(runtime, state, "history_snip");
+
+  const restored = await loadStateFromTranscript(runtime.transcriptStore!);
+
+  assert.ok(restored);
+  assert.equal(restored.historySnips.length, 1);
+  assert.equal(restored.historySnips[0]?.id, "history_snip_restore");
+  assert.deepEqual(restored.historySnips[0]?.removedMessageIds, [oldMessage.id]);
+});
+
 test("transcript restore recovers reasoning-only assistant messages", async () => {
   const runtime = createRuntime({
     cwd: await mkdtemp(join(tmpdir(), "opencat-reasoning-only-transcript-")),

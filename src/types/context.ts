@@ -1,6 +1,7 @@
 import type { MessageId } from "./messages.js";
 
 export type AutoCompressSummaryId = `autocompress_${string}`;
+export type HistorySnipId = `history_snip_${string}`;
 
 export interface AutoCompressSummary {
   id: AutoCompressSummaryId;
@@ -18,11 +19,21 @@ export interface AutoCompressState {
   invokedSkillsRestoredForSummaryId?: AutoCompressSummaryId;
 }
 
+export interface HistorySnipBoundary {
+  id: HistorySnipId;
+  removedMessageIds: MessageId[];
+  createdAtMessageId?: MessageId;
+  reason: "prompt_budget";
+  createdAt: number;
+}
+
 export interface ContextProjectionState {
   recentMessageCount?: number;
 }
 
 export interface ToolResultBudgetState {
+  // Keys are local tool message ids when query projection has them available.
+  // `tool_call_id` is API-local and may repeat, so it must not be the state key.
   seenIds: Set<string>;
   replacements: Map<string, string>;
 }

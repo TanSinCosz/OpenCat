@@ -82,7 +82,6 @@ async function createWebCliSession(
     : null;
   const state = restored ?? createState();
 
-  runtime.toolUseContext.messages = state.Messages;
 
   return {
     runtime,
@@ -292,7 +291,6 @@ async function handleQuery(
     });
     session.state.Messages.push(userMessage);
     await recordTranscriptMessage(session.runtime, userMessage);
-    session.runtime.toolUseContext.messages = session.state.Messages;
 
     writeEvent(response, {
       type: "user_message",
@@ -364,6 +362,7 @@ function normalizeQueryEvent(
       return {
         type: event.type,
         message: normalizeAssistantMessageForWeb(event.message),
+        usage: event.usage,
       };
     case "tool_result":
       {
@@ -419,6 +418,10 @@ async function replaceSession(options: CreateWebCliSessionOptions): Promise<void
 }
 
 function normalizeSessionHistoryMessage(message: Message): unknown | null {
+  if (isHiddenRuntimeContextMessage(message)) {
+    return null;
+  }
+
   switch (message.role) {
     case "system":
       return null;
@@ -439,6 +442,7 @@ function normalizeSessionHistoryMessage(message: Message): unknown | null {
           ),
           reasoningChars: reasoningContent.length,
           toolCalls: message.tool_calls ?? [],
+          usage: message.usage,
         };
       }
     case "tool":
@@ -449,6 +453,11 @@ function normalizeSessionHistoryMessage(message: Message): unknown | null {
         contentPreview: previewText(message.content, MAX_HISTORY_TOOL_CHARS),
       };
   }
+}
+
+function isHiddenRuntimeContextMessage(message: Message): boolean {
+  return message.source === "runtime" ||
+    (message.role === "user" && message.name === "opencat_context");
 }
 
 async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
@@ -801,6 +810,14 @@ function renderHtml(): string {
     .msg.user .msg-body { background: #1a2332; border: 1px solid #1f3550; margin-left: 28px; }
     .msg.assistant .msg-body { background: transparent; border: none; padding: 4px 0 4px 28px; }
     .msg.error .msg-body { background: #2d1114; border: 1px solid #4a1c1e; color: var(--accent-red); margin-left: 28px; }
+    .msg-usage {
+      margin: 4px 0 0 28px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .msg-usage .hit { color: var(--accent-green); }
+    .msg-usage .miss { color: var(--accent-orange); }
 
     /* ---------- Markdown rendered content ---------- */
     .msg-body p { margin: 0 0 8px; }
@@ -878,6 +895,17 @@ function renderHtml(): string {
     .msg-body table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: .9em; }
     .msg-body th, .msg-body td { border: 1px solid var(--border-default); padding: 6px 10px; text-align: left; }
     .msg-body th { background: var(--bg-tertiary); font-weight: 600; }
+    .msg-body .md-diagram {
+      margin: 8px 0;
+      padding: 0;
+      background: transparent;
+      border: none;
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+    }
 
     /* ===== Reasoning Block ===== */
     .reasoning-block {
@@ -1198,6 +1226,7 @@ function renderHtml(): string {
 
       const MAX_EVENT_NODES = 160;
       const MAX_EVENT_TEXT_CHARS = 12000;
+      const EVENT_STORAGE_PREFIX = "opencat:web-cli:events:";
       const MAX_REASONING_RENDER_CHARS = 4000;
       const MAX_CHAR_WARN = 4000;
 
@@ -1212,6 +1241,10 @@ function renderHtml(): string {
       let isSessionLoading = false;
       let abortController = null;
       let latestUsage = null;
+      let currentQueryUsage = null;
+      let currentQueryRequestCount = 0;
+      let currentQueryUsageBody = null;
+      let eventLog = [];
       const toolMessages = new Map();
 
       // --- Init ---
@@ -1279,6 +1312,7 @@ function renderHtml(): string {
         currentAssistant = appendMessage("assistant", "");
         currentReasoning = null;
         reasoningTextBuffer = "";
+        resetCurrentQueryUsage(currentAssistant);
         setBusy(true);
 
         try {
@@ -1345,7 +1379,7 @@ function renderHtml(): string {
             return;
           }
 
-          events.textContent = "";
+          clearPersistedEvents();
           chat.textContent = "";
           welcome.classList.remove("hidden");
           toolMessages.clear();
@@ -1353,6 +1387,7 @@ function renderHtml(): string {
           currentReasoning = null;
           assistantTextBuffer = "";
           reasoningTextBuffer = "";
+          resetCurrentQueryUsage(null);
           await refreshSession(true);
           showToast("New session created");
         } catch (e) {
@@ -1365,7 +1400,7 @@ function renderHtml(): string {
 
       // --- Clear events ---
       clearEventsButton.addEventListener("click", function() {
-        events.textContent = "";
+        clearPersistedEvents();
       });
 
       // --- Refresh session ---
@@ -1374,8 +1409,12 @@ function renderHtml(): string {
           var response = await fetch("/api/session");
           if (!response.ok) return;
           var session = await response.json();
+          var previousSessionId = currentSessionId;
           currentSessionId = session.sessionId;
           modelBadge.textContent = session.model || "";
+          if (currentSessionId !== previousSessionId) {
+            loadPersistedEvents();
+          }
 
           statusText.textContent = session.busy ? "streaming" : "ready";
           statusDot.classList.toggle("busy", session.busy);
@@ -1441,12 +1480,13 @@ function renderHtml(): string {
             showToast("Session not found");
             return;
           }
-          events.textContent = "";
           chat.textContent = "";
           toolMessages.clear();
           currentAssistant = null;
           currentReasoning = null;
+          resetCurrentQueryUsage(null);
           await refreshSession(true);
+          loadPersistedEvents();
           showToast("Session loaded");
         } catch (e) {
           showToast("Failed to load session");
@@ -1464,6 +1504,7 @@ function renderHtml(): string {
         currentReasoning = null;
         assistantTextBuffer = "";
         reasoningTextBuffer = "";
+        resetCurrentQueryUsage(null);
         toolMessages.clear();
 
         try {
@@ -1478,20 +1519,57 @@ function renderHtml(): string {
 
           welcome.classList.add("hidden");
 
+          var historyQuestionUsage = null;
+          var historyQuestionRequestCount = 0;
+          var historyQuestionBody = null;
+          var historyAssistantBody = null;
+          function flushHistoryQuestion() {
+            finalizeAssistantBody(historyAssistantBody);
+            renderUsageFooter(
+              historyQuestionBody || historyAssistantBody,
+              historyQuestionUsage,
+              historyQuestionRequestCount,
+              false,
+            );
+            historyQuestionUsage = null;
+            historyQuestionRequestCount = 0;
+            historyQuestionBody = null;
+            historyAssistantBody = null;
+            currentAssistant = null;
+            currentReasoning = null;
+          }
+          function ensureHistoryAssistantBody() {
+            if (!historyAssistantBody) {
+              historyAssistantBody = appendMessage("assistant", "");
+            }
+            currentAssistant = historyAssistantBody;
+            return historyAssistantBody;
+          }
+          function appendHistoryAssistantContent(body, content) {
+            if (!body || !content) return;
+            appendAssistantRawText(body, content, "\\n\\n");
+          }
+
           for (var i = 0; i < messages.length; i++) {
             var msg = messages[i];
-            if (msg.role === "user" || msg.role === "assistant") {
-              if (msg.content || msg.reasoningContent || msg.role === "assistant") {
-                var body = appendMessage(msg.role, msg.content || "");
-                if (msg.role === "assistant") {
-                  currentAssistant = body;
-                  currentReasoning = null;
-                  finalizeAssistantBody(body);
-                  if (msg.reasoningContent) {
-                    appendReasoningText(msg.reasoningContent, msg.reasoningChars);
-                    closeReasoningBlock();
-                  }
-                }
+            if (msg.role === "user") {
+              flushHistoryQuestion();
+              if (msg.content) {
+                appendMessage("user", msg.content);
+              }
+              continue;
+            }
+            if (msg.role === "assistant") {
+              var body = ensureHistoryAssistantBody();
+              appendHistoryAssistantContent(body, msg.content || "");
+              if (msg.usage) {
+                historyQuestionUsage = addUsage(historyQuestionUsage, msg.usage);
+                historyQuestionRequestCount += 1;
+                historyQuestionBody = body;
+              }
+              if (msg.reasoningContent) {
+                appendReasoningText(msg.reasoningContent, msg.reasoningChars);
+                closeReasoningBlock();
               }
               if (msg.toolCalls) {
                 for (var j = 0; j < msg.toolCalls.length; j++) {
@@ -1506,6 +1584,7 @@ function renderHtml(): string {
               });
             }
           }
+          flushHistoryQuestion();
 
           scrollToBottom(chat);
         } catch (e) {
@@ -1531,11 +1610,16 @@ function renderHtml(): string {
             flushReasoningText();
             closeReasoningBlock();
             if (event.message && event.message.content && currentAssistant) {
-              if (!currentAssistant.textContent.trim()) {
-                currentAssistant.textContent = event.message.content;
+              if (!getAssistantRawText(currentAssistant).trim()) {
+                setAssistantRawText(currentAssistant, event.message.content, true);
               }
             }
             finalizeAssistantBody(currentAssistant);
+            if (!currentQueryUsage && event.usage) {
+              currentQueryUsage = addUsage(currentQueryUsage, event.usage);
+              currentQueryRequestCount = Math.max(1, currentQueryRequestCount);
+            }
+            renderCurrentQueryUsage(false);
             scrollToBottom(chat);
             break;
           case "tool_use":
@@ -1546,6 +1630,9 @@ function renderHtml(): string {
             break;
           case "model_usage":
             updateUsageBadgeFromEvent(event);
+            currentQueryUsage = addUsage(currentQueryUsage, getMessageUsageFromEvent(event));
+            currentQueryRequestCount += 1;
+            renderCurrentQueryUsage(true);
             break;
           case "done":
             if (event.sessionUsage) {
@@ -1553,6 +1640,7 @@ function renderHtml(): string {
             }
             closeReasoningBlock();
             finalizeAssistantBody(currentAssistant);
+            renderCurrentQueryUsage(false);
             break;
           case "context_ready":
             hideWelcome();
@@ -1587,7 +1675,7 @@ function renderHtml(): string {
           assistantRenderFrame = 0;
         }
         if (!currentAssistant || !assistantTextBuffer) return;
-        currentAssistant.textContent += assistantTextBuffer;
+        appendAssistantRawText(currentAssistant, assistantTextBuffer, "");
         assistantTextBuffer = "";
         scrollToBottom(chat);
       }
@@ -1717,8 +1805,13 @@ function renderHtml(): string {
         body.className = "msg-body";
         if (role === "assistant") {
           body.classList.add("streaming");
+          body.dataset.rawText = text || "";
         }
-        body.textContent = text || "";
+        if (role === "assistant") {
+          renderAssistantBody(body);
+        } else {
+          body.textContent = text || "";
+        }
 
         wrapper.append(header, body);
         chat.append(wrapper);
@@ -1730,10 +1823,36 @@ function renderHtml(): string {
       function finalizeAssistantBody(body) {
         if (!body) return;
         body.classList.remove("streaming");
-        var raw = body.textContent || "";
+        var raw = getAssistantRawText(body);
         if (!raw.trim()) return;
-        body.innerHTML = renderMarkdown(raw);
+        renderAssistantBody(body);
         scrollToBottom(chat);
+      }
+
+      function getAssistantRawText(body) {
+        if (!body) return "";
+        return body.dataset.rawText || "";
+      }
+
+      function setAssistantRawText(body, text, renderNow) {
+        if (!body) return;
+        body.dataset.rawText = text || "";
+        if (renderNow) {
+          renderAssistantBody(body);
+        }
+      }
+
+      function appendAssistantRawText(body, text, separator) {
+        if (!body || !text) return;
+        var raw = getAssistantRawText(body);
+        var next = raw + (raw && separator ? separator : "") + text;
+        setAssistantRawText(body, next, true);
+      }
+
+      function renderAssistantBody(body) {
+        if (!body) return;
+        var raw = getAssistantRawText(body);
+        body.innerHTML = raw.trim() ? renderMarkdown(raw) : "";
       }
 
       // --- Tool rendering ---
@@ -1767,7 +1886,12 @@ function renderHtml(): string {
         result.className = "tool-result";
 
         details.append(summary, input, result);
-        chat.append(details);
+        var parent = currentAssistant ? currentAssistant.closest(".msg") : null;
+        if (parent) {
+          parent.append(details);
+        } else {
+          chat.append(details);
+        }
 
         var entry = { details: details, summary: summary, indicator: indicator, status: status, result: result };
         toolMessages.set(toolCallId, entry);
@@ -1797,11 +1921,25 @@ function renderHtml(): string {
 
       // --- Event log ---
       function appendEvent(event) {
+        eventLog.push(event);
+        trimEventLogData();
+        persistEvents();
+        renderEventLog();
+      }
+
+      function renderEventLog() {
+        events.textContent = "";
+        for (var i = 0; i < eventLog.length; i++) {
+          appendEventNode(eventLog[i]);
+        }
+        scrollToBottom(events);
+      }
+
+      function appendEventNode(event) {
         var pre = document.createElement("pre");
         pre.textContent = formatEvent(event);
         events.append(pre);
         trimEventLog();
-        scrollToBottom(events);
       }
 
       function formatEvent(event) {
@@ -1813,6 +1951,53 @@ function renderHtml(): string {
       function trimEventLog() {
         while (events.childElementCount > MAX_EVENT_NODES) {
           if (events.firstElementChild) events.firstElementChild.remove();
+        }
+      }
+
+      function trimEventLogData() {
+        while (eventLog.length > MAX_EVENT_NODES) {
+          eventLog.shift();
+        }
+      }
+
+      function getEventStorageKey() {
+        return currentSessionId ? EVENT_STORAGE_PREFIX + currentSessionId : "";
+      }
+
+      function persistEvents() {
+        var key = getEventStorageKey();
+        if (!key) return;
+        try {
+          localStorage.setItem(key, JSON.stringify(eventLog));
+        } catch (e) {
+          eventLog = eventLog.slice(Math.floor(eventLog.length / 2));
+          try { localStorage.setItem(key, JSON.stringify(eventLog)); } catch (_) { /* ignore */ }
+        }
+      }
+
+      function loadPersistedEvents() {
+        var key = getEventStorageKey();
+        if (!key) {
+          eventLog = [];
+          renderEventLog();
+          return;
+        }
+
+        try {
+          var parsed = JSON.parse(localStorage.getItem(key) || "[]");
+          eventLog = Array.isArray(parsed) ? parsed.slice(-MAX_EVENT_NODES) : [];
+        } catch (e) {
+          eventLog = [];
+        }
+        renderEventLog();
+      }
+
+      function clearPersistedEvents() {
+        eventLog = [];
+        events.textContent = "";
+        var key = getEventStorageKey();
+        if (key) {
+          try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
         }
       }
 
@@ -1849,6 +2034,113 @@ function renderHtml(): string {
         statusDot.classList.remove("busy");
         statusText.textContent = "ready";
         promptInput.focus();
+      }
+
+      function getMessageUsageFromEvent(event) {
+        if (event.usage) {
+          return normalizeUsage(event.usage);
+        }
+
+        return {
+          promptTokens: event.promptTokens || 0,
+          completionTokens: event.completionTokens || 0,
+          totalTokens: event.totalTokens || 0,
+          promptCacheHitTokens: event.promptCacheHitTokens || 0,
+          promptCacheMissTokens: event.promptCacheMissTokens || 0,
+        };
+      }
+
+      function resetCurrentQueryUsage(body) {
+        currentQueryUsage = null;
+        currentQueryRequestCount = 0;
+        currentQueryUsageBody = body || null;
+      }
+
+      function addUsage(current, next) {
+        var normalized = normalizeUsage(next);
+        if (!normalized) return current;
+        var base = normalizeUsage(current) || {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          promptCacheHitTokens: 0,
+          promptCacheMissTokens: 0,
+        };
+        return {
+          promptTokens: base.promptTokens + normalized.promptTokens,
+          completionTokens: base.completionTokens + normalized.completionTokens,
+          totalTokens: base.totalTokens + normalized.totalTokens,
+          promptCacheHitTokens: base.promptCacheHitTokens + normalized.promptCacheHitTokens,
+          promptCacheMissTokens: base.promptCacheMissTokens + normalized.promptCacheMissTokens,
+        };
+      }
+
+      function renderCurrentQueryUsage(pending) {
+        if (!currentAssistant || !currentQueryUsage) return;
+        if (currentQueryUsageBody && currentQueryUsageBody !== currentAssistant) {
+          var oldEl = getMessageUsageElement(currentQueryUsageBody, false);
+          if (oldEl) oldEl.remove();
+        }
+        currentQueryUsageBody = currentAssistant;
+        renderUsageFooter(
+          currentAssistant,
+          currentQueryUsage,
+          currentQueryRequestCount,
+          pending,
+        );
+      }
+
+      function renderUsageFooter(body, usage, requestCount, pending) {
+        if (!body || !usage) return;
+        var normalized = normalizeUsage(usage);
+        if (!normalized || normalized.totalTokens === 0) return;
+
+        var el = getMessageUsageElement(body, true);
+        if (!el) return;
+        el.dataset.pending = pending ? "true" : "false";
+        el.innerHTML = formatMessageUsageHtml(normalized, requestCount);
+        el.title = [
+          "This user turn",
+          "Model requests: " + Math.max(1, Number(requestCount || 0)),
+          "Prompt tokens: " + normalized.promptTokens,
+          "Completion tokens: " + normalized.completionTokens,
+          "Total tokens: " + normalized.totalTokens,
+          "Prompt cache hit tokens: " + normalized.promptCacheHitTokens,
+          "Prompt cache miss tokens: " + normalized.promptCacheMissTokens,
+        ].join("\\n");
+      }
+
+      function getMessageUsageElement(body, create) {
+        var wrapper = body ? body.closest(".msg") : null;
+        if (!wrapper) return null;
+        var existing = wrapper.querySelector(".msg-usage");
+        if (existing) {
+          wrapper.append(existing);
+          return existing;
+        }
+        if (!create) return null;
+
+        var el = document.createElement("div");
+        el.className = "msg-usage";
+        wrapper.append(el);
+        return el;
+      }
+
+      function formatMessageUsageHtml(usage, requestCount) {
+        var cacheTotal = usage.promptCacheHitTokens + usage.promptCacheMissTokens;
+        var hitRate = cacheTotal > 0
+          ? Math.round((usage.promptCacheHitTokens / cacheTotal) * 100)
+          : 0;
+        var requests = Math.max(1, Number(requestCount || 0));
+        return [
+          "turn total",
+          formatCompactNumber(usage.totalTokens) + " tok",
+          requests + " req",
+          "prompt " + formatCompactNumber(usage.promptTokens),
+          "out " + formatCompactNumber(usage.completionTokens),
+          '<span class="hit">' + hitRate + "% hit</span>",
+          '<span class="miss">' + formatCompactNumber(usage.promptCacheMissTokens) + " miss</span>",
+        ].join(" · ");
       }
 
       function updateUsageBadgeFromEvent(event) {
@@ -2064,6 +2356,20 @@ function renderHtml(): string {
           // Not a list item – flush
           flushList();
 
+          if (isTableStart(i)) {
+            var table = readTable(i);
+            out.push(table.html);
+            i = table.next;
+            continue;
+          }
+
+          if (isDiagramStart(i)) {
+            var diagram = readDiagram(i);
+            out.push('<pre class="md-diagram">' + diagram.lines.join("\\n") + '</pre>');
+            i = diagram.next;
+            continue;
+          }
+
           // Empty line -> paragraph break
           if (/^\\s*$/.test(raw)) {
             i++;
@@ -2095,6 +2401,79 @@ function renderHtml(): string {
         }
         function flushList() {
           if (inList) { out.push('</' + inList + '>'); inList = null; }
+        }
+        function isTableStart(index) {
+          return index + 1 < lines.length &&
+            isTableRow(lines[index]) &&
+            isTableSeparator(lines[index + 1]) &&
+            splitTableRow(lines[index]).length === splitTableRow(lines[index + 1]).length;
+        }
+        function readTable(index) {
+          var header = splitTableRow(lines[index]);
+          var rows = [];
+          var cursor = index + 2;
+          while (cursor < lines.length && isTableRow(lines[cursor])) {
+            var row = splitTableRow(lines[cursor]);
+            if (row.length !== header.length) break;
+            rows.push(row);
+            cursor++;
+          }
+          var html = '<table><thead><tr>' +
+            header.map(function(cell) { return '<th>' + cell + '</th>'; }).join("") +
+            '</tr></thead><tbody>' +
+            rows.map(function(row) {
+              return '<tr>' + row.map(function(cell) { return '<td>' + cell + '</td>'; }).join("") + '</tr>';
+            }).join("") +
+            '</tbody></table>';
+          return { html: html, next: cursor };
+        }
+        function isTableRow(line) {
+          var trimmed = line.trim();
+          if (!trimmed || trimmed.indexOf("|") === -1) return false;
+          if (/^[|\\s]+$/.test(trimmed)) return false;
+          return splitTableRow(line).length >= 2;
+        }
+        function isTableSeparator(line) {
+          var cells = splitTableRow(line);
+          return cells.length >= 2 && cells.every(function(cell) {
+            return /^:?-{3,}:?$/.test(cell.trim());
+          });
+        }
+        function splitTableRow(line) {
+          var trimmed = line.trim();
+          if (trimmed.charAt(0) === "|") trimmed = trimmed.slice(1);
+          if (trimmed.charAt(trimmed.length - 1) === "|") trimmed = trimmed.slice(0, -1);
+          return trimmed.split("|").map(function(cell) { return cell.trim(); });
+        }
+        function isDiagramStart(index) {
+          if (!looksLikeDiagramLine(lines[index])) return false;
+          return index + 1 < lines.length && looksLikeDiagramLine(lines[index + 1]);
+        }
+        function readDiagram(index) {
+          var collected = [];
+          var cursor = index;
+          while (cursor < lines.length) {
+            var line = lines[cursor];
+            if (/^\\s*$/.test(line)) {
+              if (cursor + 1 < lines.length && looksLikeDiagramLine(lines[cursor + 1])) {
+                collected.push(line);
+                cursor++;
+                continue;
+              }
+              break;
+            }
+            if (!looksLikeDiagramLine(line)) break;
+            collected.push(line);
+            cursor++;
+          }
+          return { lines: collected, next: cursor };
+        }
+        function looksLikeDiagramLine(line) {
+          var trimmed = line.trim();
+          if (!trimmed) return false;
+          if (/^[|\\u2502\\u2503\\u2551\\u254e\\u254f]\\s*$/.test(trimmed)) return true;
+          return /[\\u251c\\u2514\\u250c\\u2510\\u2518\\u252c\\u2534\\u253c\\u2500\\u2501\\u2502\\u2503\\u2551\\u254e\\u254f]/.test(trimmed) ||
+            /^[|\\u2502\\u2503\\u2551\\u254e\\u254f]\\s*(?:[-+*]?>|[A-Za-z0-9_./"'{[(])/.test(trimmed);
         }
       }
     })();

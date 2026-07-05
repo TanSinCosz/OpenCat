@@ -71,7 +71,6 @@ test("WebSearch calls the DeepSeek Anthropic server tool and filters results", a
       maxTokens: 4_096,
     },
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   const output = await tool.call(
@@ -122,7 +121,6 @@ test("WebSearch surfaces HTTP errors without leaking unbounded responses", async
       maxTokens: 4_096,
     },
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   await assert.rejects(

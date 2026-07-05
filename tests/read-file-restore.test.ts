@@ -23,7 +23,6 @@ test("post auto-compress restore clears and reattaches read file state", async (
     },
     deepSeekClient: createUnusedClient(),
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   runtime.toolUseContext.readFileState.set(filePath, {

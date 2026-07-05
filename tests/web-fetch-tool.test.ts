@@ -40,7 +40,6 @@ test("WebFetch fetches HTML and extracts readable text", async () => {
       maxTokens: 4_096,
     },
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   const output = await tool.call(
@@ -83,7 +82,6 @@ test("WebFetch reports cross-host redirects without following them", async () =>
       maxTokens: 4_096,
     },
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   const output = await tool.call(

@@ -5,8 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { MemoryTool } from "../src/Memory/Memory.js";
-import { extractLongTermMemoryForCompletedQuery } from "../src/query/long-term-memory.js";
-import { buildMessagesForQuery } from "../src/query/messages.js";
+import {
+  createLongTermMemoryContextMessage,
+  extractLongTermMemoryForCompletedQuery,
+} from "../src/query/long-term-memory.js";
 import { recordTranscriptMessage } from "../src/transcript/persistence.js";
 import { createMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
@@ -42,7 +44,7 @@ test("only MemorySave is exposed as a long-term memory tool", async () => {
   assert.equal(fakeMemory.addCalls[0]?.config.infer, true);
 });
 
-test("buildMessagesForQuery injects long-term memory as projection only", async () => {
+test("long-term memory context can be materialized before request build", async () => {
   const fakeMemory = createFakeMemory();
   const state = createState({
     messages: [
@@ -60,23 +62,19 @@ test("buildMessagesForQuery injects long-term memory as projection only", async 
       autoInject: true,
       userId: "user-1",
     },
-    messages: state.Messages,
   });
 
-  const projection = await buildMessagesForQuery(runtime, state);
+  const contextMessage = await createLongTermMemoryContextMessage(
+    runtime,
+    state.Messages,
+  );
 
   assert.equal(state.Messages.length, 1);
-  assert.equal(projection.messages[0]?.role, "system");
-  assert.equal(projection.messages[1]?.role, "user");
-  assert.equal(
-    projection.messages[1]?.content,
-    "What conventions should I follow in this repo?",
-  );
-  assert.equal(projection.messages[2]?.role, "user");
-  assert.match(projection.messages[2]?.content ?? "", /<opencat_context>/);
-  assert.match(projection.messages[2]?.content ?? "", /<long_term_memory>/);
+  assert.ok(contextMessage);
+  assert.equal(contextMessage.role, "user");
+  assert.match(contextMessage.content ?? "", /<long_term_memory>/);
   assert.match(
-    projection.messages[2]?.content ?? "",
+    contextMessage.content ?? "",
     /repo-grounded implementation notes/,
   );
 });
@@ -127,10 +125,9 @@ test("long-term memory recall query ignores synthetic projection messages", asyn
       autoInject: true,
       userId: "user-1",
     },
-    messages: state.Messages,
   });
 
-  await buildMessagesForQuery(runtime, state);
+  await createLongTermMemoryContextMessage(runtime, state.Messages);
 
   const query = fakeMemory.searchCalls[0]?.query ?? "";
   assert.match(query, /prefer concise Chinese explanations/);
@@ -165,7 +162,6 @@ test("completed query long-term memory extraction uses explicit turn messages", 
       autoExtract: true,
       userId: "user-1",
     },
-    messages: state.Messages,
   });
 
   const result = await extractLongTermMemoryForCompletedQuery(runtime, state, {

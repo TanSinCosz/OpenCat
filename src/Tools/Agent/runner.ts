@@ -6,10 +6,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { query } from "../../query.js";
-import { buildMessagesForQuery } from "../../query/messages.js";
+import { buildSystemPrompt } from "../../system-prompt.js";
 import { emitRunEvent } from "../../telemetry/observer.js";
 import {
-  recordTranscriptMessage,
   recordTranscriptStateSnapshot,
 } from "../../transcript/persistence.js";
 import { createMessage, type Message } from "../../types/messages.js";
@@ -29,7 +28,6 @@ import type {
 } from "../types.js";
 import { cloneFileStateCache } from "../types.js";
 import type { AgentDefinition } from "./definitions.js";
-import { drainAgentMessages } from "./state.js";
 import {
   resolveAgentTools,
   type ResolvedAgentTools,
@@ -189,6 +187,17 @@ async function runAgentSynchronously(
     worktree,
     resolvedAgentTools,
   );
+  if (options.mode !== "fork") {
+    childRuntime.systemPrompt = await buildSystemPrompt(childRuntime, {
+      outputStyle: {
+        name: `${options.agentDefinition.agentType} agent`,
+        prompt: [
+          options.agentDefinition.getSystemPrompt(),
+          agentToolPolicyPrompt,
+        ].join("\n\n"),
+      },
+    });
+  }
 
   let result = "";
   let finalizedWorktree: FinalizedWorktree = worktreeToOutput(worktree);
@@ -208,27 +217,6 @@ async function runAgentSynchronously(
   try {
     for await (const event of query(childRuntime, childState, {
       maxTurns: options.maxTurns ?? options.agentDefinition.maxTurns ?? 100,
-      messagesForQueryBuilder: async (runtime, state) => {
-        await drainPendingAgentMessagesIntoChildContext(
-          options,
-          agentId,
-          runtime,
-          state,
-        );
-        return buildMessagesForQuery(runtime, state, {
-          promptOptions: options.mode === "fork"
-            ? undefined
-            : {
-              outputStyle: {
-                name: `${options.agentDefinition.agentType} agent`,
-                prompt: [
-                  options.agentDefinition.getSystemPrompt(),
-                  agentToolPolicyPrompt,
-                ].join("\n\n"),
-              },
-            },
-        });
-      },
     })) {
       if (event.type === "assistant_message" && event.message.content) {
         result = event.message.content;
@@ -301,9 +289,9 @@ function buildInitialMessages(
 
   if (options.mode === "fork") {
     return [
-      ...options.parentRuntime.toolUseContext.messages.map((message) => ({
-        ...message,
-      })),
+      ...filterIncompleteToolCallMessages(
+        options.parentState.Messages,
+      ),
       createMessage({
         role: "user",
         content:
@@ -340,17 +328,65 @@ function createChildAgentState(
         agentId,
       ),
       mode: options.parentState.mode,
+      agentTasks: options.parentState.agentTasks,
     });
   }
 
   return createState({
     messages,
     mode: options.agentDefinition.permissionMode === "plan" ? "plan" : "default",
+    agentTasks: options.parentState.agentTasks,
   });
 }
 
 function cloneMessages(messages: readonly Message[]): Message[] {
   return messages.map((message) => ({ ...message }) as Message);
+}
+
+function filterIncompleteToolCallMessages(
+  messages: readonly Message[],
+): Message[] {
+  const resultIds = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role === "tool") {
+      resultIds.add(message.tool_call_id);
+    }
+  }
+
+  const keepAssistantIds = new Set<Message["id"]>();
+  const keepToolCallIds = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role !== "assistant") {
+      continue;
+    }
+
+    const toolCallIds = (message.tool_calls ?? []).map((toolCall) => toolCall.id);
+    if (toolCallIds.length === 0) {
+      keepAssistantIds.add(message.id);
+      continue;
+    }
+
+    if (toolCallIds.every((toolCallId) => resultIds.has(toolCallId))) {
+      keepAssistantIds.add(message.id);
+      for (const toolCallId of toolCallIds) {
+        keepToolCallIds.add(toolCallId);
+      }
+    }
+  }
+
+  return messages.flatMap((message) => {
+    if (message.role === "assistant" && !keepAssistantIds.has(message.id)) {
+      return [];
+    }
+
+    if (message.role === "tool" && !keepToolCallIds.has(message.tool_call_id)) {
+      return [];
+    }
+
+    return [{ ...message } as Message];
+  });
 }
 
 function cloneInvokedSkillsForFork(
@@ -416,7 +452,6 @@ function createChildAgentRuntime(
     tools: childTools,
     observer: parent.observer,
     usage: parent.usage,
-    messages: childState.Messages,
     tokenizer: parent.toolUseContext.tokenizer,
     isNonInteractiveSession: parent.toolUseContext.options.isNonInteractiveSession,
     mainLoopModel: parent.deepSeekRuntimeConfig.model,
@@ -430,51 +465,6 @@ function createChildAgentRuntime(
         : undefined),
     canUseTool: options.canUseTool,
   });
-}
-
-async function drainPendingAgentMessagesIntoChildContext(
-  options: RunAgentOptions,
-  agentId: string,
-  childRuntime: Runtime,
-  childState: State,
-): Promise<number> {
-  const messages = drainAgentMessages(options.parentState.agentTasks, agentId);
-  if (messages.length === 0) {
-    return 0;
-  }
-
-  const message = createMessage({
-    role: "user",
-    content: renderPendingAgentMessages(messages),
-  }, { source: "agent_message" });
-  childState.Messages.push(message);
-  childRuntime.toolUseContext.messages = childState.Messages;
-  await recordTranscriptMessage(childRuntime, message);
-  await emitRunEvent(childRuntime, {
-    type: "agent_message_drained",
-    childAgentId: agentId,
-    messageCount: messages.length,
-  });
-
-  return messages.length;
-}
-
-function renderPendingAgentMessages(messages: readonly string[]): string {
-  const renderedMessages = messages
-    .map((message, index) => [
-      `<message index="${index + 1}">`,
-      message,
-      `</message>`,
-    ].join("\n"))
-    .join("\n\n");
-
-  return [
-    `<agent-messages>`,
-    `The parent agent sent the following queued message${messages.length === 1 ? "" : "s"}.`,
-    `Use the newest instructions together with your original task.`,
-    renderedMessages,
-    `</agent-messages>`,
-  ].join("\n");
 }
 
 function deriveChildAppState(options: RunAgentOptions): AppState {

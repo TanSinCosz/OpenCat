@@ -3,6 +3,7 @@ import type {
   DeepSeekAssistantMessage,
   DeepSeekCreateRequest,
   DeepSeekStreamRequest,
+  DeepSeekUsage,
 } from "../deepseek/types.js";
 import type { Runtime } from "../types/runtime.js";
 import { emitRunEvent } from "../telemetry/observer.js";
@@ -24,6 +25,11 @@ const DEFAULT_REASONING_CONTINUATION_ROUNDS = 2;
 const DEFAULT_REASONING_PREFIX_MAX_CHARS = 240_000;
 const DEFAULT_DEEPSEEK_BETA_BASE_URL = "https://api.deepseek.com/beta";
 
+export type AssistantWithUsage = {
+  message: DeepSeekAssistantMessage;
+  usage?: DeepSeekUsage;
+};
+
 /**
  * Streams one assistant turn, continuing hidden reasoning when the provider
  * cuts the response at the output-token boundary before any visible answer is
@@ -38,7 +44,7 @@ const DEFAULT_DEEPSEEK_BETA_BASE_URL = "https://api.deepseek.com/beta";
 export async function* streamAssistantWithReasoningContinuation(
   runtime: Runtime,
   request: DeepSeekCreateRequest & { stream: true },
-): AsyncGenerator<QueryEvent, DeepSeekAssistantMessage, void> {
+): AsyncGenerator<QueryEvent, AssistantWithUsage, void> {
   const options = getReasoningContinuationOptions();
   const primaryResult = yield* streamAssistantOnce(
     runtime,
@@ -46,10 +52,11 @@ export async function* streamAssistantWithReasoningContinuation(
     request,
   );
   let result = primaryResult;
+  let usage = result.usage;
   let reasoningTrail = result.message.reasoning_content ?? "";
 
   if (!shouldContinueReasoning(result)) {
-    return result.message;
+    return { message: result.message, usage };
   }
 
   const continuationClient = createReasoningContinuationClient(runtime);
@@ -67,13 +74,17 @@ export async function* streamAssistantWithReasoningContinuation(
       continuationClient,
       createReasoningContinuationRequest(runtime, request, reasoningTrail, options),
     );
+    usage = combineUsage(usage, result.usage);
     reasoningTrail = appendReasoningTrail(
       reasoningTrail,
       result.message.reasoning_content,
     );
 
     if (!shouldContinueReasoning(result)) {
-      return mergeReasoningIntoMessage(result.message, reasoningTrail);
+      return {
+        message: mergeReasoningIntoMessage(result.message, reasoningTrail),
+        usage,
+      };
     }
   }
 
@@ -89,19 +100,24 @@ export async function* streamAssistantWithReasoningContinuation(
     continuationClient,
     createFinalAnswerPrefixRequest(runtime, request, reasoningTrail, options),
   );
+  usage = combineUsage(usage, result.usage);
 
-  return mergeReasoningIntoMessage(
-    result.message,
-    appendReasoningTrail(reasoningTrail, result.message.reasoning_content),
-  );
+  return {
+    message: mergeReasoningIntoMessage(
+      result.message,
+      appendReasoningTrail(reasoningTrail, result.message.reasoning_content),
+    ),
+    usage,
+  };
 }
 
 async function* streamAssistantOnce(
   runtime: Runtime,
   client: DeepSeekClient,
   request: DeepSeekCreateRequest & { stream: true },
-): AsyncGenerator<QueryEvent, AssistantReady, void> {
+): AsyncGenerator<QueryEvent, AssistantReady & { usage?: DeepSeekUsage }, void> {
   let assistantResult: AssistantReady | undefined;
+  let latestUsage: DeepSeekUsage | undefined;
 
   for await (const update of streamAssistantMessage(client, request)) {
     if (update.type === "assistant_message_ready") {
@@ -111,6 +127,7 @@ async function* streamAssistantOnce(
 
     if (update.type === "model_stream_event" && update.event.chunk?.usage) {
       const usage = update.event.chunk.usage;
+      latestUsage = usage;
       const sessionUsage = recordModelUsage(runtime, usage);
       await emitRunEvent(runtime, {
         type: "model_usage",
@@ -137,7 +154,32 @@ async function* streamAssistantOnce(
     throw new Error("Model stream completed without an assistant message.");
   }
 
-  return assistantResult;
+  return { ...assistantResult, usage: latestUsage };
+}
+
+function combineUsage(
+  left: DeepSeekUsage | undefined,
+  right: DeepSeekUsage | undefined,
+): DeepSeekUsage | undefined {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+
+  return {
+    prompt_tokens: (left.prompt_tokens ?? 0) + (right.prompt_tokens ?? 0),
+    completion_tokens:
+      (left.completion_tokens ?? 0) + (right.completion_tokens ?? 0),
+    total_tokens: (left.total_tokens ?? 0) + (right.total_tokens ?? 0),
+    prompt_cache_hit_tokens:
+      (left.prompt_cache_hit_tokens ?? 0) +
+      (right.prompt_cache_hit_tokens ?? 0),
+    prompt_cache_miss_tokens:
+      (left.prompt_cache_miss_tokens ?? 0) +
+      (right.prompt_cache_miss_tokens ?? 0),
+  };
 }
 
 function shouldContinueReasoning(result: AssistantReady): boolean {

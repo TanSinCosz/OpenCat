@@ -16,6 +16,7 @@ const TRANSCRIPT_DIR = ".opencat/transcripts";
 export type TranscriptSnapshotReason =
   | "agent_notification"
   | "auto_compress"
+  | "history_snip"
   | "manual"
   | "query"
   | "runtime_context"
@@ -39,6 +40,7 @@ export type TranscriptStateSnapshotEntry = TranscriptBaseEntry & {
 
 export type PersistedStateSnapshot = {
   autoCompress: AutoCompressState;
+  historySnips: State["historySnips"];
   sessionMemory: SessionMemoryState;
   mode: State["mode"];
   agentTasks: AgentTasksState;
@@ -206,6 +208,7 @@ export async function loadStateFromTranscript(
       normalizeHydratedTranscriptMessage,
     ),
     autoCompress: latestSnapshot?.autoCompress,
+    historySnips: latestSnapshot?.historySnips,
     sessionMemory: latestSnapshot?.sessionMemory,
     mode: latestSnapshot?.mode,
     agentTasks: latestSnapshot?.agentTasks,
@@ -233,6 +236,7 @@ export async function recordTranscriptStateSnapshot(
 function createPersistedStateSnapshot(state: State): PersistedStateSnapshot {
   return {
     autoCompress: state.autoCompress,
+    historySnips: state.historySnips,
     sessionMemory: state.sessionMemory,
     mode: state.mode,
     agentTasks: state.agentTasks,

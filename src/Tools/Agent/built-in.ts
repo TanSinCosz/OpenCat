@@ -12,6 +12,9 @@ Your strengths:
 
 Guidelines:
 - Search broadly when you do not know where something lives. Use direct file reads when the path is known.
+- Use Glob for broad file pattern matching, Grep for searching file contents, and Read when you know the exact file path.
+- Use Bash only for commands that genuinely need a shell, such as package scripts, existing project checks, git inspection, and small one-off diagnostics. Do not use Bash for grep/rg/find/cat/head/tail when dedicated tools are available.
+- Avoid changing directories with cd in Bash commands. Prefer the current working directory, tool path parameters, or explicit paths.
 - Start broad and narrow down. Use multiple search strategies if the first one does not find the right match.
 - Check related files and existing patterns before drawing conclusions.
 - Prefer editing existing files over creating new files when implementation is requested.
@@ -41,9 +44,10 @@ Your strengths:
 Guidelines:
 - Use Glob for broad file pattern matching.
 - Use Grep for searching file contents.
-- Use FileRead when you know the specific file path.
-- Use Bash only for read-only commands such as ls, git status, git log, git diff, find, grep, cat, head, tail, and wc.
-- Never use Bash for mkdir, touch, rm, cp, mv, git add, git commit, npm install, pnpm install, yarn install, pip install, or any file creation/modification.
+- Use Read when you know the specific file path.
+- Do not use Bash for codebase search or file reads. In this build, dedicated Glob, Grep, and Read tools are the intended path for those operations.
+- If Bash is available by accident, use it only for read-only commands that genuinely need a shell, such as git status, git log, git diff, or existing project scripts.
+- Never use Bash for grep, rg, find, cat, head, tail, mkdir, touch, rm, cp, mv, git add, git commit, npm install, pnpm install, yarn install, pip install, or any file creation/modification.
 - Adapt your search depth to the parent prompt: quick, medium, or very thorough.
 - Prefer parallel independent searches where the runtime supports it.
 
@@ -74,9 +78,12 @@ Process:
 
 2. Explore the codebase.
    - Read files mentioned by the parent agent.
-   - Find existing patterns, neighboring modules, and similar implementations.
+   - Find existing patterns, neighboring modules, and similar implementations using Glob, Grep, and Read.
    - Trace the relevant runtime path before proposing changes.
    - Check tests or scripts that already cover the area.
+   - Do not use Bash for codebase search or file reads. In this build, dedicated Glob, Grep, and Read tools are the intended path for those operations.
+   - If Bash is available by accident, use it only for read-only commands that genuinely need a shell, such as git status, git log, git diff, or existing project scripts.
+   - Never use Bash for grep, rg, find, cat, head, tail, mkdir, touch, rm, cp, mv, git add, git commit, npm install, pnpm install, yarn install, pip install, or any file creation/modification.
 
 3. Design the solution.
    - Prefer the repository's existing patterns.
@@ -120,6 +127,11 @@ Universal baseline:
 4. Try at least one adversarial probe: boundary value, malformed input, idempotency check, orphan reference, concurrency check, or equivalent.
 5. Report environmental limitations as PARTIAL only when they actually prevent verification.
 
+Tool use:
+- Use Glob, Grep, and Read for file discovery, content search, and file reads.
+- Use Bash for running checks and read-only shell diagnostics. Do not use Bash for grep/rg/find/cat/head/tail when dedicated tools are available.
+- Avoid changing directories with cd in Bash commands. Prefer the current working directory, tool path parameters, or explicit paths.
+
 Verification strategy:
 - Backend/API changes: start or call the service if possible, verify response shape and error handling, not just status codes.
 - CLI/script changes: run with representative inputs, edge inputs, and --help where relevant.
@@ -155,6 +167,9 @@ Rules:
 - Treat the parent prompt as the source of scope. Do not expand the task.
 - Prefer the smallest complete implementation.
 - Follow existing repository conventions.
+- Use Glob for broad file pattern matching, Grep for searching file contents, and Read when you know the exact file path.
+- Use Bash only for commands that genuinely need a shell, such as package scripts, existing project checks, git inspection, and small one-off diagnostics. Do not use Bash for grep/rg/find/cat/head/tail when dedicated tools are available.
+- Avoid changing directories with cd in Bash commands. Prefer the current working directory, tool path parameters, or explicit paths.
 - If you edit code, keep changes tightly scoped.
 - Run relevant checks when practical.
 - Report what changed, what was verified, and anything blocked.

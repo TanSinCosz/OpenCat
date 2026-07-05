@@ -21,7 +21,6 @@ test("ReadSkill reads only discovered skills and records invoked skill state", a
     },
     deepSeekClient: createUnusedClient(),
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
   runtime.toolUseContext.skillRuntime.dynamicSkills.set("repo-style", {
     name: "repo-style",
@@ -87,7 +86,6 @@ test("post auto-compress restore reattaches invoked skills once", async () => {
     },
     deepSeekClient: createUnusedClient(),
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   const result = restoreInvokedSkillsAfterAutoCompress(

@@ -90,7 +90,6 @@ test("subagent runtime does not flush main agent notifications", async () => {
     },
     deepSeekClient: createNoopClient(),
     MemoryConfig: createMemoryConfig(),
-    messages: state.Messages,
   });
 
   const flushed = await loadRuntimeContextForQuery(
@@ -104,7 +103,7 @@ test("subagent runtime does not flush main agent notifications", async () => {
   assert.equal(state.runtimeContextMessages.length, 0);
 });
 
-test("runtime context is projected at request build time", async () => {
+test("buildMessagesForQuery does not inject unmaterialized runtime context", async () => {
   const runtime = createRuntime({
     cwd: await mkdtemp(join(tmpdir(), "opencat-runtime-context-projection-")),
     sessionId: "session_runtime_context_projection",
@@ -138,32 +137,21 @@ test("runtime context is projected at request build time", async () => {
 
   await loadRuntimeContextForQuery(runtime, state);
 
-  const withoutRuntime = await buildMessagesForQuery(runtime, state, {
-    applyRequestLimits: false,
-    includeRuntimeContext: false,
-  });
-  const withRuntime = await buildMessagesForQuery(runtime, state, {
-    applyRequestLimits: false,
-  });
+  const projection = await buildMessagesForQuery(runtime, state);
 
   assert.equal(
-    withoutRuntime.messages.some((message) =>
+    projection.messages.some((message) =>
       message.role === "user" && message.content.includes("projected")
     ),
     false,
   );
-  assert.match(
-    withRuntime.messages.at(-1)?.content ?? "",
-    /<task-notification>projected<\/task-notification>/,
-  );
-  assert.match(withRuntime.messages.at(-1)?.content ?? "", /<opencat_context>/);
   assert.equal(
-    withRuntime.messages.filter((message) =>
+    projection.messages.filter((message) =>
       message.role === "user" &&
       typeof message.content === "string" &&
       message.content.includes("<opencat_context>")
     ).length,
-    1,
+    0,
   );
 });
 
