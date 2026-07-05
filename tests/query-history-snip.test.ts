@@ -214,8 +214,8 @@ test("applyToolResultBudget replaces oversized fresh results with persisted refe
     "x".repeat(120_000),
     "</tool_result_preview>",
   ].join("\n");
-  const messages: DeepSeekMessage[] = [
-    {
+  const messages = [
+    createMessage({
       role: "assistant",
       content: "",
       tool_calls: [
@@ -230,17 +230,17 @@ test("applyToolResultBudget replaces oversized fresh results with persisted refe
           function: { name: "Grep", arguments: "{}" },
         },
       ],
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_read",
       content: hugePersistedContent,
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_grep",
       content: "y".repeat(100_000),
-    },
+    }),
   ];
 
   const projected = applyToolResultBudget(messages, runtime);
@@ -283,8 +283,8 @@ test("applyToolResultBudget includes tools without finite result caps", () => {
       },
     ],
   });
-  const messages: DeepSeekMessage[] = [
-    {
+  const messages = [
+    createMessage({
       role: "assistant",
       content: "",
       tool_calls: [
@@ -299,17 +299,17 @@ test("applyToolResultBudget includes tools without finite result caps", () => {
           function: { name: "Other", arguments: "{}" },
         },
       ],
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_read",
       content: "read-result\n" + "r".repeat(150_000),
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_other",
       content: "other-result\n" + "o".repeat(100_000),
-    },
+    }),
   ];
 
   const projected = applyToolResultBudget(messages, runtime);
@@ -333,8 +333,8 @@ test("applyToolResultBudget keys decisions by local tool message id", () => {
     transcriptStore: false,
     tools: [],
   });
-  const messages: DeepSeekMessage[] = [
-    {
+  const messages = [
+    createMessage({
       role: "assistant",
       content: "",
       tool_calls: [
@@ -344,13 +344,13 @@ test("applyToolResultBudget keys decisions by local tool message id", () => {
           function: { name: "Read", arguments: "{\"file_path\":\"a.ts\"}" },
         },
       ],
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_reused",
       content: "large-result\n" + "a".repeat(240_000),
-    },
-    {
+    }),
+    createMessage({
       role: "assistant",
       content: "",
       tool_calls: [
@@ -360,20 +360,15 @@ test("applyToolResultBudget keys decisions by local tool message id", () => {
           function: { name: "Read", arguments: "{\"file_path\":\"b.ts\"}" },
         },
       ],
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_reused",
       content: "small-result",
-    },
+    }),
   ];
 
-  const projected = applyToolResultBudget(messages, runtime, {
-    toolResultBudgetKeysByMessageIndex: new Map([
-      [1, "msg_local_large"],
-      [3, "msg_local_small"],
-    ]),
-  });
+  const projected = applyToolResultBudget(messages, runtime);
   const firstToolResult = projected[1];
   const secondToolResult = projected[3];
 

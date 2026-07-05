@@ -272,7 +272,7 @@ async function projectMessages(
     systemPrompt,
     messages: [
       { role: "system" as const, content: systemPrompt },
-      ...(sniped as Message[]).map(toDeepSeekMessage),
+      ...sniped.map(toDeepSeekMessage),
     ],
   };
 }
