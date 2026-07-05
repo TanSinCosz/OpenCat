@@ -25,13 +25,16 @@ export async function buildMessagesForQuery(
 ): Promise<MessagesForQuery> {
   const systemPrompt = await getOrCreateSystemPrompt(runtime);
   const autoCompressedMessages = projectMessagesWithAutoCompress(state);
+  let budgetedMessages = applyToolResultBudget(
+    cloneMessages(autoCompressedMessages),
+    runtime,
+  );
   let projectedMessages = projectMessagesWithHistorySnips(
     state,
-    autoCompressedMessages,
+    budgetedMessages,
   );
   // Progressive compression pipeline: tool result budget →
-  // micro-compress → history snip boundary.
-  projectedMessages = applyToolResultBudget(projectedMessages, runtime);
+  // history snip boundary projection → micro-compress.
   let snipedMessages = applyHistorySnip(projectedMessages);
   let messages = await createDeepSeekMessagesForProjection({
     systemPrompt,
@@ -45,11 +48,14 @@ export async function buildMessagesForQuery(
 
   if (historySnipBoundary) {
     getHistorySnipBoundaries(state).push(historySnipBoundary);
+    budgetedMessages = applyToolResultBudget(
+      cloneMessages(autoCompressedMessages),
+      runtime,
+    );
     projectedMessages = projectMessagesWithHistorySnips(
       state,
-      autoCompressedMessages,
+      budgetedMessages,
     );
-    projectedMessages = applyToolResultBudget(projectedMessages, runtime);
     snipedMessages = applyHistorySnip(projectedMessages);
     messages = await createDeepSeekMessagesForProjection({
       systemPrompt,
@@ -58,6 +64,10 @@ export async function buildMessagesForQuery(
   }
 
   return { systemPrompt, messages };
+}
+
+function cloneMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) => ({ ...message }) as Message);
 }
 
 export async function createDeepSeekMessagesForProjection(options: {

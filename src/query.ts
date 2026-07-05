@@ -1,7 +1,7 @@
 import { executeToolCall } from "./Tools/executor.js";
 import { drainAgentMessages } from "./Tools/Agent/state.js";
 import type { DeepSeekAssistantMessage } from "./deepseek/types.js";
-import { createMessage, toDeepSeekMessage, type ToolMessage } from "./types/messages.js";
+import { createMessage, toDeepSeekMessage, type Message, type ToolMessage } from "./types/messages.js";
 import { persistLargeToolResultIfNeeded } from "./tool-results/persistence.js";
 import type { Runtime } from "./types/runtime.js";
 import type { State } from "./types/state.js";
@@ -258,14 +258,20 @@ async function projectMessages(
 ): Promise<MessagesForQuery> {
   const systemPrompt = await getOrCreateSystemPrompt(runtime);
 
-  // Apply existing history snip boundaries (business messages).
-  let messages = projectMessagesWithHistorySnips(state, state.Messages);
+  // Work on a copy so prompt projection never mutates state.Messages.
+  const budgetedMessages = applyToolResultBudget(
+    cloneMessages(state.Messages),
+    runtime,
+  );
 
-  // Tool result budget — replace oversized tool results with references.
-  messages = applyToolResultBudget(messages, runtime);
+  // Apply existing history snip boundaries (business messages).
+  const projectedMessages = projectMessagesWithHistorySnips(
+    state,
+    budgetedMessages,
+  );
 
   // History snip — hard truncation from the head.
-  const sniped = applyHistorySnip(messages);
+  const sniped = applyHistorySnip(projectedMessages);
 
   // Convert to DeepSeek wire format at the end.
   return {
@@ -275,6 +281,10 @@ async function projectMessages(
       ...sniped.map(toDeepSeekMessage),
     ],
   };
+}
+
+function cloneMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) => ({ ...message }) as Message);
 }
 
 async function drainPendingAgentMessagesForRuntime(
