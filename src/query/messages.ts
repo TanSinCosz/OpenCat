@@ -34,11 +34,16 @@ export async function buildMessagesForQuery(
     projectedMessages,
   });
 
+  // Progressive compression pipeline: tool result budget →
+  // micro-compress → history snip boundary.
   let toolResultBudgetKeysByMessageIndex =
     createToolResultBudgetKeysByMessageIndex(projectedMessages);
   messages = applyToolResultBudget(messages, runtime, {
     toolResultBudgetKeysByMessageIndex,
   });
+
+  messages = applyHistorySnip(messages);
+
   const historySnipBoundary = createHistorySnipBoundaryIfNeeded(
     messages,
     projectedMessages,
@@ -59,15 +64,13 @@ export async function buildMessagesForQuery(
     messages = applyToolResultBudget(messages, runtime, {
       toolResultBudgetKeysByMessageIndex,
     });
+    messages = applyHistorySnip(messages);
   }
-
-  // Last-resort projection guard for oversized context blocks.
-  messages = applyHistorySnip(messages);
 
   return { systemPrompt, messages };
 }
 
-async function createDeepSeekMessagesForProjection(options: {
+export async function createDeepSeekMessagesForProjection(options: {
   systemPrompt: string;
   projectedMessages: Message[];
 }): Promise<DeepSeekMessage[]> {
@@ -80,7 +83,7 @@ async function createDeepSeekMessagesForProjection(options: {
   ];
 }
 
-function createToolResultBudgetKeysByMessageIndex(
+export function createToolResultBudgetKeysByMessageIndex(
   projectedMessages: Message[],
 ): Map<number, string> {
   const keys = new Map<number, string>();
@@ -96,7 +99,7 @@ function createToolResultBudgetKeysByMessageIndex(
   return keys;
 }
 
-async function getOrCreateSystemPrompt(
+export async function getOrCreateSystemPrompt(
   runtime: Runtime,
 ): Promise<string> {
   // Session scoped for prompt-cache friendliness: once prepared, query turns
@@ -126,12 +129,12 @@ type CandidatePartition = {
 };
 
 export function applyToolResultBudget(
-  messages: DeepSeekMessage[],
+  messages: Message[],
   runtime: Runtime,
   options: {
     toolResultBudgetKeysByMessageIndex?: ReadonlyMap<number, string>;
   } = {},
-): DeepSeekMessage[] {
+): Message[] {
   const state = getOrCreateToolResultBudgetState(runtime);
 
   // 因为tool message 本身不知道自己来自哪个工具，只知道 tool_call_id
@@ -222,7 +225,7 @@ export function applyToolResultBudget(
   });
 }
 
-export function applyHistorySnip(messages: DeepSeekMessage[]): DeepSeekMessage[] {
+export function applyHistorySnip(messages: Message[]): DeepSeekMessage[] {
   const maxMessagesForQueryChars = getHistorySnipHardChars();
 
   if (totalMessageSize(messages) <= maxMessagesForQueryChars) {
@@ -268,7 +271,7 @@ export function applyHistorySnip(messages: DeepSeekMessage[]): DeepSeekMessage[]
   ];
 }
 
-function projectMessagesWithHistorySnips(
+export function projectMessagesWithHistorySnips(
   state: State,
   messages: Message[],
 ): Message[] {
@@ -285,12 +288,12 @@ function projectMessagesWithHistorySnips(
   return messages.filter((message) => !removedMessageIds.has(message.id));
 }
 
-function getHistorySnipBoundaries(state: State): HistorySnipBoundary[] {
+export function getHistorySnipBoundaries(state: State): HistorySnipBoundary[] {
   state.historySnips ??= [];
   return state.historySnips;
 }
 
-function createHistorySnipBoundaryIfNeeded(
+export function createHistorySnipBoundaryIfNeeded(
   messagesForQuery: DeepSeekMessage[],
   projectedMessages: Message[],
 ): HistorySnipBoundary | null {
@@ -335,15 +338,14 @@ function selectHistorySnipMessageIds(
   const selected = selectCandidateGroups(candidates, targetRemovalChars);
   const selectedIds = new Set(selected.flatMap((group) => group.messageIds));
 
+  // Only tool rounds and regenerable context messages are eligible for
+  // removal.  If those candidates are not enough, don't create a boundary
+  // — let auto-compress handle the overflow instead.
   if (estimateSelectedChars(messages, selectedIds) >= targetRemovalChars) {
     return [...selectedIds] as Message["id"][];
   }
 
-  for (let index = 0; index < protectedStart; index++) {
-    selectedIds.add(messages[index]!.id);
-  }
-
-  return [...selectedIds] as Message["id"][];
+  return [];
 }
 
 function calculateProtectedRecentTailStart(messages: Message[]): number {

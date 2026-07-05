@@ -6,7 +6,12 @@ import { persistLargeToolResultIfNeeded } from "./tool-results/persistence.js";
 import type { Runtime } from "./types/runtime.js";
 import type { State } from "./types/state.js";
 import { streamAssistantWithReasoningContinuation } from "./query/reasoning-continuation.js";
-import { buildMessagesForQuery } from "./query/messages.js";
+import {
+  applyHistorySnip,
+  applyToolResultBudget,
+  getOrCreateSystemPrompt,
+  projectMessagesWithHistorySnips,
+} from "./query/messages.js";
 import { createStreamRequest } from "./query/request.js";
 import type { MessagesForQuery, QueryEvent, QueryOptions } from "./query/types.js";
 import { snapshotRuntimeUsage } from "./query/usage.js";
@@ -76,14 +81,20 @@ export async function* _query(
   try {
     for (let turn = 1; turn <= maxTurns; turn++) {
       throwIfQueryAborted(runtime);
-      const historySnipCountBefore = state.historySnips?.length ?? 0;
-      const messagesForQuery = await prepareMessagesForQuery(
-        runtime,
-        state,
-      );
-      if (state.historySnips.length > historySnipCountBefore) {
-        await recordTranscriptStateSnapshot(runtime, state, "history_snip");
-      }
+
+      // Phase A: attach per-turn context into state.Messages before projection.
+      // Subagent: drain queued parent-agent messages into state.Messages.
+      await drainPendingAgentMessagesForRuntime(runtime, state);
+      // Notifications from completed async subagents → runtimeContextMessages.
+      await loadRuntimeContextForQuery(runtime, state);
+      // Newly discovered project skills → runtimeContextMessages.
+      await loadDynamicSkillContextForQuery(runtime, state);
+      // Long-term memory recall + pack runtimeContextMessages → state.Messages.
+      await materializeProjectionContextForQuery(runtime, state);
+
+      // Phase B: project + compress (tool result budget → history snip).
+      const messagesForQuery = await projectMessages(runtime, state);
+      
       await emitRunEvent(runtime, {
         type: "context_ready",
         turn,
@@ -236,35 +247,41 @@ export async function* _query(
   }
 }
 
-async function prepareMessagesForQuery(
+/**
+ * Project messages for a model request.  Tool result budget → history snip.
+ * Read-only on state.Messages.  State.historySnips may grow when hard
+ * truncation alone cannot bring the projection under the context limit.
+ */
+async function projectMessages(
   runtime: Runtime,
   state: State,
 ): Promise<MessagesForQuery> {
-  await drainPendingAgentMessagesForRuntime(runtime, state);
+  const systemPrompt = await getOrCreateSystemPrompt(runtime);
 
-  const projectedMessages = await buildMessagesForAutoCompressionCheck(
-    runtime,
-    state,
-  );
+  // Apply existing history snip boundaries (business messages).
+  let messages = projectMessagesWithHistorySnips(state, state.Messages);
 
-  if (shouldApplyAutoCompression(runtime, projectedMessages)) {
-    const result = await applyAutoCompressionWithTelemetry(runtime, state);
-    if (result.status === "compressed") {
-      await recordTranscriptStateSnapshot(runtime, state, "auto_compress");
-    }
-  }
+  // Tool result budget — replace oversized tool results with references.
+  messages = applyToolResultBudget(messages, runtime);
 
-  await loadRuntimeContextForQuery(runtime, state);
-  await loadDynamicSkillContextForQuery(runtime, state);
-  await materializeProjectionContextForQuery(runtime, state);
+  // History snip — hard truncation from the head.
+  const sniped = applyHistorySnip(messages);
 
-  return buildMessagesForQuery(runtime, state);
+  // Convert to DeepSeek wire format at the end.
+  return {
+    systemPrompt,
+    messages: [
+      { role: "system" as const, content: systemPrompt },
+      ...(sniped as Message[]).map(toDeepSeekMessage),
+    ],
+  };
 }
 
 async function drainPendingAgentMessagesForRuntime(
   runtime: Runtime,
   state: State,
 ): Promise<number> {
+
   if (runtime.agentRole !== "subagent") {
     return 0;
   }
@@ -308,23 +325,13 @@ function renderPendingAgentMessages(messages: readonly string[]): string {
   ].join("\n");
 }
 
-async function buildMessagesForAutoCompressionCheck(
-  runtime: Runtime,
-  state: State,
-): Promise<MessagesForQuery> {
-  const systemPrompt = runtime.systemPrompt ?? "";
-  const messages = [
-    ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
-    ...projectMessagesWithAutoCompress(state).map(toDeepSeekMessage),
-  ];
-
-  return { systemPrompt, messages };
-}
-
 async function materializeProjectionContextForQuery(
   runtime: Runtime,
   state: State,
 ): Promise<number> {
+  // TODO: this couples attachment logic to auto-compress projection.
+  // Should use raw state.Messages (or a non-auto-compress projection)
+  // for the long-term-memory recall query instead.
   const projectedMessages = projectMessagesWithAutoCompress(state);
   const longTermMemoryMessage = shouldAttachLongTermMemory(state)
     ? await createLongTermMemoryContextMessage(runtime, projectedMessages)

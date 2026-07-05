@@ -47,7 +47,7 @@ test("applyHistorySnip still works as a hard fallback when explicitly configured
   }
 });
 
-test("buildMessagesForQuery records replayable history snip boundaries", async () => {
+test("buildMessagesForQuery micro-compresses before creating durable snip boundaries", async () => {
   const originalHardChars = process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS;
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
 
@@ -96,18 +96,97 @@ test("buildMessagesForQuery records replayable history snip boundaries", async (
       tools: [],
     });
 
+    // Micro-compress (hard truncation) handles the overflow by removing
+    // old head messages. No durable boundary is created.
+    const first = await buildMessagesForQuery(runtime, state);
+
+    assert.equal(state.historySnips.length, 0);
+    assert.doesNotMatch(JSON.stringify(first.messages), /large old tool result/);
+
+    // Second call: still no durable boundary needed — micro-compress
+    // handles it again.
+    await buildMessagesForQuery(runtime, state);
+
+    assert.equal(state.historySnips.length, 0);
+  } finally {
+    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_CHARS", originalHardChars);
+    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+  }
+});
+
+test("buildMessagesForQuery creates durable snip boundary when micro-compress is insufficient", async () => {
+  const originalHardChars = process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS;
+  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
+
+  try {
+    // Use a threshold low enough that even the minimum recent tail (system +
+    // snipMarker + minRecent messages) exceeds it, forcing a durable boundary.
+    process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "3800";
+    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
+
+    const state = createState({
+      messages: [
+        createMessage({ role: "user", content: "old user request" }),
+        createMessage({
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_old_read",
+              type: "function",
+              function: {
+                name: "Read",
+                arguments: "{\"file_path\":\"old.ts\"}",
+              },
+            },
+          ],
+        }),
+        createMessage({
+          role: "tool",
+          tool_call_id: "call_old_read",
+          content: "large old tool result\n" + "x".repeat(12_000),
+        }),
+        ...Array.from({ length: 8 }, (_, index) =>
+          createMessage({
+            role: "user",
+            content: `recent user ${index}\n${"recent ".repeat(80)}`,
+          })
+        ),
+      ],
+    });
+    const runtime = createRuntime({
+      deepSeekRuntimeConfig: {
+        apiKey: "test-key",
+        model: "deepseek-v4-flash",
+        maxTokens: 1024,
+      },
+      MemoryConfig: createMemoryConfig(),
+      transcriptStore: false,
+      tools: [],
+    });
+
     const first = await buildMessagesForQuery(runtime, state);
     const snipCountAfterFirstBuild = state.historySnips.length;
-    const removedIds = new Set(state.historySnips[0]?.removedMessageIds ?? []);
+    const removedIds = new Set(
+      state.historySnips[0]?.removedMessageIds ?? [],
+    );
 
     assert.equal(snipCountAfterFirstBuild, 1);
     assert.ok(removedIds.has(state.Messages[1]!.id));
     assert.ok(removedIds.has(state.Messages[2]!.id));
-    assert.doesNotMatch(JSON.stringify(first.messages), /large old tool result/);
+    assert.doesNotMatch(
+      JSON.stringify(first.messages),
+      /large old tool result/,
+    );
 
-    await buildMessagesForQuery(runtime, state);
+    // Second call: the first durable boundary permanently excludes the tool
+    // round, so subsequent projections never see "large old tool result".
+    const second = await buildMessagesForQuery(runtime, state);
 
-    assert.equal(state.historySnips.length, snipCountAfterFirstBuild);
+    assert.doesNotMatch(
+      JSON.stringify(second.messages),
+      /large old tool result/,
+    );
   } finally {
     restoreEnv("OPENCAT_HISTORY_SNIP_HARD_CHARS", originalHardChars);
     restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
