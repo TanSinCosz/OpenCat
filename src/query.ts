@@ -7,8 +7,11 @@ import type { Runtime } from "./types/runtime.js";
 import type { State } from "./types/state.js";
 import { streamAssistantWithReasoningContinuation } from "./query/reasoning-continuation.js";
 import {
+  applyBulkyToolResultCompression,
   applyHistorySnip,
   applyToolResultBudget,
+  createHistorySnipBoundaryIfNeeded,
+  getHistorySnipBoundaries,
   getOrCreateSystemPrompt,
   projectMessagesWithHistorySnips,
 } from "./query/messages.js";
@@ -259,16 +262,43 @@ async function projectMessages(
   const systemPrompt = await getOrCreateSystemPrompt(runtime);
 
   // Work on a copy so prompt projection never mutates state.Messages.
-  const budgetedMessages = applyToolResultBudget(
-    cloneMessages(state.Messages),
+  const budgetedMessages = applyBulkyToolResultCompression(
+    applyToolResultBudget(
+      cloneMessages(state.Messages),
+      runtime,
+    ),
     runtime,
   );
 
   // Apply existing history snip boundaries (business messages).
-  const projectedMessages = projectMessagesWithHistorySnips(
+  let projectedMessages = projectMessagesWithHistorySnips(
     state,
     budgetedMessages,
   );
+
+  const boundaryCandidateMessages = [
+    { role: "system" as const, content: systemPrompt },
+    ...projectedMessages.map(toDeepSeekMessage),
+  ];
+  const historySnipBoundary = createHistorySnipBoundaryIfNeeded(
+    boundaryCandidateMessages,
+    projectedMessages,
+  );
+
+  if (historySnipBoundary) {
+    getHistorySnipBoundaries(state).push(historySnipBoundary);
+    const reprojectedBudgetedMessages = applyBulkyToolResultCompression(
+      applyToolResultBudget(
+        cloneMessages(state.Messages),
+        runtime,
+      ),
+      runtime,
+    );
+    projectedMessages = projectMessagesWithHistorySnips(
+      state,
+      reprojectedBudgetedMessages,
+    );
+  }
 
   // History snip — hard truncation from the head.
   const sniped = applyHistorySnip(projectedMessages);

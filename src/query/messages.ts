@@ -15,6 +15,18 @@ import type { State } from "../types/state.js";
 import type { MessagesForQuery } from "./types.js";
 
 const MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 200_000;
+const DEFAULT_BULKY_TOOL_RESULT_COMPACT_CHARS = 32_000;
+const BULKY_TOOL_RESULT_COMPACT_PREVIEW_CHARS = 4_000;
+const BULKY_TOOL_RESULT_COMPACT_TAG = "<tool-result-compact>";
+const BULKY_TOOL_NAMES = new Set([
+  "Read",
+  "Edit",
+  "Write",
+  "Grep",
+  "Glob",
+  "WebFetch",
+  "ReadSkill",
+]);
 const DEFAULT_HISTORY_SNIP_HARD_CHARS = 800_000;
 const DEFAULT_MIN_RECENT_MESSAGES_AFTER_SNIP = 12;
 const TOOL_RESULT_BUDGET_TAG = "<tool-result-budget>";
@@ -25,8 +37,11 @@ export async function buildMessagesForQuery(
 ): Promise<MessagesForQuery> {
   const systemPrompt = await getOrCreateSystemPrompt(runtime);
   const autoCompressedMessages = projectMessagesWithAutoCompress(state);
-  let budgetedMessages = applyToolResultBudget(
-    cloneMessages(autoCompressedMessages),
+  let budgetedMessages = applyBulkyToolResultCompression(
+    applyToolResultBudget(
+      cloneMessages(autoCompressedMessages),
+      runtime,
+    ),
     runtime,
   );
   let projectedMessages = projectMessagesWithHistorySnips(
@@ -34,11 +49,10 @@ export async function buildMessagesForQuery(
     budgetedMessages,
   );
   // Progressive compression pipeline: tool result budget →
-  // history snip boundary projection → micro-compress.
-  let snipedMessages = applyHistorySnip(projectedMessages);
+  // durable history snip boundary projection → micro-compress.
   let messages = await createDeepSeekMessagesForProjection({
     systemPrompt,
-    projectedMessages: snipedMessages,
+    projectedMessages,
   });
 
   const historySnipBoundary = createHistorySnipBoundaryIfNeeded(
@@ -48,20 +62,24 @@ export async function buildMessagesForQuery(
 
   if (historySnipBoundary) {
     getHistorySnipBoundaries(state).push(historySnipBoundary);
-    budgetedMessages = applyToolResultBudget(
-      cloneMessages(autoCompressedMessages),
+    budgetedMessages = applyBulkyToolResultCompression(
+      applyToolResultBudget(
+        cloneMessages(autoCompressedMessages),
+        runtime,
+      ),
       runtime,
     );
     projectedMessages = projectMessagesWithHistorySnips(
       state,
       budgetedMessages,
     );
-    snipedMessages = applyHistorySnip(projectedMessages);
-    messages = await createDeepSeekMessagesForProjection({
-      systemPrompt,
-      projectedMessages: snipedMessages,
-    });
   }
+
+  const snipedMessages = applyHistorySnip(projectedMessages);
+  messages = await createDeepSeekMessagesForProjection({
+    systemPrompt,
+    projectedMessages: snipedMessages,
+  });
 
   return { systemPrompt, messages };
 }
@@ -111,6 +129,77 @@ type CandidatePartition = {
   frozen: ToolResultCandidate[];
   fresh: ToolResultCandidate[];
 };
+
+export function applyBulkyToolResultCompression(
+  messages: Message[],
+  runtime: Runtime,
+): Message[] {
+  const state = getOrCreateToolResultBudgetState(runtime);
+  const toolNameById = buildToolNameById(messages);
+  const threshold = getBulkyToolResultCompactChars();
+  const replacementByMessageIndex = new Map<number, string>();
+
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.role !== "tool") {
+      continue;
+    }
+
+    if (!message.content || isToolResultAlreadyCompressed(message.content)) {
+      continue;
+    }
+
+    const toolName = message.toolName ?? toolNameById.get(message.tool_call_id);
+    if (!toolName || !BULKY_TOOL_NAMES.has(toolName)) {
+      continue;
+    }
+
+    const budgetKey = createBulkyToolResultBudgetKey(message.id);
+    const existingReplacement = state.replacements.get(budgetKey);
+    if (existingReplacement !== undefined) {
+      replacementByMessageIndex.set(messageIndex, existingReplacement);
+      continue;
+    }
+
+    if (state.seenIds.has(budgetKey)) {
+      continue;
+    }
+
+    state.seenIds.add(budgetKey);
+    if (message.content.length <= threshold) {
+      continue;
+    }
+
+    const replacement = buildBulkyToolResultReplacement({
+      budgetKey,
+      toolCallId: message.tool_call_id,
+      toolName,
+      content: message.content,
+      size: message.content.length,
+    });
+    state.replacements.set(budgetKey, replacement);
+    replacementByMessageIndex.set(messageIndex, replacement);
+  }
+
+  if (replacementByMessageIndex.size === 0) {
+    return messages;
+  }
+
+  return messages.map((message, messageIndex) => {
+    if (message.role !== "tool") {
+      return message;
+    }
+
+    const replacement = replacementByMessageIndex.get(messageIndex);
+    if (replacement === undefined) {
+      return message;
+    }
+
+    return {
+      ...message,
+      content: replacement,
+    };
+  });
+}
 
 export function applyToolResultBudget(
   messages: Message[],
@@ -371,7 +460,7 @@ function collectHistorySnipCandidateGroups(
       continue;
     }
 
-    if (isRegenerableRuntimeContextMessage(message)) {
+    if (isRegenerableAttachmentMessage(message)) {
       groupedIds.add(message.id);
       groups.push(createSnipCandidateGroup([message], 1));
     }
@@ -460,7 +549,11 @@ function estimateSelectedChars(
   }, 0);
 }
 
-function isRegenerableRuntimeContextMessage(message: Message): boolean {
+function isRegenerableAttachmentMessage(message: Message): boolean {
+  // These messages are projected attachments/context rather than core user ↔
+  // assistant conversation turns. They can be restored or regenerated from
+  // runtime state, memory, file restore, skill discovery, or agent state, so old
+  // copies are safe durable history-snip candidates.
   return message.source === "runtime" ||
     message.source === "long_term_memory" ||
     message.source === "file_restore" ||
@@ -690,6 +783,58 @@ function selectFreshToReplace(
   return selected;
 }
 
+function getBulkyToolResultCompactChars(): number {
+  return getPositiveIntegerEnv(
+    "OPENCAT_BULKY_TOOL_RESULT_COMPACT_CHARS",
+    DEFAULT_BULKY_TOOL_RESULT_COMPACT_CHARS,
+  );
+}
+
+function createBulkyToolResultBudgetKey(messageId: Message["id"]): string {
+  return `bulky_tool_result:${messageId}`;
+}
+
+type BulkyToolResultReplacementCandidate = {
+  budgetKey: string;
+  toolCallId: string;
+  toolName: string;
+  content: string;
+  size: number;
+};
+
+function buildBulkyToolResultReplacement(
+  candidate: BulkyToolResultReplacementCandidate,
+): string {
+  const contentHash = createHash("sha256")
+    .update(candidate.content)
+    .digest("hex");
+  const previewChars = Math.floor(BULKY_TOOL_RESULT_COMPACT_PREVIEW_CHARS / 2);
+  const head = candidate.content.slice(0, previewChars);
+  const tail = candidate.content.slice(-previewChars);
+  const omittedChars = Math.max(
+    0,
+    candidate.content.length - head.length - tail.length,
+  );
+
+  return [
+    BULKY_TOOL_RESULT_COMPACT_TAG,
+    `Tool result from ${candidate.toolName} was compacted in this prompt projection because this tool commonly produces large, regenerable outputs.`,
+    `tool_call_id: ${candidate.toolCallId}`,
+    `budget_key: ${candidate.budgetKey}`,
+    `original_size: ${candidate.size} characters`,
+    `sha256: ${contentHash}`,
+    "The original result remains in the authoritative session messages/transcript and was not re-executed.",
+    "<preview_head>",
+    head,
+    "</preview_head>",
+    `[${omittedChars} characters omitted from the middle]`,
+    "<preview_tail>",
+    tail,
+    "</preview_tail>",
+    "</tool-result-compact>",
+  ].join("\n");
+}
+
 function buildToolResultReplacement(candidate: ToolResultCandidate): string {
   const toolLabel = candidate.toolName ?? "unknown tool";
   const persistedReference = extractPersistedToolResultReference(
@@ -738,6 +883,11 @@ function extractPersistedToolResultReference(content: string): {
 
 function isToolResultAlreadyBudgeted(content: string): boolean {
   return content.startsWith(TOOL_RESULT_BUDGET_TAG);
+}
+
+function isToolResultAlreadyCompressed(content: string): boolean {
+  return content.startsWith(TOOL_RESULT_BUDGET_TAG) ||
+    content.startsWith(BULKY_TOOL_RESULT_COMPACT_TAG);
 }
 
 function createSnipMarkerMessage(removedMessages: number): Message {
