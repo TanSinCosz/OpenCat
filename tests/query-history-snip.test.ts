@@ -53,7 +53,7 @@ test("buildMessagesForQuery records durable snip boundaries before hard snipping
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "9000";
+    process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "14000";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
 
     const state = createState({
@@ -206,7 +206,7 @@ test("buildMessagesForQuery records durable snip boundaries for old attachment c
   ] as const;
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "9000";
+    process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "14000";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
 
     for (const source of attachmentSources) {
