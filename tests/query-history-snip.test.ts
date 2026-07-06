@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { DeepSeekMessage } from "../src/deepseek/types.js";
 import {
+  applyBulkyToolResultCompression,
   applyHistorySnip,
   applyToolResultBudget,
   buildMessagesForQuery,
@@ -47,12 +48,12 @@ test("applyHistorySnip still works as a hard fallback when explicitly configured
   }
 });
 
-test("buildMessagesForQuery micro-compresses before creating durable snip boundaries", async () => {
+test("buildMessagesForQuery records durable snip boundaries before hard snipping", async () => {
   const originalHardChars = process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS;
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "9000";
+    process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "14000";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
 
     const state = createState({
@@ -96,31 +97,36 @@ test("buildMessagesForQuery micro-compresses before creating durable snip bounda
       tools: [],
     });
 
-    // Micro-compress (hard truncation) handles the overflow by removing
-    // old head messages. No durable boundary is created.
+    // The old tool round is eligible for durable removal, so the decision is
+    // recorded before the hard snip fallback runs.
     const first = await buildMessagesForQuery(runtime, state);
+    const removedIds = new Set(
+      state.historySnips[0]?.removedMessageIds ?? [],
+    );
 
-    assert.equal(state.historySnips.length, 0);
+    assert.equal(state.historySnips.length, 1);
+    assert.ok(removedIds.has(state.Messages[1]!.id));
+    assert.ok(removedIds.has(state.Messages[2]!.id));
     assert.doesNotMatch(JSON.stringify(first.messages), /large old tool result/);
 
-    // Second call: still no durable boundary needed — micro-compress
-    // handles it again.
+    // Second call reuses the recorded boundary for stable prompt projection.
     await buildMessagesForQuery(runtime, state);
 
-    assert.equal(state.historySnips.length, 0);
+    assert.equal(state.historySnips.length, 1);
   } finally {
     restoreEnv("OPENCAT_HISTORY_SNIP_HARD_CHARS", originalHardChars);
     restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
   }
 });
 
-test("buildMessagesForQuery creates durable snip boundary when micro-compress is insufficient", async () => {
+test("buildMessagesForQuery falls back to hard snip when durable candidates are insufficient", async () => {
   const originalHardChars = process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS;
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
 
   try {
-    // Use a threshold low enough that even the minimum recent tail (system +
-    // snipMarker + minRecent messages) exceeds it, forcing a durable boundary.
+    // Use a threshold low enough that the old tool round alone cannot satisfy
+    // the removal target, so no durable boundary is recorded and hard snip is
+    // left as the fallback.
     process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "3800";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
 
@@ -166,23 +172,16 @@ test("buildMessagesForQuery creates durable snip boundary when micro-compress is
     });
 
     const first = await buildMessagesForQuery(runtime, state);
-    const snipCountAfterFirstBuild = state.historySnips.length;
-    const removedIds = new Set(
-      state.historySnips[0]?.removedMessageIds ?? [],
-    );
 
-    assert.equal(snipCountAfterFirstBuild, 1);
-    assert.ok(removedIds.has(state.Messages[1]!.id));
-    assert.ok(removedIds.has(state.Messages[2]!.id));
+    assert.equal(state.historySnips.length, 0);
     assert.doesNotMatch(
       JSON.stringify(first.messages),
       /large old tool result/,
     );
 
-    // Second call: the first durable boundary permanently excludes the tool
-    // round, so subsequent projections never see "large old tool result".
     const second = await buildMessagesForQuery(runtime, state);
 
+    assert.equal(state.historySnips.length, 0);
     assert.doesNotMatch(
       JSON.stringify(second.messages),
       /large old tool result/,
@@ -190,6 +189,142 @@ test("buildMessagesForQuery creates durable snip boundary when micro-compress is
   } finally {
     restoreEnv("OPENCAT_HISTORY_SNIP_HARD_CHARS", originalHardChars);
     restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+  }
+});
+
+
+test("buildMessagesForQuery records durable snip boundaries for old attachment context", async () => {
+  const originalHardChars = process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS;
+  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
+  const attachmentSources = [
+    "runtime",
+    "long_term_memory",
+    "file_restore",
+    "dynamic_skill",
+    "agent_notification",
+    "agent_message",
+  ] as const;
+
+  try {
+    process.env.OPENCAT_HISTORY_SNIP_HARD_CHARS = "14000";
+    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
+
+    for (const source of attachmentSources) {
+      const attachment = createMessage({
+        role: "user",
+        content: `${source} old attachment\n${"attachment ".repeat(1_200)}`,
+      }, { source });
+      const state = createState({
+        messages: [
+          createMessage({ role: "user", content: "old user request" }),
+          attachment,
+          ...Array.from({ length: 8 }, (_, index) =>
+            createMessage({
+              role: "user",
+              content: `recent user ${index}\n${"recent ".repeat(80)}`,
+            })
+          ),
+        ],
+      });
+      const runtime = createRuntime({
+        deepSeekRuntimeConfig: {
+          apiKey: "test-key",
+          model: "deepseek-v4-flash",
+          maxTokens: 1024,
+        },
+        MemoryConfig: createMemoryConfig(),
+        transcriptStore: false,
+        tools: [],
+      });
+
+      const first = await buildMessagesForQuery(runtime, state);
+      const removedIds = new Set(
+        state.historySnips[0]?.removedMessageIds ?? [],
+      );
+
+      assert.equal(state.historySnips.length, 1, source);
+      assert.ok(removedIds.has(attachment.id), source);
+      assert.doesNotMatch(JSON.stringify(first.messages), /old attachment/);
+    }
+  } finally {
+    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_CHARS", originalHardChars);
+    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+  }
+});
+
+test("applyBulkyToolResultCompression compacts large read-like tool outputs", () => {
+  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CHARS;
+
+  try {
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CHARS = "2000";
+    const runtime = createRuntime({
+      deepSeekRuntimeConfig: {
+        apiKey: "test-key",
+        model: "deepseek-v4-flash",
+        maxTokens: 1024,
+      },
+      MemoryConfig: createMemoryConfig(),
+      transcriptStore: false,
+      tools: [
+        {
+          name: "Read",
+          inputSchema: {} as never,
+          outputSchema: {} as never,
+          description: () => "",
+          prompt: () => "",
+          call: () => "",
+          renderResult: ({ content, maxChars }) =>
+            `<read-renderer-preview>${content.slice(0, maxChars / 4)}</read-renderer-preview>`,
+        },
+      ],
+    });
+    const messages = [
+      createMessage({
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call_read",
+            type: "function",
+            function: { name: "Read", arguments: "{}" },
+          },
+          {
+            id: "call_other",
+            type: "function",
+            function: { name: "Other", arguments: "{}" },
+          },
+        ],
+      }),
+      createMessage({
+        role: "tool",
+        tool_call_id: "call_read",
+        content: "read-head\n" + "r".repeat(8_000) + "\nread-tail",
+      }),
+      createMessage({
+        role: "tool",
+        tool_call_id: "call_other",
+        content: "other-head\n" + "o".repeat(8_000) + "\nother-tail",
+      }),
+    ];
+
+    const projected = applyBulkyToolResultCompression(messages, runtime);
+    const readResult = projected[1];
+    const otherResult = projected[2];
+
+    assert.equal(readResult?.role, "tool");
+    assert.equal(otherResult?.role, "tool");
+    assert.match(readResult.content, /<tool-result-compact>/);
+    assert.match(readResult.content, /Tool result from Read was compacted/);
+    assert.match(readResult.content, /<read-renderer-preview>read-head/);
+    assert.doesNotMatch(readResult.content, /read-tail/);
+    assert.doesNotMatch(readResult.content, /r{5000}/);
+    assert.match(otherResult.content, /o{5000}/);
+
+    const secondProjection = applyBulkyToolResultCompression(messages, runtime);
+    assert.equal(secondProjection[1]?.role, "tool");
+    assert.equal(readResult.content, secondProjection[1].content);
+  } finally {
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CHARS", originalThreshold);
   }
 });
 
@@ -214,8 +349,8 @@ test("applyToolResultBudget replaces oversized fresh results with persisted refe
     "x".repeat(120_000),
     "</tool_result_preview>",
   ].join("\n");
-  const messages: DeepSeekMessage[] = [
-    {
+  const messages = [
+    createMessage({
       role: "assistant",
       content: "",
       tool_calls: [
@@ -230,17 +365,17 @@ test("applyToolResultBudget replaces oversized fresh results with persisted refe
           function: { name: "Grep", arguments: "{}" },
         },
       ],
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_read",
       content: hugePersistedContent,
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_grep",
       content: "y".repeat(100_000),
-    },
+    }),
   ];
 
   const projected = applyToolResultBudget(messages, runtime);
@@ -283,8 +418,8 @@ test("applyToolResultBudget includes tools without finite result caps", () => {
       },
     ],
   });
-  const messages: DeepSeekMessage[] = [
-    {
+  const messages = [
+    createMessage({
       role: "assistant",
       content: "",
       tool_calls: [
@@ -299,17 +434,17 @@ test("applyToolResultBudget includes tools without finite result caps", () => {
           function: { name: "Other", arguments: "{}" },
         },
       ],
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_read",
       content: "read-result\n" + "r".repeat(150_000),
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_other",
       content: "other-result\n" + "o".repeat(100_000),
-    },
+    }),
   ];
 
   const projected = applyToolResultBudget(messages, runtime);
@@ -333,8 +468,8 @@ test("applyToolResultBudget keys decisions by local tool message id", () => {
     transcriptStore: false,
     tools: [],
   });
-  const messages: DeepSeekMessage[] = [
-    {
+  const messages = [
+    createMessage({
       role: "assistant",
       content: "",
       tool_calls: [
@@ -344,13 +479,13 @@ test("applyToolResultBudget keys decisions by local tool message id", () => {
           function: { name: "Read", arguments: "{\"file_path\":\"a.ts\"}" },
         },
       ],
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_reused",
       content: "large-result\n" + "a".repeat(240_000),
-    },
-    {
+    }),
+    createMessage({
       role: "assistant",
       content: "",
       tool_calls: [
@@ -360,20 +495,15 @@ test("applyToolResultBudget keys decisions by local tool message id", () => {
           function: { name: "Read", arguments: "{\"file_path\":\"b.ts\"}" },
         },
       ],
-    },
-    {
+    }),
+    createMessage({
       role: "tool",
       tool_call_id: "call_reused",
       content: "small-result",
-    },
+    }),
   ];
 
-  const projected = applyToolResultBudget(messages, runtime, {
-    toolResultBudgetKeysByMessageIndex: new Map([
-      [1, "msg_local_large"],
-      [3, "msg_local_small"],
-    ]),
-  });
+  const projected = applyToolResultBudget(messages, runtime);
   const firstToolResult = projected[1];
   const secondToolResult = projected[3];
 

@@ -9,12 +9,24 @@ import type {
   HistorySnipId,
   ToolResultBudgetState,
 } from "../types/context.js";
-import { toDeepSeekMessage, type Message } from "../types/messages.js";
+import { createMessage, toDeepSeekMessage, type Message } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
 import type { MessagesForQuery } from "./types.js";
 
 const MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 200_000;
+const DEFAULT_BULKY_TOOL_RESULT_COMPACT_CHARS = 32_000;
+const BULKY_TOOL_RESULT_COMPACT_PREVIEW_CHARS = 4_000;
+const BULKY_TOOL_RESULT_COMPACT_TAG = "<tool-result-compact>";
+const BULKY_TOOL_NAMES = new Set([
+  "Read",
+  "Edit",
+  "Write",
+  "Grep",
+  "Glob",
+  "WebFetch",
+  "ReadSkill",
+]);
 const DEFAULT_HISTORY_SNIP_HARD_CHARS = 800_000;
 const DEFAULT_MIN_RECENT_MESSAGES_AFTER_SNIP = 12;
 const TOOL_RESULT_BUDGET_TAG = "<tool-result-budget>";
@@ -25,24 +37,23 @@ export async function buildMessagesForQuery(
 ): Promise<MessagesForQuery> {
   const systemPrompt = await getOrCreateSystemPrompt(runtime);
   const autoCompressedMessages = projectMessagesWithAutoCompress(state);
+  let budgetedMessages = applyBulkyToolResultCompression(
+    applyToolResultBudget(
+      cloneMessages(autoCompressedMessages),
+      runtime,
+    ),
+    runtime,
+  );
   let projectedMessages = projectMessagesWithHistorySnips(
     state,
-    autoCompressedMessages,
+    budgetedMessages,
   );
+  // Progressive compression pipeline: tool result budget →
+  // durable history snip boundary projection → micro-compress.
   let messages = await createDeepSeekMessagesForProjection({
     systemPrompt,
     projectedMessages,
   });
-
-  // Progressive compression pipeline: tool result budget →
-  // micro-compress → history snip boundary.
-  let toolResultBudgetKeysByMessageIndex =
-    createToolResultBudgetKeysByMessageIndex(projectedMessages);
-  messages = applyToolResultBudget(messages, runtime, {
-    toolResultBudgetKeysByMessageIndex,
-  });
-
-  messages = applyHistorySnip(messages);
 
   const historySnipBoundary = createHistorySnipBoundaryIfNeeded(
     messages,
@@ -51,23 +62,30 @@ export async function buildMessagesForQuery(
 
   if (historySnipBoundary) {
     getHistorySnipBoundaries(state).push(historySnipBoundary);
+    budgetedMessages = applyBulkyToolResultCompression(
+      applyToolResultBudget(
+        cloneMessages(autoCompressedMessages),
+        runtime,
+      ),
+      runtime,
+    );
     projectedMessages = projectMessagesWithHistorySnips(
       state,
-      autoCompressedMessages,
+      budgetedMessages,
     );
-    messages = await createDeepSeekMessagesForProjection({
-      systemPrompt,
-      projectedMessages,
-    });
-    toolResultBudgetKeysByMessageIndex =
-      createToolResultBudgetKeysByMessageIndex(projectedMessages);
-    messages = applyToolResultBudget(messages, runtime, {
-      toolResultBudgetKeysByMessageIndex,
-    });
-    messages = applyHistorySnip(messages);
   }
 
+  const snipedMessages = applyHistorySnip(projectedMessages);
+  messages = await createDeepSeekMessagesForProjection({
+    systemPrompt,
+    projectedMessages: snipedMessages,
+  });
+
   return { systemPrompt, messages };
+}
+
+function cloneMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) => ({ ...message }) as Message);
 }
 
 export async function createDeepSeekMessagesForProjection(options: {
@@ -81,22 +99,6 @@ export async function createDeepSeekMessagesForProjection(options: {
     },
     ...options.projectedMessages.map(toDeepSeekMessage),
   ];
-}
-
-export function createToolResultBudgetKeysByMessageIndex(
-  projectedMessages: Message[],
-): Map<number, string> {
-  const keys = new Map<number, string>();
-
-  for (const [messageIndex, message] of projectedMessages.entries()) {
-    if (message.role === "tool") {
-      // The DeepSeek projection prepends the system message, so business
-      // message index N is wire message index N + 1.
-      keys.set(messageIndex + 1, message.id);
-    }
-  }
-
-  return keys;
 }
 
 export async function getOrCreateSystemPrompt(
@@ -128,12 +130,86 @@ type CandidatePartition = {
   fresh: ToolResultCandidate[];
 };
 
+export function applyBulkyToolResultCompression(
+  messages: Message[],
+  runtime: Runtime,
+): Message[] {
+  const state = getOrCreateToolResultBudgetState(runtime);
+  const toolNameById = buildToolNameById(messages);
+  const threshold = getBulkyToolResultCompactChars();
+  const replacementByMessageIndex = new Map<number, string>();
+
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.role !== "tool") {
+      continue;
+    }
+
+    if (!message.content || isToolResultAlreadyCompressed(message.content)) {
+      continue;
+    }
+
+    const toolName = message.toolName ?? toolNameById.get(message.tool_call_id);
+    if (!toolName || !BULKY_TOOL_NAMES.has(toolName)) {
+      continue;
+    }
+
+    const budgetKey = createBulkyToolResultBudgetKey(message.id);
+    const existingReplacement = state.replacements.get(budgetKey);
+    if (existingReplacement !== undefined) {
+      replacementByMessageIndex.set(messageIndex, existingReplacement);
+      continue;
+    }
+
+    if (state.seenIds.has(budgetKey)) {
+      continue;
+    }
+
+    state.seenIds.add(budgetKey);
+    if (message.content.length <= threshold) {
+      continue;
+    }
+
+    const replacement = buildBulkyToolResultReplacement({
+      budgetKey,
+      toolCallId: message.tool_call_id,
+      toolName,
+      content: message.content,
+      renderedPreview: renderToolResultPreviewForProjection({
+        runtime,
+        toolName,
+        toolCallId: message.tool_call_id,
+        content: message.content,
+      }),
+      size: message.content.length,
+    });
+    state.replacements.set(budgetKey, replacement);
+    replacementByMessageIndex.set(messageIndex, replacement);
+  }
+
+  if (replacementByMessageIndex.size === 0) {
+    return messages;
+  }
+
+  return messages.map((message, messageIndex) => {
+    if (message.role !== "tool") {
+      return message;
+    }
+
+    const replacement = replacementByMessageIndex.get(messageIndex);
+    if (replacement === undefined) {
+      return message;
+    }
+
+    return {
+      ...message,
+      content: replacement,
+    };
+  });
+}
+
 export function applyToolResultBudget(
   messages: Message[],
   runtime: Runtime,
-  options: {
-    toolResultBudgetKeysByMessageIndex?: ReadonlyMap<number, string>;
-  } = {},
 ): Message[] {
   const state = getOrCreateToolResultBudgetState(runtime);
 
@@ -148,11 +224,7 @@ export function applyToolResultBudget(
   const replacementByMessageIndex = new Map<number, string>();
 
   for (
-    const candidates of collectToolResultGroups(
-      messages,
-      toolNameById,
-      options.toolResultBudgetKeysByMessageIndex,
-    )
+    const candidates of collectToolResultGroups(messages, toolNameById)
   ) {
     const { mustReapply, frozen, fresh } = partitionByPriorDecision(
       candidates,
@@ -225,7 +297,7 @@ export function applyToolResultBudget(
   });
 }
 
-export function applyHistorySnip(messages: Message[]): DeepSeekMessage[] {
+export function applyHistorySnip(messages: Message[]): Message[] {
   const maxMessagesForQueryChars = getHistorySnipHardChars();
 
   if (totalMessageSize(messages) <= maxMessagesForQueryChars) {
@@ -394,7 +466,7 @@ function collectHistorySnipCandidateGroups(
       continue;
     }
 
-    if (isRegenerableRuntimeContextMessage(message)) {
+    if (isRegenerableAttachmentMessage(message)) {
       groupedIds.add(message.id);
       groups.push(createSnipCandidateGroup([message], 1));
     }
@@ -483,7 +555,11 @@ function estimateSelectedChars(
   }, 0);
 }
 
-function isRegenerableRuntimeContextMessage(message: Message): boolean {
+function isRegenerableAttachmentMessage(message: Message): boolean {
+  // These messages are projected attachments/context rather than core user ↔
+  // assistant conversation turns. They can be restored or regenerated from
+  // runtime state, memory, file restore, skill discovery, or agent state, so old
+  // copies are safe durable history-snip candidates.
   return message.source === "runtime" ||
     message.source === "long_term_memory" ||
     message.source === "file_restore" ||
@@ -612,7 +688,7 @@ function getOrCreateToolResultBudgetState(
   return runtime.toolResultBudgetState;
 }
 
-function buildToolNameById(messages: DeepSeekMessage[]): Map<string, string> {
+function buildToolNameById(messages: Message[]): Map<string, string> {
   const toolNameById = new Map<string, string>();
 
   for (const message of messages) {
@@ -629,9 +705,8 @@ function buildToolNameById(messages: DeepSeekMessage[]): Map<string, string> {
 }
 
 function collectToolResultGroups(
-  messages: DeepSeekMessage[],
+  messages: Message[],
   toolNameById: ReadonlyMap<string, string>,
-  toolResultBudgetKeysByMessageIndex?: ReadonlyMap<number, string>,
 ): ToolResultCandidate[][] {
   const groups: ToolResultCandidate[][] = [];
   let current: ToolResultCandidate[] = [];
@@ -654,8 +729,7 @@ function collectToolResultGroups(
     }
 
     current.push({
-      budgetKey: toolResultBudgetKeysByMessageIndex?.get(messageIndex) ??
-        createFallbackToolResultBudgetKey(message, messageIndex),
+      budgetKey: message.id,
       messageIndex,
       toolCallId: message.tool_call_id,
       toolName: toolNameById.get(message.tool_call_id),
@@ -667,18 +741,6 @@ function collectToolResultGroups(
   flush();
 
   return groups;
-}
-
-function createFallbackToolResultBudgetKey(
-  message: Extract<DeepSeekMessage, { role: "tool" }>,
-  messageIndex: number,
-): string {
-  const contentHash = createHash("sha256")
-    .update(message.content)
-    .digest("hex")
-    .slice(0, 16);
-
-  return `tool_result_budget_${messageIndex}_${message.tool_call_id}_${contentHash}`;
 }
 
 function partitionByPriorDecision(
@@ -725,6 +787,89 @@ function selectFreshToReplace(
   }
 
   return selected;
+}
+
+
+function renderToolResultPreviewForProjection(options: {
+  runtime: Runtime;
+  toolName: string;
+  toolCallId: string;
+  content: string;
+}): string {
+  const maxChars = BULKY_TOOL_RESULT_COMPACT_PREVIEW_CHARS;
+  const tool = options.runtime.tools.find((candidate) =>
+    candidate.name === options.toolName
+  );
+
+  return tool?.renderResult?.({
+    toolName: options.toolName,
+    toolCallId: options.toolCallId,
+    content: options.content,
+    maxChars,
+    reason: "projection_compact",
+  }) ?? renderHeadTailToolResultPreview(options.content, maxChars);
+}
+
+function renderHeadTailToolResultPreview(content: string, maxChars: number): string {
+  const previewChars = Math.floor(maxChars / 2);
+  const head = content.slice(0, previewChars);
+  const tail = content.slice(-previewChars);
+  const omittedChars = Math.max(
+    0,
+    content.length - head.length - tail.length,
+  );
+
+  return [
+    "<preview_head>",
+    head,
+    "</preview_head>",
+    `[${omittedChars} characters omitted from the middle]`,
+    "<preview_tail>",
+    tail,
+    "</preview_tail>",
+  ].join("\n");
+}
+
+function getBulkyToolResultCompactChars(): number {
+  return getPositiveIntegerEnv(
+    "OPENCAT_BULKY_TOOL_RESULT_COMPACT_CHARS",
+    DEFAULT_BULKY_TOOL_RESULT_COMPACT_CHARS,
+  );
+}
+
+function createBulkyToolResultBudgetKey(messageId: Message["id"]): string {
+  return `bulky_tool_result:${messageId}`;
+}
+
+type BulkyToolResultReplacementCandidate = {
+  budgetKey: string;
+  toolCallId: string;
+  toolName: string;
+  content: string;
+  renderedPreview?: string;
+  size: number;
+};
+
+function buildBulkyToolResultReplacement(
+  candidate: BulkyToolResultReplacementCandidate,
+): string {
+  const contentHash = createHash("sha256")
+    .update(candidate.content)
+    .digest("hex");
+  return [
+    BULKY_TOOL_RESULT_COMPACT_TAG,
+    `Tool result from ${candidate.toolName} was compacted in this prompt projection because this tool commonly produces large, regenerable outputs.`,
+    `tool_call_id: ${candidate.toolCallId}`,
+    `budget_key: ${candidate.budgetKey}`,
+    `original_size: ${candidate.size} characters`,
+    `sha256: ${contentHash}`,
+    "The original result remains in the authoritative session messages/transcript and was not re-executed.",
+    candidate.renderedPreview ?? renderHeadTailToolResultPreview(
+      candidate.content,
+      BULKY_TOOL_RESULT_COMPACT_PREVIEW_CHARS,
+    ),
+    "</tool-result-compact>",
+  ].join("\n");
 }
 
 function buildToolResultReplacement(candidate: ToolResultCandidate): string {
@@ -777,12 +922,20 @@ function isToolResultAlreadyBudgeted(content: string): boolean {
   return content.startsWith(TOOL_RESULT_BUDGET_TAG);
 }
 
-function createSnipMarkerMessage(removedMessages: number): DeepSeekMessage {
-  return {
-    role: "user",
-    content:
-      `[History snipped: ${removedMessages} earlier messages were removed from this prompt projection to stay within the context budget. The authoritative conversation state was not modified.]`,
-  };
+function isToolResultAlreadyCompressed(content: string): boolean {
+  return content.startsWith(TOOL_RESULT_BUDGET_TAG) ||
+    content.startsWith(BULKY_TOOL_RESULT_COMPACT_TAG);
+}
+
+function createSnipMarkerMessage(removedMessages: number): Message {
+  return createMessage(
+    {
+      role: "user",
+      content:
+        `[History snipped: ${removedMessages} earlier messages were removed from this prompt projection to stay within the context budget. The authoritative conversation state was not modified.]`,
+    },
+    { source: "runtime" },
+  );
 }
 
 function moveToSafeTailBoundary(

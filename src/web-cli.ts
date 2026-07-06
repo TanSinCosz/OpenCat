@@ -337,11 +337,20 @@ function normalizeQueryEvent(
 
   switch (event.type) {
     case "context_ready":
-      return {
-        type: event.type,
-        systemPromptChars: event.systemPrompt.length,
-        messageCount: event.messages.length,
-      };
+      {
+        const serializedMessages = JSON.stringify(event.messages);
+        return {
+          type: event.type,
+          systemPromptChars: event.systemPrompt.length,
+          messageCount: event.messages.length,
+          hasLongTermMemory: serializedMessages.includes("<long_term_memory>"),
+          hasSessionMemory: serializedMessages.includes("<session_memory>"),
+          hasLocalCompactSummary: serializedMessages.includes("<local_compact_summary>"),
+          hasToolResultBudget: serializedMessages.includes("<tool-result-budget>"),
+          hasToolResultCompact: serializedMessages.includes("<tool-result-compact>"),
+          hasHistorySnipMarker: serializedMessages.includes("[History snipped:"),
+        };
+      }
     case "model_stream_event":
       return undefined;
     case "model_usage":
@@ -991,6 +1000,31 @@ function renderHtml(): string {
       line-height: 1.45;
     }
     .tool-card .tool-result { color: var(--text-primary); }
+    .projection-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0 0 6px 0;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border-muted);
+      background: rgba(88,166,255,.08);
+      color: var(--accent-blue);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .projection-note.compact { color: var(--accent-green); background: rgba(63,185,80,.08); }
+    .projection-note.budget { color: var(--accent-orange); background: rgba(210,153,34,.08); }
+    .projection-note.snip { color: var(--text-muted); background: rgba(139,148,158,.08); }
+    .projection-pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--font-mono);
+    }
 
     /* ===== Events Panel ===== */
     #events-panel {
@@ -1906,12 +1940,44 @@ function renderHtml(): string {
           : appendToolUse({ function: { name: event.toolName || "tool" } });
 
         var content = event.contentPreview || (event.message && event.message.content) || "";
-        entry.result.textContent = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+        renderToolResultContent(entry.result, content);
         entry.indicator.classList.add("done");
         entry.status.classList.add("done");
         entry.status.textContent = "done";
         entry.details.open = false;
         scrollToBottom(chat);
+      }
+
+      function renderToolResultContent(container, content) {
+        var text = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+        var projection = getProjectionReplacementInfo(text);
+        container.textContent = "";
+
+        if (projection) {
+          var note = document.createElement("div");
+          note.className = "projection-note " + projection.kind;
+          note.textContent = projection.label;
+          container.append(note);
+        }
+
+        var pre = document.createElement("pre");
+        pre.className = "projection-pre";
+        pre.textContent = text;
+        container.append(pre);
+      }
+
+      function getProjectionReplacementInfo(text) {
+        if (!text) return null;
+        if (text.indexOf("<tool-result-compact>") === 0) {
+          return { kind: "compact", label: "compacted tool result" };
+        }
+        if (text.indexOf("<tool-result-budget>") === 0) {
+          return { kind: "budget", label: "budgeted tool result" };
+        }
+        if (text.indexOf("[History snipped:") === 0) {
+          return { kind: "snip", label: "history snip marker" };
+        }
+        return null;
       }
 
       function formatToolArguments(value) {
