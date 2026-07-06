@@ -96,9 +96,17 @@ export function toDeepSeekMessage(message: Message): DeepSeekMessage {
         createdAt: _createdAt,
         source: _source,
         usage: _usage,
+        ...assistantMessage
+      } = message;
+
+      if (assistantMessage.tool_calls?.length) {
+        return assistantMessage;
+      }
+
+      const {
         reasoning_content: _reasoningContent,
         ...deepSeekMessage
-      } = message;
+      } = assistantMessage;
       return deepSeekMessage;
     }
     case "tool": {

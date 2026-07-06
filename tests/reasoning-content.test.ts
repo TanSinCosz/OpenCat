@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { streamAssistantMessage } from "../src/query/assistant-stream.js";
+import { query } from "../src/query.js";
 import { createMessage, toDeepSeekMessage } from "../src/types/messages.js";
 import type { DeepSeekClient } from "../src/deepseek/client.js";
 import type {
   DeepSeekCreateRequest,
+  DeepSeekStreamEnvelope,
   DeepSeekStreamRequest,
 } from "../src/deepseek/types.js";
+import { createMemoryConfig } from "../src/Memory/config.js";
+import { createRuntime } from "../src/types/runtime.js";
+import { createState } from "../src/types/state.js";
+import type { Tool } from "../src/Tools/types.js";
 
 test("assistant reasoning content is not projected back into model history", () => {
   const message = createMessage({
@@ -20,6 +26,86 @@ test("assistant reasoning content is not projected back into model history", () 
   assert.equal(projected.role, "assistant");
   assert.equal(projected.content, "final answer");
   assert.equal("reasoning_content" in projected, false);
+});
+
+
+test("assistant reasoning content is projected when the assistant turn called tools", () => {
+  const message = createMessage({
+    role: "assistant",
+    content: null,
+    reasoning_content: "tool-use reasoning",
+    tool_calls: [
+      {
+        id: "call_echo",
+        type: "function",
+        function: { name: "Echo", arguments: "{}" },
+      },
+    ],
+  });
+
+  const projected = toDeepSeekMessage(message);
+
+  assert.equal(projected.role, "assistant");
+  assert.equal(projected.reasoning_content, "tool-use reasoning");
+  assert.equal(projected.tool_calls?.[0]?.id, "call_echo");
+});
+
+test("query carries assistant reasoning content into the next tool-followup request", async () => {
+  const streamRequests: DeepSeekStreamRequest[] = [];
+  const client: DeepSeekClient = {
+    async create(_input: DeepSeekCreateRequest) {
+      throw new Error("create is not used in this test");
+    },
+    async *stream(input: DeepSeekStreamRequest) {
+      streamRequests.push(input);
+      if (streamRequests.length === 1) {
+        yield createToolCallReasoningChunk();
+        yield { raw: "[DONE]", done: true, chunk: null };
+        return;
+      }
+
+      yield createAssistantContentChunk("done");
+      yield { raw: "[DONE]", done: true, chunk: null };
+    },
+    async collectStream() {
+      throw new Error("collectStream is not used in this test");
+    },
+  };
+  const echoTool: Tool = {
+    name: "Echo",
+    inputSchema: {} as never,
+    outputSchema: {} as never,
+    description: () => "Echo test tool",
+    prompt: () => "Echo test tool",
+    call: () => "echo-result",
+  };
+  const runtime = createRuntime({
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    deepSeekClient: client,
+    MemoryConfig: createMemoryConfig(),
+    transcriptStore: false,
+    tools: [echoTool],
+  });
+  const state = createState({
+    messages: [createMessage({ role: "user", content: "use the echo tool" })],
+  });
+
+  for await (const _event of query(runtime, state, { maxTurns: 2 })) {
+    // Drain query events.
+  }
+
+  const followupRequest = streamRequests[1];
+  assert.ok(followupRequest);
+  const assistantToolCallMessage = followupRequest.messages.find((message) =>
+    message.role === "assistant" && message.tool_calls?.[0]?.id === "call_echo"
+  );
+
+  assert.ok(assistantToolCallMessage);
+  assert.equal(assistantToolCallMessage.reasoning_content, "tool reasoning");
 });
 
 test("message source is local metadata and is not projected into model history", () => {
@@ -179,3 +265,54 @@ test("reasoning deltas are emitted so frontends can render collapsed thinking", 
     ],
   );
 });
+
+function createToolCallReasoningChunk(): DeepSeekStreamEnvelope {
+  return {
+    raw: "tool-call",
+    done: false,
+    chunk: {
+      id: "tool-call-reasoning",
+      object: "chat.completion.chunk",
+      created: 0,
+      model: "deepseek-v4-flash",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            reasoning_content: "tool reasoning",
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_echo",
+                type: "function",
+                function: { name: "Echo", arguments: "{}" },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    },
+  };
+}
+
+function createAssistantContentChunk(content: string): DeepSeekStreamEnvelope {
+  return {
+    raw: content,
+    done: false,
+    chunk: {
+      id: "assistant-content",
+      object: "chat.completion.chunk",
+      created: 0,
+      model: "deepseek-v4-flash",
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", content },
+          finish_reason: "stop",
+        },
+      ],
+    },
+  };
+}
