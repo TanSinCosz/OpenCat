@@ -1,14 +1,17 @@
 import { executeToolCall } from "./Tools/executor.js";
 import { drainAgentMessages } from "./Tools/Agent/state.js";
 import type { DeepSeekAssistantMessage } from "./deepseek/types.js";
-import { createMessage, toDeepSeekMessage, type ToolMessage } from "./types/messages.js";
+import { createMessage, toDeepSeekMessage, type Message, type ToolMessage } from "./types/messages.js";
 import { persistLargeToolResultIfNeeded } from "./tool-results/persistence.js";
 import type { Runtime } from "./types/runtime.js";
 import type { State } from "./types/state.js";
 import { streamAssistantWithReasoningContinuation } from "./query/reasoning-continuation.js";
 import {
+  applyBulkyToolResultCompression,
   applyHistorySnip,
   applyToolResultBudget,
+  createHistorySnipBoundaryIfNeeded,
+  getHistorySnipBoundaries,
   getOrCreateSystemPrompt,
   projectMessagesWithHistorySnips,
 } from "./query/messages.js";
@@ -258,23 +261,60 @@ async function projectMessages(
 ): Promise<MessagesForQuery> {
   const systemPrompt = await getOrCreateSystemPrompt(runtime);
 
-  // Apply existing history snip boundaries (business messages).
-  let messages = projectMessagesWithHistorySnips(state, state.Messages);
+  // Work on a copy so prompt projection never mutates state.Messages.
+  const budgetedMessages = applyBulkyToolResultCompression(
+    applyToolResultBudget(
+      cloneMessages(state.Messages),
+      runtime,
+    ),
+    runtime,
+  );
 
-  // Tool result budget — replace oversized tool results with references.
-  messages = applyToolResultBudget(messages, runtime);
+  // Apply existing history snip boundaries (business messages).
+  let projectedMessages = projectMessagesWithHistorySnips(
+    state,
+    budgetedMessages,
+  );
+
+  const boundaryCandidateMessages = [
+    { role: "system" as const, content: systemPrompt },
+    ...projectedMessages.map(toDeepSeekMessage),
+  ];
+  const historySnipBoundary = createHistorySnipBoundaryIfNeeded(
+    boundaryCandidateMessages,
+    projectedMessages,
+  );
+
+  if (historySnipBoundary) {
+    getHistorySnipBoundaries(state).push(historySnipBoundary);
+    const reprojectedBudgetedMessages = applyBulkyToolResultCompression(
+      applyToolResultBudget(
+        cloneMessages(state.Messages),
+        runtime,
+      ),
+      runtime,
+    );
+    projectedMessages = projectMessagesWithHistorySnips(
+      state,
+      reprojectedBudgetedMessages,
+    );
+  }
 
   // History snip — hard truncation from the head.
-  const sniped = applyHistorySnip(messages);
+  const sniped = applyHistorySnip(projectedMessages);
 
   // Convert to DeepSeek wire format at the end.
   return {
     systemPrompt,
     messages: [
       { role: "system" as const, content: systemPrompt },
-      ...(sniped as Message[]).map(toDeepSeekMessage),
+      ...sniped.map(toDeepSeekMessage),
     ],
   };
+}
+
+function cloneMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) => ({ ...message }) as Message);
 }
 
 async function drainPendingAgentMessagesForRuntime(
