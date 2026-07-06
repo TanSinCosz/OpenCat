@@ -174,6 +174,12 @@ export function applyBulkyToolResultCompression(
       toolCallId: message.tool_call_id,
       toolName,
       content: message.content,
+      renderedPreview: renderToolResultPreviewForProjection({
+        runtime,
+        toolName,
+        toolCallId: message.tool_call_id,
+        content: message.content,
+      }),
       size: message.content.length,
     });
     state.replacements.set(budgetKey, replacement);
@@ -783,6 +789,47 @@ function selectFreshToReplace(
   return selected;
 }
 
+
+function renderToolResultPreviewForProjection(options: {
+  runtime: Runtime;
+  toolName: string;
+  toolCallId: string;
+  content: string;
+}): string {
+  const maxChars = BULKY_TOOL_RESULT_COMPACT_PREVIEW_CHARS;
+  const tool = options.runtime.tools.find((candidate) =>
+    candidate.name === options.toolName
+  );
+
+  return tool?.renderResult?.({
+    toolName: options.toolName,
+    toolCallId: options.toolCallId,
+    content: options.content,
+    maxChars,
+    reason: "projection_compact",
+  }) ?? renderHeadTailToolResultPreview(options.content, maxChars);
+}
+
+function renderHeadTailToolResultPreview(content: string, maxChars: number): string {
+  const previewChars = Math.floor(maxChars / 2);
+  const head = content.slice(0, previewChars);
+  const tail = content.slice(-previewChars);
+  const omittedChars = Math.max(
+    0,
+    content.length - head.length - tail.length,
+  );
+
+  return [
+    "<preview_head>",
+    head,
+    "</preview_head>",
+    `[${omittedChars} characters omitted from the middle]`,
+    "<preview_tail>",
+    tail,
+    "</preview_tail>",
+  ].join("\n");
+}
+
 function getBulkyToolResultCompactChars(): number {
   return getPositiveIntegerEnv(
     "OPENCAT_BULKY_TOOL_RESULT_COMPACT_CHARS",
@@ -799,6 +846,7 @@ type BulkyToolResultReplacementCandidate = {
   toolCallId: string;
   toolName: string;
   content: string;
+  renderedPreview?: string;
   size: number;
 };
 
@@ -808,14 +856,6 @@ function buildBulkyToolResultReplacement(
   const contentHash = createHash("sha256")
     .update(candidate.content)
     .digest("hex");
-  const previewChars = Math.floor(BULKY_TOOL_RESULT_COMPACT_PREVIEW_CHARS / 2);
-  const head = candidate.content.slice(0, previewChars);
-  const tail = candidate.content.slice(-previewChars);
-  const omittedChars = Math.max(
-    0,
-    candidate.content.length - head.length - tail.length,
-  );
-
   return [
     BULKY_TOOL_RESULT_COMPACT_TAG,
     `Tool result from ${candidate.toolName} was compacted in this prompt projection because this tool commonly produces large, regenerable outputs.`,
@@ -824,13 +864,10 @@ function buildBulkyToolResultReplacement(
     `original_size: ${candidate.size} characters`,
     `sha256: ${contentHash}`,
     "The original result remains in the authoritative session messages/transcript and was not re-executed.",
-    "<preview_head>",
-    head,
-    "</preview_head>",
-    `[${omittedChars} characters omitted from the middle]`,
-    "<preview_tail>",
-    tail,
-    "</preview_tail>",
+    candidate.renderedPreview ?? renderHeadTailToolResultPreview(
+      candidate.content,
+      BULKY_TOOL_RESULT_COMPACT_PREVIEW_CHARS,
+    ),
     "</tool-result-compact>",
   ].join("\n");
 }

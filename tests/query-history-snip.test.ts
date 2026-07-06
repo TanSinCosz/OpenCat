@@ -265,7 +265,18 @@ test("applyBulkyToolResultCompression compacts large read-like tool outputs", ()
       },
       MemoryConfig: createMemoryConfig(),
       transcriptStore: false,
-      tools: [],
+      tools: [
+        {
+          name: "Read",
+          inputSchema: {} as never,
+          outputSchema: {} as never,
+          description: () => "",
+          prompt: () => "",
+          call: () => "",
+          renderResult: ({ content, maxChars }) =>
+            `<read-renderer-preview>${content.slice(0, maxChars / 4)}</read-renderer-preview>`,
+        },
+      ],
     });
     const messages = [
       createMessage({
@@ -304,8 +315,8 @@ test("applyBulkyToolResultCompression compacts large read-like tool outputs", ()
     assert.equal(otherResult?.role, "tool");
     assert.match(readResult.content, /<tool-result-compact>/);
     assert.match(readResult.content, /Tool result from Read was compacted/);
-    assert.match(readResult.content, /read-head/);
-    assert.match(readResult.content, /read-tail/);
+    assert.match(readResult.content, /<read-renderer-preview>read-head/);
+    assert.doesNotMatch(readResult.content, /read-tail/);
     assert.doesNotMatch(readResult.content, /r{5000}/);
     assert.match(otherResult.content, /o{5000}/);
 

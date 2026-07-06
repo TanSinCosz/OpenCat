@@ -17,6 +17,16 @@ export type ToolInputSchema = z.ZodType | (() => z.ZodType);
 export type ToolOutputSchema = z.ZodType | (() => z.ZodType);
 export type ToolExecutionValue = unknown;
 
+export type ToolResultRenderReason = "projection_compact" | "persist_preview";
+
+export type ToolResultRenderOptions = {
+    toolName: string;
+    toolCallId: string;
+    content: string;
+    maxChars: number;
+    reason: ToolResultRenderReason;
+};
+
 export type JSONSchemaPrimitive = string | number | boolean | null;
 
 export type JSONSchemaValue =
@@ -60,6 +70,11 @@ export interface Tool<
     isEnabled?(): MaybePromise<boolean>;
     userFacingName?(): string;
     isConcurrencySafe?(): boolean;
+    /**
+     * Return a compact, model-facing preview of a tool result when the
+     * projection pipeline needs to shorten large output.
+     */
+    renderResult?(options: ToolResultRenderOptions): string;
 
     call(
         input: TInput,
