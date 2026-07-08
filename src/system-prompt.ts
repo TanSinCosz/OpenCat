@@ -4,9 +4,6 @@ import path from "node:path";
 import type { Runtime } from "./types/runtime.js";
 import type { Tool } from "./Tools/types.js";
 
-export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY =
-  "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
-
 const CYBER_RISK_INSTRUCTION =
   "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.";
 
@@ -20,7 +17,6 @@ export interface SystemPromptOptions {
   cwd?: string;
   model?: string;
   language?: string;
-  includeDynamicBoundary?: boolean;
   includeEnvironment?: boolean;
   outputStyle?: OutputStyleConfig;
 }
@@ -47,6 +43,9 @@ async function buildDefaultSystemPromptParts(
   const enabledTools = await getEnabledTools(tools);
   const outputStyle = options.outputStyle;
 
+  // Order matters for prompt-cache hit rate (DeepSeek uses prefix caching).
+  // Put stable sections first so the cache prefix remains valid across
+  // tool-list changes (e.g. MCP hot-reload). Tool sections go last.
   return [
     getIntroSection(outputStyle),
     getSystemSection(),
@@ -54,14 +53,13 @@ async function buildDefaultSystemPromptParts(
     outputStyle?.keepCodingInstructions === false
       ? ""
       : getSoftwareTaskSection(),
-    getToolUseSection(enabledTools),
-    await getToolPromptSection(enabledTools),
     getToneSection(),
     getOutputEfficiencySection(),
-    options.includeDynamicBoundary ? SYSTEM_PROMPT_DYNAMIC_BOUNDARY : "",
     options.includeEnvironment ? getEnvironmentSection(options) : "",
     getLanguageSection(options.language),
     getOutputStyleSection(outputStyle),
+    getToolUseSection(enabledTools),
+    await getToolPromptSection(enabledTools),
   ].filter(Boolean);
 }
 
@@ -197,7 +195,7 @@ interface RequiredPromptOptions
   extends Required<
     Pick<
       SystemPromptOptions,
-      "cwd" | "model" | "includeDynamicBoundary" | "includeEnvironment"
+      "cwd" | "model" | "includeEnvironment"
     >
   > {
   language?: string;
@@ -212,7 +210,6 @@ function resolvePromptOptions(
     cwd: path.resolve(options.cwd ?? runtime.cwd),
     model: options.model ?? runtime.deepSeekRuntimeConfig.model ?? "unknown",
     language: options.language,
-    includeDynamicBoundary: options.includeDynamicBoundary ?? true,
     includeEnvironment: options.includeEnvironment ?? true,
     outputStyle: options.outputStyle,
   };
