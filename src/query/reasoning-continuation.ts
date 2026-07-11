@@ -18,16 +18,15 @@ type AssistantReady = Extract<
 
 type ReasoningContinuationOptions = {
   maxContinuationRounds: number;
-  reasoningPrefixMaxChars: number;
 };
 
 const DEFAULT_REASONING_CONTINUATION_ROUNDS = 2;
-const DEFAULT_REASONING_PREFIX_MAX_CHARS = 240_000;
 const DEFAULT_DEEPSEEK_BETA_BASE_URL = "https://api.deepseek.com/beta";
 
 export type AssistantWithUsage = {
   message: DeepSeekAssistantMessage;
   usage?: DeepSeekUsage;
+  contextTokenCount?: number;
 };
 
 /**
@@ -56,7 +55,11 @@ export async function* streamAssistantWithReasoningContinuation(
   let reasoningTrail = result.message.reasoning_content ?? "";
 
   if (!shouldContinueReasoning(result)) {
-    return { message: result.message, usage };
+    return {
+      message: result.message,
+      usage,
+      contextTokenCount: getContextTokenCount(result.usage),
+    };
   }
 
   const continuationClient = createReasoningContinuationClient(runtime);
@@ -72,7 +75,7 @@ export async function* streamAssistantWithReasoningContinuation(
     result = yield* streamAssistantOnce(
       runtime,
       continuationClient,
-      createReasoningContinuationRequest(runtime, request, reasoningTrail, options),
+      createReasoningContinuationRequest(runtime, request, reasoningTrail),
     );
     usage = combineUsage(usage, result.usage);
     reasoningTrail = appendReasoningTrail(
@@ -81,9 +84,14 @@ export async function* streamAssistantWithReasoningContinuation(
     );
 
     if (!shouldContinueReasoning(result)) {
+      const message = mergeReasoningIntoMessage(result.message, reasoningTrail);
       return {
-        message: mergeReasoningIntoMessage(result.message, reasoningTrail),
+        message,
         usage,
+        contextTokenCount: getContinuationContextTokenCount(
+          primaryResult.usage,
+          message,
+        ),
       };
     }
   }
@@ -98,16 +106,21 @@ export async function* streamAssistantWithReasoningContinuation(
   result = yield* streamAssistantOnce(
     runtime,
     continuationClient,
-    createFinalAnswerPrefixRequest(runtime, request, reasoningTrail, options),
+    createFinalAnswerPrefixRequest(runtime, request, reasoningTrail),
   );
   usage = combineUsage(usage, result.usage);
 
+  const message = mergeReasoningIntoMessage(
+    result.message,
+    appendReasoningTrail(reasoningTrail, result.message.reasoning_content),
+  );
   return {
-    message: mergeReasoningIntoMessage(
-      result.message,
-      appendReasoningTrail(reasoningTrail, result.message.reasoning_content),
-    ),
+    message,
     usage,
+    contextTokenCount: getContinuationContextTokenCount(
+      primaryResult.usage,
+      message,
+    ),
   };
 }
 
@@ -182,6 +195,31 @@ function combineUsage(
   };
 }
 
+function getContextTokenCount(usage: DeepSeekUsage | undefined): number | undefined {
+  if (!usage) {
+    return undefined;
+  }
+
+  // DeepSeek documents prompt_tokens as the complete prompt size. Its cache
+  // hit/miss fields are a partition of prompt_tokens, so they must not be added.
+  return (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+}
+
+function getContinuationContextTokenCount(
+  primaryUsage: DeepSeekUsage | undefined,
+  finalMessage: DeepSeekAssistantMessage,
+): number | undefined {
+  if (!primaryUsage) {
+    return undefined;
+  }
+
+  // Continuation requests deliberately omit tool schemas and accumulate usage
+  // across attempts. Anchor on the original request's measured prompt instead,
+  // then estimate the one merged assistant message that will persist locally.
+  return (primaryUsage.prompt_tokens ?? 0) +
+    Math.ceil(JSON.stringify(finalMessage).length / 4);
+}
+
 function shouldContinueReasoning(result: AssistantReady): boolean {
   return result.finishReason === "length" &&
     !result.hadContent &&
@@ -212,7 +250,6 @@ function createReasoningContinuationRequest(
   runtime: Runtime,
   request: DeepSeekCreateRequest & { stream: true },
   reasoningTrail: string,
-  options: ReasoningContinuationOptions,
 ): DeepSeekStreamRequest {
   return {
     ...request,
@@ -231,7 +268,7 @@ function createReasoningContinuationRequest(
         role: "assistant",
         content: "",
         prefix: true,
-        reasoning_content: tail(reasoningTrail, options.reasoningPrefixMaxChars),
+        reasoning_content: reasoningTrail,
       },
     ],
     model: runtime.deepSeekRuntimeConfig.model as DeepSeekCreateRequest["model"],
@@ -245,7 +282,6 @@ function createFinalAnswerPrefixRequest(
   runtime: Runtime,
   request: DeepSeekCreateRequest & { stream: true },
   reasoningTrail: string,
-  options: ReasoningContinuationOptions,
 ): DeepSeekStreamRequest {
   return {
     ...request,
@@ -263,7 +299,7 @@ function createFinalAnswerPrefixRequest(
         role: "assistant",
         content: "Final answer:\n",
         prefix: true,
-        reasoning_content: tail(reasoningTrail, options.reasoningPrefixMaxChars),
+        reasoning_content: reasoningTrail,
       },
     ],
     model: runtime.deepSeekRuntimeConfig.model as DeepSeekCreateRequest["model"],
@@ -305,10 +341,6 @@ function getReasoningContinuationOptions(): ReasoningContinuationOptions {
       "OPENCAT_REASONING_CONTINUATION_ROUNDS",
       DEFAULT_REASONING_CONTINUATION_ROUNDS,
     ),
-    reasoningPrefixMaxChars: readPositiveIntegerEnv(
-      "OPENCAT_REASONING_PREFIX_MAX_CHARS",
-      DEFAULT_REASONING_PREFIX_MAX_CHARS,
-    ),
   };
 }
 
@@ -329,10 +361,6 @@ function getFinalAnswerMaxTokens(runtime: Runtime): number {
 function readPositiveIntegerEnv(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isInteger(value) && value > 0 ? value : fallback;
-}
-
-function tail(value: string, maxChars: number): string {
-  return value.length <= maxChars ? value : value.slice(-maxChars);
 }
 
 function getDeepSeekBetaBaseUrl(baseUrl: string | undefined): string {

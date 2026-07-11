@@ -45,7 +45,10 @@ export async function executeToolCall(
       runtime,
       state,
     );
-    return createToolResultMessage(toolCall.id, stringifyToolResult(output));
+    return createToolResultMessage(
+      toolCall.id,
+      formatToolResult(tool, output),
+    );
   } catch (error) {
     return createToolResultMessage(toolCall.id, stringifyError(error));
   }
@@ -148,6 +151,14 @@ function stringifyToolResult(value: unknown): string {
   }
 
   return JSON.stringify(value);
+}
+
+function formatToolResult(tool: Tool, output: unknown): string {
+  if (!tool.formatResult) {
+    return stringifyToolResult(output);
+  }
+
+  return tool.formatResult({ output });
 }
 
 function stringifyError(error: unknown): string {

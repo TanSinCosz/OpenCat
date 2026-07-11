@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AutoCompressState } from "../types/context.js";
-import type { Message, MessageId, MessageSource } from "../types/messages.js";
+import type { AutoCompressState, ToolResultBudgetState } from "../types/context.js";
+import { withMessageSize, type Message, type MessageId, type MessageSource } from "../types/messages.js";
 import { createState, type State } from "../types/state.js";
 import type { Runtime } from "../types/runtime.js";
 import type { SessionMemoryState } from "../types/session-memory.js";
@@ -18,6 +18,7 @@ export type TranscriptSnapshotReason =
   | "auto_compress"
   | "history_snip"
   | "manual"
+  | "projection"
   | "query"
   | "runtime_context"
   | "session_memory";
@@ -41,6 +42,7 @@ export type TranscriptStateSnapshotEntry = TranscriptBaseEntry & {
 export type PersistedStateSnapshot = {
   autoCompress: AutoCompressState;
   historySnips: State["historySnips"];
+  toolResultBudgetState?: PersistedToolResultBudgetState;
   sessionMemory: SessionMemoryState;
   mode: State["mode"];
   agentTasks: AgentTasksState;
@@ -49,6 +51,11 @@ export type PersistedStateSnapshot = {
   invokedSkills: State["invokedSkills"];
   messageCount: number;
   latestMessageId?: MessageId;
+};
+
+export type PersistedToolResultBudgetState = {
+  seenIds: string[];
+  replacements: Array<[string, string]>;
 };
 
 type TranscriptBaseEntry = {
@@ -209,6 +216,9 @@ export async function loadStateFromTranscript(
     ),
     autoCompress: latestSnapshot?.autoCompress,
     historySnips: latestSnapshot?.historySnips,
+    toolResultBudgetState: hydrateToolResultBudgetState(
+      latestSnapshot?.toolResultBudgetState,
+    ),
     sessionMemory: latestSnapshot?.sessionMemory,
     mode: latestSnapshot?.mode,
     agentTasks: latestSnapshot?.agentTasks,
@@ -237,6 +247,9 @@ function createPersistedStateSnapshot(state: State): PersistedStateSnapshot {
   return {
     autoCompress: state.autoCompress,
     historySnips: state.historySnips,
+    toolResultBudgetState: persistToolResultBudgetState(
+      state.toolResultBudgetState,
+    ),
     sessionMemory: state.sessionMemory,
     mode: state.mode,
     agentTasks: state.agentTasks,
@@ -248,42 +261,68 @@ function createPersistedStateSnapshot(state: State): PersistedStateSnapshot {
   };
 }
 
+function persistToolResultBudgetState(
+  state: ToolResultBudgetState,
+): PersistedToolResultBudgetState {
+  return {
+    seenIds: [...state.seenIds],
+    replacements: [...state.replacements.entries()],
+  };
+}
+
+function hydrateToolResultBudgetState(
+  state: PersistedToolResultBudgetState | undefined,
+): ToolResultBudgetState | undefined {
+  if (!state) {
+    return undefined;
+  }
+
+  return {
+    seenIds: new Set(state.seenIds),
+    replacements: new Map(state.replacements),
+  };
+}
+
 function hydrateMessagesFromTranscript(
   messageEntries: TranscriptMessageEntry[],
   latestSnapshot: PersistedStateSnapshot | undefined,
   hydrate: LoadStateFromTranscriptOptions["hydrate"],
 ): Message[] {
+  const hydratedMessages = hydrateTranscriptMessages(messageEntries);
+
   if (hydrate === "full") {
-    return messageEntries.map((entry) =>
-      normalizeHydratedTranscriptMessage(entry.message)
-    );
+    return hydratedMessages;
   }
 
   const throughMessageId = getActiveAutoCompressThroughMessageId(
     latestSnapshot,
   );
   if (!throughMessageId) {
-    return messageEntries.map((entry) =>
-      normalizeHydratedTranscriptMessage(entry.message)
-    );
+    return hydratedMessages;
   }
 
-  const throughIndex = messageEntries.findIndex(
-    (entry) => entry.message.id === throughMessageId,
+  const throughIndex = hydratedMessages.findIndex(
+    (message) => message.id === throughMessageId,
   );
   if (throughIndex === -1) {
-    return messageEntries.map((entry) =>
-      normalizeHydratedTranscriptMessage(entry.message)
-    );
+    return hydratedMessages;
   }
 
+  return hydratedMessages.slice(throughIndex + 1);
+}
+
+function hydrateTranscriptMessages(
+  messageEntries: TranscriptMessageEntry[],
+): Message[] {
   return messageEntries
-    .slice(throughIndex + 1)
-    .map((entry) => normalizeHydratedTranscriptMessage(entry.message));
+    .map((entry) => normalizeHydratedTranscriptMessage(entry.message))
+    .filter((message) => !isEmptyProjectionContextMessage(message));
 }
 
 function normalizeHydratedTranscriptMessage(message: Message): Message {
-  const normalized = ensureHydratedMessageSource(message);
+  const normalized = stripDynamicSkillContextBlocksFromMessage(
+    ensureHydratedMessageSource(message),
+  );
 
   if (
     normalized.role !== "assistant" ||
@@ -291,16 +330,52 @@ function normalizeHydratedTranscriptMessage(message: Message): Message {
     (normalized.tool_calls?.length ?? 0) > 0 ||
     !normalized.reasoning_content
   ) {
-    return normalized;
+    return withMessageSize(normalized);
   }
 
-  return {
+  return withMessageSize({
     ...normalized,
     content: [
       "The model returned internal reasoning but did not produce a final answer.",
       "This older transcript entry was recovered so the session can continue.",
     ].join(" "),
-  };
+  });
+}
+
+function stripDynamicSkillContextBlocksFromMessage(message: Message): Message {
+  if (
+    message.role !== "user" ||
+    message.name !== "opencat_context" ||
+    typeof message.content !== "string"
+  ) {
+    return message;
+  }
+
+  const content = stripDynamicSkillContextBlocks(message.content);
+  if (content === message.content) {
+    return message;
+  }
+
+  return withMessageSize({ ...message, content });
+}
+
+function stripDynamicSkillContextBlocks(content: string): string {
+  return content
+    .replace(
+      /(?:\r?\n)?<context_block source="dynamic_skill">[\s\S]*?<\/context_block>(?:\r?\n)?/g,
+      "\n",
+    )
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\n<\/opencat_context>/, "\n</opencat_context>");
+}
+
+function isEmptyProjectionContextMessage(message: Message): boolean {
+  return (
+    message.role === "user" &&
+    message.name === "opencat_context" &&
+    typeof message.content === "string" &&
+    !message.content.includes("<context_block source=")
+  );
 }
 
 function ensureHydratedMessageSource(message: Message): Message {

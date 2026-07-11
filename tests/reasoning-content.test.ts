@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { streamAssistantMessage } from "../src/query/assistant-stream.js";
 import { query } from "../src/query.js";
+import { buildMessagesForQuery } from "../src/query/messages.js";
 import { createMessage, toDeepSeekMessage } from "../src/types/messages.js";
 import type { DeepSeekClient } from "../src/deepseek/client.js";
 import type {
@@ -14,7 +15,7 @@ import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 import type { Tool } from "../src/Tools/types.js";
 
-test("assistant reasoning content is not projected back into model history", () => {
+test("assistant reasoning content is preserved in model history", () => {
   const message = createMessage({
     role: "assistant",
     content: "final answer",
@@ -25,7 +26,7 @@ test("assistant reasoning content is not projected back into model history", () 
 
   assert.equal(projected.role, "assistant");
   assert.equal(projected.content, "final answer");
-  assert.equal("reasoning_content" in projected, false);
+  assert.equal(projected.reasoning_content, "private chain of thought");
 });
 
 
@@ -48,6 +49,39 @@ test("assistant reasoning content is projected when the assistant turn called to
   assert.equal(projected.role, "assistant");
   assert.equal(projected.reasoning_content, "tool-use reasoning");
   assert.equal(projected.tool_calls?.[0]?.id, "call_echo");
+});
+
+test("buildMessagesForQuery keeps visible assistant reasoning content", async () => {
+  const state = createState({
+    messages: [
+      createMessage({ role: "user", content: "question" }),
+      createMessage({
+        role: "assistant",
+        content: "answer",
+        reasoning_content: "recent reasoning",
+      }),
+    ],
+  });
+  const runtime = createRuntime({
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    MemoryConfig: createMemoryConfig(),
+    transcriptStore: false,
+    tools: [],
+  });
+
+  const request = await buildMessagesForQuery(runtime, state);
+  const assistantMessage = request.messages.find((message) =>
+    message.role === "assistant"
+  );
+
+  if (assistantMessage?.role !== "assistant") {
+    assert.fail("expected assistant message");
+  }
+  assert.equal(assistantMessage.reasoning_content, "recent reasoning");
 });
 
 test("query carries assistant reasoning content into the next tool-followup request", async () => {
@@ -104,7 +138,9 @@ test("query carries assistant reasoning content into the next tool-followup requ
     message.role === "assistant" && message.tool_calls?.[0]?.id === "call_echo"
   );
 
-  assert.ok(assistantToolCallMessage);
+  if (assistantToolCallMessage?.role !== "assistant") {
+    assert.fail("expected assistant tool call message");
+  }
   assert.equal(assistantToolCallMessage.reasoning_content, "tool reasoning");
 });
 

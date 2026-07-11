@@ -16,7 +16,7 @@ import { createMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 
-test("dynamic skills are materialized into opencat context once", async () => {
+test("dynamic skills are replaced and rematerialized into opencat context", async () => {
   const state = createState({
     messages: [
       createMessage({

@@ -11,7 +11,6 @@ export {
   formatMessagesForSessionMemory,
   shouldUpdateSessionMemory,
   updateSessionMemoryForAutoCompress,
-  updateSessionMemoryIfNeeded,
   type SessionMemoryUpdateResult,
 } from "./session-memory.js";
 export {

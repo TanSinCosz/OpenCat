@@ -37,6 +37,17 @@ export class SendMessage
     return false;
   }
 
+  formatResult({ output }: { output: SendMessageOutput }): string {
+    return [
+      output.success ? "Message queued." : "Message not queued.",
+      ...(output.agentId ? [`Agent: ${output.agentId}`] : []),
+      ...(output.pendingMessageCount !== undefined
+        ? [`Pending messages: ${output.pendingMessageCount}`]
+        : []),
+      output.message,
+    ].join("\n");
+  }
+
   call(
     input: SendMessageInput,
     _context: ToolUseContext,

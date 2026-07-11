@@ -3,33 +3,21 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 
 import type { Runtime } from "../types/runtime.js";
-import type { ToolMessage } from "../types/messages.js";
 
 const TOOL_RESULTS_DIR = ".opencat/tool-results";
-const DEFAULT_MAX_RESULT_SIZE_CHARS = 50_000;
 const TOOL_RESULT_PREVIEW_CHARS = 2_000;
 
-export interface PersistToolResultOptions {
+export interface PersistToolResultForBudgetOptions {
   runtime: Runtime;
-  message: ToolMessage;
+  toolCallId: string;
+  content: string;
   toolName?: string;
-  maxResultSizeChars?: number;
 }
 
-export async function persistLargeToolResultIfNeeded(
-  options: PersistToolResultOptions,
-): Promise<ToolMessage> {
-  const threshold = getToolResultPersistThreshold(options.maxResultSizeChars);
-
-  if (options.message.content.length <= threshold) {
-    return {
-      ...options.message,
-      toolName: options.toolName ?? options.message.toolName,
-    };
-  }
-
-  const content = options.message.content;
-  const sha256 = createHash("sha256").update(content).digest("hex");
+export async function persistToolResultForBudget(
+  options: PersistToolResultForBudgetOptions,
+): Promise<string> {
+  const sha256 = createHash("sha256").update(options.content).digest("hex");
   const directory = join(
     options.runtime.cwd,
     TOOL_RESULTS_DIR,
@@ -38,56 +26,25 @@ export async function persistLargeToolResultIfNeeded(
   const fileName = [
     Date.now(),
     sanitizePathSegment(options.toolName ?? "tool"),
-    sanitizePathSegment(options.message.tool_call_id),
+    sanitizePathSegment(options.toolCallId),
     randomUUID(),
   ].join("-");
   const absolutePath = join(directory, `${fileName}.txt`);
 
   await mkdir(directory, { recursive: true });
-  await writeFile(absolutePath, content, "utf8");
+  await writeFile(absolutePath, options.content, "utf8");
 
   const relativePath = normalizeRelativePath(
     relative(options.runtime.cwd, absolutePath),
   );
 
-  return {
-    ...options.message,
-    toolName: options.toolName ?? options.message.toolName,
-    content: buildPersistedToolResultPreview({
-      toolName: options.toolName,
-      originalContent: content,
-      relativePath,
-      size: Buffer.byteLength(content, "utf8"),
-      sha256,
-    }),
-    persistedToolResult: {
-      path: relativePath,
-      absolutePath,
-      size: Buffer.byteLength(content, "utf8"),
-      sha256,
-      previewChars: Math.min(content.length, TOOL_RESULT_PREVIEW_CHARS),
-      originalContentType: "text",
-    },
-  };
-}
-
-function getToolResultPersistThreshold(
-  toolMaxResultSizeChars: number | undefined,
-): number {
-  const configured = Number(process.env.OPENCAT_TOOL_RESULT_PERSIST_CHARS);
-  const systemThreshold = Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_MAX_RESULT_SIZE_CHARS;
-
-  if (
-    Number.isFinite(toolMaxResultSizeChars) &&
-    toolMaxResultSizeChars !== undefined &&
-    toolMaxResultSizeChars > 0
-  ) {
-    return Math.min(systemThreshold, toolMaxResultSizeChars);
-  }
-
-  return systemThreshold;
+  return buildPersistedToolResultPreview({
+    toolName: options.toolName,
+    originalContent: options.content,
+    relativePath,
+    size: Buffer.byteLength(options.content, "utf8"),
+    sha256,
+  });
 }
 
 function buildPersistedToolResultPreview(options: {

@@ -22,6 +22,7 @@ export interface AutoCompressState {
 export interface HistorySnipBoundary {
   id: HistorySnipId;
   removedMessageIds: MessageId[];
+  contentOnlyMessageIds?: MessageId[];
   createdAtMessageId?: MessageId;
   reason: "prompt_budget";
   createdAt: number;

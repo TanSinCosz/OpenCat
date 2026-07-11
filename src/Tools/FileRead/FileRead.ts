@@ -16,14 +16,14 @@ import { hasBinaryExtension } from "../utils/BinaryFile.js";
 import { discoverSkillsForReadPath } from "../utils/discoverSkillsForReadPath.js";
 import { ReadFileRangeResult } from "./type.js";
 import { stat, readFile } from 'fs/promises'
-import { validateContentTokens } from "../utils/Tokenizer.js";
 import { getFileModificationTimeAsync } from "../utils/fileState.js";
+import { estimateTokensFromText } from "../../utils/size-estimate.js";
 
 type typeInput = z.infer<ReturnType<typeof inputSchema>>;
 type typeOutput = z.infer<ReturnType<typeof outputSchema>>;
 
 const FILE_READ_MAX_SIZE_BYTES = 256 * 1024
-const FILE_READ_MAX_TOKENS = 25000
+const FILE_READ_MAX_ESTIMATED_TOKENS = 25000
 
 export class FileRead implements Tool<typeInput, typeOutput, typeof inputSchema, typeof outputSchema> {
     name = FILE_READ_TOOL_NAME;
@@ -59,11 +59,27 @@ export class FileRead implements Tool<typeInput, typeOutput, typeof inputSchema,
         return true;
     }
 
+    formatResult({ output }: { output: typeOutput }): string {
+        if (output.type === 'file_unchanged') {
+            return `File has not changed since last read: ${output.file.filePath}`;
+        }
+
+        const lineRange = output.file.numLines > 0
+            ? `lines ${output.file.startLine}-${output.file.startLine + output.file.numLines - 1}`
+            : `line ${output.file.startLine}`;
+
+        return [
+            `${output.file.filePath} (${lineRange} of ${output.file.totalLines}):`,
+            output.file.content,
+        ].join('\n')
+    }
+
     async call(
         { file_path, offset = 1, limit }: typeInput,
         context: ToolUseContext,
     ): Promise<typeOutput> {
         const fullFilePath = expandPath(file_path)
+        const cacheRange = normalizeReadCacheRange(offset, limit)
 
         if (hasBinaryExtension(fullFilePath)) {
             throw new Error('This tool cannot read binary files.')
@@ -77,8 +93,9 @@ export class FileRead implements Tool<typeInput, typeOutput, typeof inputSchema,
 
         if (
             existingState &&
-            existingState.offset === offset &&
-            existingState.limit === limit
+            !existingState.isPartialView &&
+            existingState.offset === cacheRange.offset &&
+            existingState.limit === cacheRange.limit
         ) {
             const mtimeMs = await getFileModificationTimeAsync(fullFilePath)
 
@@ -101,14 +118,17 @@ export class FileRead implements Tool<typeInput, typeOutput, typeof inputSchema,
         )
         await discoverSkillsForReadPath(fullFilePath, context)
         const numberedContent = formatContentWithLineNumbers(content, startLine)
-        await validateContentTokens(numberedContent, context.tokenizer, FILE_READ_MAX_TOKENS)
+        validateEstimatedContentTokens(
+            numberedContent,
+            FILE_READ_MAX_ESTIMATED_TOKENS,
+        )
 
 
         context.readFileState?.set(fullFilePath, {
             content,
             timestamp: Math.floor(mtimeMs),
-            offset,
-            limit,
+            offset: cacheRange.offset,
+            limit: cacheRange.limit,
         })
 
         return {
@@ -122,6 +142,29 @@ export class FileRead implements Tool<typeInput, typeOutput, typeof inputSchema,
             },
         }
     }
+}
+
+function validateEstimatedContentTokens(
+    content: string,
+    maxTokens: number,
+): void {
+    const tokenCount = estimateTokensFromText(content)
+    if (tokenCount > maxTokens) {
+        throw new Error(
+            `File content (${tokenCount} estimated tokens) exceeds maximum allowed estimated tokens (${maxTokens}). Use offset and limit to read specific portions of the file.`,
+        )
+    }
+}
+
+function normalizeReadCacheRange(
+    offset: number,
+    limit: number | undefined,
+): { offset: number | undefined; limit: number | undefined } {
+    if (offset <= 1 && limit === undefined) {
+        return { offset: undefined, limit: undefined }
+    }
+
+    return { offset, limit }
 }
 
 export class FileTooLargeError extends Error {
@@ -193,3 +236,12 @@ export function formatContentWithLineNumbers(
 
 
 export default FileRead;
+
+
+
+
+
+
+
+
+

@@ -62,6 +62,26 @@ export class WebSearch
     return true;
   }
 
+  formatResult({ output }: { output: WebSearchOutput }): string {
+    const resultLines = output.results.map((result, index) =>
+      `${index + 1}. ${result.title}\n   ${result.url}`
+    );
+
+    return [
+      `Query: ${output.query}`,
+      `Search requests: ${output.searchRequests}`,
+      ...(output.filteredOutCount > 0
+        ? [`Filtered out: ${output.filteredOutCount} result(s)`]
+        : []),
+      ...(output.errors?.length ? [`Errors:\n${output.errors.join("\n")}`] : []),
+      "",
+      output.summary || "(no summary)",
+      "",
+      "Results:",
+      ...(resultLines.length > 0 ? resultLines : ["(no results)"]),
+    ].join("\n");
+  }
+
   async call(
     input: WebSearchInput,
     context: ToolUseContext,

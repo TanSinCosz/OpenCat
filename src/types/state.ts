@@ -1,4 +1,8 @@
-import type { AutoCompressState, HistorySnipBoundary } from "./context.js";
+import type {
+  AutoCompressState,
+  HistorySnipBoundary,
+  ToolResultBudgetState,
+} from "./context.js";
 import {
   createAgentNotificationsState,
   createAgentTasksState,
@@ -26,6 +30,7 @@ export interface State {
   runtimeContextMessages: Message[];
   autoCompress: AutoCompressState;
   historySnips: HistorySnipBoundary[];
+  toolResultBudgetState: ToolResultBudgetState;
   sessionMemory: SessionMemoryState;
   mode: "default" | "plan";
   agentTasks: AgentTasksState;
@@ -38,6 +43,7 @@ export interface CreateStateOptions {
   runtimeContextMessages?: Message[];
   autoCompress?: AutoCompressState;
   historySnips?: HistorySnipBoundary[];
+  toolResultBudgetState?: ToolResultBudgetState;
   sessionMemory?: SessionMemoryState;
   mode?: State["mode"];
   agentTasks?: AgentTasksState;
@@ -54,6 +60,10 @@ export function createState(options: CreateStateOptions = {}): State {
       sessionMemoryUpdated: false,
     },
     historySnips: options.historySnips ?? [],
+    toolResultBudgetState: options.toolResultBudgetState ?? {
+      seenIds: new Set(),
+      replacements: new Map(),
+    },
     sessionMemory: options.sessionMemory ?? createSessionMemoryState(),
     mode: options.mode ?? "default",
     agentTasks: options.agentTasks ?? createAgentTasksState(),

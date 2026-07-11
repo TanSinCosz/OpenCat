@@ -37,6 +37,24 @@ export class MemorySearch
     return true;
   }
 
+  formatResult({ output }: { output: MemorySearchOutput }): string {
+    if (output.results.length === 0) {
+      return "No matching long-term memories found.";
+    }
+
+    return [
+      `Found ${output.results.length} matching long-term memor${
+        output.results.length === 1 ? "y" : "ies"
+      }.`,
+      ...output.results.map((result, index) => {
+        const score = result.score === undefined
+          ? ""
+          : ` score=${result.score.toFixed(3)}`;
+        return `${index + 1}. [${result.id}${score}] ${result.memory}`;
+      }),
+    ].join("\n");
+  }
+
   async call(
     input: MemorySearchInput,
     _context: ToolUseContext,

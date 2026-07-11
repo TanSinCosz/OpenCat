@@ -17,12 +17,14 @@ import type {
   AutoCompressState,
   AutoCompressSummary,
   AutoCompressSummaryId,
+  ToolResultBudgetState,
 } from "../types/context.js";
 import {
   toDeepSeekMessage,
   type Message,
   type MessageId,
   type UserMessage,
+  withMessageSize,
 } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
@@ -37,6 +39,10 @@ export type AutoCompressResult =
   | AutoCompressCompressedResult
   | { status: "skipped"; reason: string };
 
+export type AutoCompressOptions = {
+  forkContextMessages?: readonly Message[];
+};
+
 type AutoCompressCompressedResult = {
   status: "compressed";
   summary: AutoCompressSummary;
@@ -45,13 +51,14 @@ type AutoCompressCompressedResult = {
 /**
  * Runs the durable auto-compress step against State.
  *
- * The caller is responsible for deciding that the current projection is too
+ * The caller is responsible for deciding that the current request is too
  * large. This function only prepares session memory and records an
- * AutoCompressSummary that a later projection pass can render into the request.
+ * AutoCompressSummary that a later request build can render.
  */
 export async function applyAutoCompression(
   runtime: Runtime,
   state: State,
+  options: AutoCompressOptions = {},
 ): Promise<AutoCompressResult> {
   if (runtime.agentRole === "session") {
     return { status: "skipped", reason: "session_runtime" };
@@ -61,12 +68,13 @@ export async function applyAutoCompression(
     return applySubagentLocalCompression(runtime, state);
   }
 
-  return applyMainSessionMemoryCompression(runtime, state);
+  return applyMainSessionMemoryCompression(runtime, state, options);
 }
 
 async function applyMainSessionMemoryCompression(
   runtime: Runtime,
   state: State,
+  options: AutoCompressOptions,
 ): Promise<AutoCompressResult> {
   const autoCompress = ensureAutoCompressState(state);
   await loadPersistedSessionMemory(runtime, state);
@@ -80,7 +88,9 @@ async function applyMainSessionMemoryCompression(
   }
 
   if (!autoCompress.sessionMemoryUpdated) {
-    const updateResult = await updateSessionMemoryForAutoCompress(runtime, state);
+    const updateResult = await updateSessionMemoryForAutoCompress(runtime, state, {
+      forkContextMessages: options.forkContextMessages,
+    });
     if (updateResult.status === "updated") {
       autoCompress.sessionMemoryUpdated = true;
     } else {
@@ -140,7 +150,12 @@ async function restorePostAutoCompressContext(
   state: State,
   summaryId: AutoCompressSummaryId,
 ): Promise<void> {
-  const preservedMessages = projectMessagesWithAutoCompress(state);
+  const preservedMessages = applyAutoCompressSummary(state);
+  resetProjectionCompressionStateAfterAutoCompress(
+    runtime,
+    state,
+    preservedMessages,
+  );
   await restoreReadFileStateAfterAutoCompress(
     runtime,
     state,
@@ -155,6 +170,74 @@ async function restorePostAutoCompressContext(
   );
 }
 
+function resetProjectionCompressionStateAfterAutoCompress(
+  runtime: Runtime,
+  state: State,
+  preservedMessages: readonly Message[],
+): void {
+  state.historySnips = [];
+  state.toolResultBudgetState = preserveRecentToolResultBudgetState(
+    state.toolResultBudgetState,
+    preservedMessages,
+  );
+  runtime.toolResultBudgetState = state.toolResultBudgetState;
+}
+
+function preserveRecentToolResultBudgetState(
+  previous: ToolResultBudgetState,
+  preservedMessages: readonly Message[],
+): ToolResultBudgetState {
+  const preservedKeys = collectProjectionBudgetKeys(preservedMessages);
+  return {
+    seenIds: filterSetByKeys(previous.seenIds, preservedKeys),
+    replacements: filterMapByKeys(previous.replacements, preservedKeys),
+  };
+}
+
+function collectProjectionBudgetKeys(messages: readonly Message[]): Set<string> {
+  const keys = new Set<string>();
+
+  for (const message of messages) {
+    if (message.source === "auto_compress") {
+      continue;
+    }
+
+    keys.add(message.id);
+  }
+
+  return keys;
+}
+
+function filterSetByKeys(
+  values: ReadonlySet<string>,
+  keys: ReadonlySet<string>,
+): Set<string> {
+  const filtered = new Set<string>();
+
+  for (const value of values) {
+    if (keys.has(value)) {
+      filtered.add(value);
+    }
+  }
+
+  return filtered;
+}
+
+function filterMapByKeys(
+  values: ReadonlyMap<string, string>,
+  keys: ReadonlySet<string>,
+): Map<string, string> {
+  const filtered = new Map<string, string>();
+
+  for (const [key, value] of values) {
+    if (keys.has(key)) {
+      filtered.set(key, value);
+    }
+  }
+
+  return filtered;
+}
+
 export function ensureAutoCompressState(state: State): AutoCompressState {
   state.autoCompress ??= { summaries: [], sessionMemoryUpdated: false };
   state.autoCompress.sessionMemoryUpdated ??= false;
@@ -163,13 +246,13 @@ export function ensureAutoCompressState(state: State): AutoCompressState {
 }
 
 /**
- * Projects durable State messages into the post-compress request view.
+ * Applies the active durable summary to State messages.
  *
  * Older messages covered by the active summary are represented by one compact
  * summary message. The recent tail is kept verbatim using token budget as the
  * primary control, with message counts only acting as thin-context guards.
  */
-export function projectMessagesWithAutoCompress(state: State): Message[] {
+export function applyAutoCompressSummary(state: State): Message[] {
   const summary = getActiveAutoCompressSummary(state);
   if (!summary?.throughMessageId) {
     return state.Messages;
@@ -436,13 +519,13 @@ function getActiveAutoCompressSummary(
 function createAutoCompressSummaryMessage(
   summary: AutoCompressSummary,
 ): UserMessage {
-  return {
+  return withMessageSize({
     role: "user",
     content: summary.content,
     id: `msg_${summary.id}`,
     createdAt: summary.createdAt,
     source: "auto_compress",
-  };
+  });
 }
 
 type RecentTailStats = {
@@ -535,7 +618,8 @@ function addMessageToRecentTailStats(
 }
 
 function estimateMessageTokens(message: Message): number {
-  return Math.ceil(JSON.stringify(toDeepSeekMessage(message)).length / 4);
+  return message.size?.estimatedTokens ??
+    Math.ceil(JSON.stringify(toDeepSeekMessage(message)).length / 4);
 }
 
 function hasTextContent(message: Message): boolean {

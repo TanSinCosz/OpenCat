@@ -48,6 +48,34 @@ export class Grep
         return true;
     }
 
+    formatResult({ output }: { output: typeOutput }): string {
+        const suffix = formatLimitSuffix(output.appliedLimit, output.appliedOffset)
+
+        if (output.mode === 'content' || output.mode === 'count') {
+            if (!output.content) {
+                return `No matches found.${suffix}`
+            }
+
+            return [
+                output.content,
+                '',
+                output.mode === 'count'
+                    ? `Matched ${output.numMatches ?? 0} occurrence(s) in ${output.numFiles} file(s).${suffix}`
+                    : `Returned ${output.numLines ?? 0} matching line(s).${suffix}`,
+            ].join('\n')
+        }
+
+        if (output.filenames.length === 0) {
+            return `No files matched.${suffix}`
+        }
+
+        return [
+            output.filenames.join('\n'),
+            '',
+            `Found ${output.numFiles} file(s) with matches.${suffix}`,
+        ].join('\n')
+    }
+
     async validateInput(
         { pattern, path }: typeInput,
     ): Promise<ValidationResult> {
@@ -235,6 +263,18 @@ export class Grep
             ...(offset > 0 && { appliedOffset: offset }),
         }
     }
+}
+
+function formatLimitSuffix(limit?: number, offset?: number): string {
+    const parts: string[] = []
+    if (limit !== undefined) {
+        parts.push(`limited to ${limit}`)
+    }
+    if (offset !== undefined) {
+        parts.push(`offset ${offset}`)
+    }
+
+    return parts.length > 0 ? ` (${parts.join(', ')})` : ''
 }
 
 function applyHeadLimit<T>(

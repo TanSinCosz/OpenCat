@@ -1,6 +1,7 @@
 export {
   applyAutoCompression,
   ensureAutoCompressState,
-  projectMessagesWithAutoCompress,
+  applyAutoCompressSummary,
+  type AutoCompressOptions,
   type AutoCompressResult,
 } from "./auto-compress.js";

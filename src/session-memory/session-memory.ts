@@ -3,7 +3,7 @@ import { dirname, join, normalize } from "node:path";
 import { FileStateCache } from "../Tools/types.js";
 import type { CanUseToolFn } from "../Tools/types.js";
 import type { AgentDefinition } from "../Tools/Agent/definitions.js";
-import type { Message } from "../types/messages.js";
+import { toDeepSeekMessage, type Message } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import {
   createSessionMemoryState,
@@ -22,6 +22,10 @@ export type SessionMemoryUpdateResult =
   | { status: "updated"; content: string }
   | { status: "skipped"; reason: string };
 
+export type SessionMemoryUpdateOptions = {
+  forkContextMessages?: readonly Message[];
+};
+
 /**
  * Refreshes the rolling session memory notes when autocompress explicitly asks
  * for them.
@@ -34,6 +38,7 @@ export type SessionMemoryUpdateResult =
 export async function updateSessionMemoryForAutoCompress(
   runtime: Runtime,
   state: State,
+  options: SessionMemoryUpdateOptions = {},
 ): Promise<SessionMemoryUpdateResult> {
   if (runtime.agentRole !== "main") {
     return { status: "skipped", reason: "session_memory_updates_main_only" };
@@ -48,10 +53,10 @@ export async function updateSessionMemoryForAutoCompress(
   sessionMemory.initialized = true;
   sessionMemory.tokensAtLastUpdateAttempt = estimateMessageTokens(state.Messages);
 
-  const transcript = formatMessagesForSessionMemory(
-    state.Messages,
-    sessionMemory.config.maxTranscriptChars,
-  );
+  if (!options.forkContextMessages?.length) {
+    return { status: "skipped", reason: "fork_context_required" };
+  }
+
   const notesPath = getSessionMemoryNotesPath(runtime);
   const currentNotes = sessionMemory.content || DEFAULT_SESSION_MEMORY_TEMPLATE;
   const readFileState = await prepareSessionMemoryNotesFile(
@@ -61,7 +66,6 @@ export async function updateSessionMemoryForAutoCompress(
   const prompt = buildSessionMemoryUpdatePrompt({
     currentNotes,
     notesPath,
-    transcript,
   });
   let content: string | undefined;
 
@@ -78,6 +82,7 @@ export async function updateSessionMemoryForAutoCompress(
       maxTurns: 4,
       recordTaskLifecycle: false,
       agentRole: "session",
+      forkContextMessages: options.forkContextMessages,
       readFileState,
       canUseTool: createSessionMemoryCanUseTool(notesPath),
     });
@@ -190,24 +195,6 @@ function getSessionMemoryNotesPath(runtime: Runtime): string {
 }
 
 /**
- * Refreshes session memory only when the background update thresholds are met.
- * Autocompress should call updateSessionMemoryForAutoCompress instead, because
- * reaching that stage is already the update signal.
- */
-export async function updateSessionMemoryIfNeeded(
-  runtime: Runtime,
-  state: State,
-): Promise<SessionMemoryUpdateResult> {
-  const shouldUpdate = shouldUpdateSessionMemory(state);
-
-  if (!shouldUpdate.update) {
-    return { status: "skipped", reason: shouldUpdate.reason };
-  }
-
-  return updateSessionMemoryForAutoCompress(runtime, state);
-}
-
-/**
  * Decides whether the session memory should be refreshed on this turn.
  *
  * This mirrors the official shape: wait until the transcript is large enough,
@@ -297,17 +284,46 @@ export function formatMessagesForSessionMemory(
 }
 
 /**
- * Roughly estimates transcript size for update thresholds.
- * This is deliberately lightweight; provider-specific exact token counting can
- * be added later without changing the session-memory state model.
+ * Estimates the current API context window without issuing an extra tokenizer
+ * request. A persisted assistant usage record is the exact anchor for the last
+ * completed API request; only messages appended since then are estimated.
  */
-export function estimateMessageTokens(messages: Message[]): number {
-  const chars = messages.reduce(
-    (sum, message) => sum + JSON.stringify(message).length,
-    0,
-  );
+export function estimateMessageTokens(messages: readonly Message[]): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role !== "assistant") {
+      continue;
+    }
 
-  return Math.ceil(chars / 4);
+    const contextTokenCount = message.contextTokenCount ??
+      getContextTokenCountFromUsage(message.usage);
+    if (contextTokenCount === undefined) {
+      continue;
+    }
+
+    return contextTokenCount + estimateMessagesForApi(messages.slice(index + 1));
+  }
+
+  return estimateMessagesForApi(messages);
+}
+
+function getContextTokenCountFromUsage(
+  usage: Message["usage"],
+): number | undefined {
+  if (!usage) {
+    return undefined;
+  }
+
+  // DeepSeek's prompt_cache_hit_tokens + prompt_cache_miss_tokens already
+  // equals prompt_tokens, so prompt_tokens is the correct, non-duplicated base.
+  return (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+}
+
+function estimateMessagesForApi(messages: readonly Message[]): number {
+  return messages.reduce((sum, message) => {
+    return sum + (message.size?.estimatedTokens ??
+      Math.ceil(JSON.stringify(toDeepSeekMessage(message)).length / 4));
+  }, 0);
 }
 
 /**

@@ -53,6 +53,38 @@ export class Agent implements Tool<AgentInput, AgentToolOutput, typeof inputSche
     return false;
   }
 
+  formatResult({ output }: { output: AgentToolOutput }): string {
+    const header = `Agent ${output.agentId} (${output.agentType}) ${output.status}.`;
+
+    if (output.status === "async_launched") {
+      return [
+        header,
+        `Mode: ${output.mode}`,
+        `Description: ${output.description}`,
+        `Output file: ${output.outputFile}`,
+        ...(output.worktreePath ? [`Worktree: ${output.worktreePath}`] : []),
+      ].join("\n");
+    }
+
+    const changedFiles = output.changedFiles?.length
+      ? [
+        `Changed files:\n${
+          output.changedFiles.map((file) => `- ${file}`).join("\n")
+        }`,
+      ]
+      : [];
+
+    return [
+      header,
+      `Mode: ${output.mode}`,
+      `Description: ${output.description}`,
+      ...(output.worktreePath ? [`Worktree: ${output.worktreePath}`] : []),
+      ...changedFiles,
+      "",
+      output.result,
+    ].join("\n");
+  }
+
   async call(
     input: AgentInput,
     context: ToolUseContext,

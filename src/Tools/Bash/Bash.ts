@@ -56,6 +56,35 @@ export class Bash implements Tool<typeInput, typeOutput, typeof inputSchema, typ
         return false;
     }
 
+    formatResult({ output }: { output: typeOutput }): string {
+        if (output.backgroundTaskId) {
+            return `Command is running in the background. Task id: ${output.backgroundTaskId}`;
+        }
+
+        const sections: string[] = [];
+        if (output.returnCodeInterpretation) {
+            sections.push(output.returnCodeInterpretation);
+        }
+        if (output.interrupted) {
+            sections.push("Command was interrupted.");
+        }
+        if (output.stdout) {
+            sections.push(`stdout:\n${output.stdout}`);
+        }
+        if (output.stderr) {
+            sections.push(`stderr:\n${output.stderr}`);
+        }
+        if (output.persistedOutputPath) {
+            sections.push(
+                `Full output was persisted to ${output.persistedOutputPath} (${output.persistedOutputSize ?? "unknown"} bytes).`,
+            );
+        }
+
+        return sections.length > 0
+            ? sections.join("\n\n")
+            : "Command completed with no output.";
+    }
+
     async validateInput(input: typeInput, _context?: ToolUseContext): Promise<ValidationResult> {
         const command = input.command.trim();
 

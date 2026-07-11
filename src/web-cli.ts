@@ -349,6 +349,7 @@ function normalizeQueryEvent(
           hasToolResultBudget: serializedMessages.includes("<tool-result-budget>"),
           hasToolResultCompact: serializedMessages.includes("<tool-result-compact>"),
           hasHistorySnipMarker: serializedMessages.includes("[History snipped:"),
+          stats: event.stats,
         };
       }
     case "model_stream_event":
@@ -631,7 +632,8 @@ function renderHtml(): string {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    #usage-badge {
+    #usage-badge,
+    #projection-badge {
       display: inline-flex;
       align-items: center;
       gap: 8px;
@@ -647,6 +649,9 @@ function renderHtml(): string {
     }
     #usage-badge .hit { color: var(--accent-green); }
     #usage-badge .miss { color: var(--accent-orange); }
+    #projection-badge.clean { display: none; }
+    #projection-badge .active { color: var(--accent-orange); }
+    #projection-badge .ok { color: var(--accent-green); }
     #topbar-actions {
       display: flex;
       gap: 4px;
@@ -1153,6 +1158,7 @@ function renderHtml(): string {
       #events-panel { display: none; }
       #topbar-info { display: none; }
       #usage-badge { display: none; }
+      #projection-badge { display: none; }
       #chat { padding: 10px 12px; }
       #input-area { padding: 8px 10px; }
     }
@@ -1169,6 +1175,7 @@ function renderHtml(): string {
     </div>
     <div id="topbar-info">loading...</div>
     <div id="usage-badge" title="Session token usage and prompt cache hit rate">usage --</div>
+    <div id="projection-badge" class="clean" title="Context projection compression status">projection clean</div>
     <div id="topbar-actions">
       <button id="events-toggle" class="btn" title="Toggle events panel">Events</button>
       <label class="btn" title="Show raw stream events" style="cursor:pointer">
@@ -1253,6 +1260,7 @@ function renderHtml(): string {
       const statusText = document.querySelector("#status-text");
       const topbarInfo = document.querySelector("#topbar-info");
       const usageBadge = document.querySelector("#usage-badge");
+      const projectionBadge = document.querySelector("#projection-badge");
       const charCount = document.querySelector("#char-count");
       const modelBadge = document.querySelector("#model-badge");
       const toast = document.querySelector("#toast");
@@ -1279,6 +1287,7 @@ function renderHtml(): string {
       let currentQueryRequestCount = 0;
       let currentQueryUsageBody = null;
       let eventLog = [];
+      let chatAutoScroll = true;
       const toolMessages = new Map();
 
       // --- Init ---
@@ -1303,6 +1312,10 @@ function renderHtml(): string {
 
       // --- Char count ---
       promptInput.addEventListener("input", updateCharCount);
+      chat.addEventListener("scroll", function() {
+        chatAutoScroll = isNearBottom(chat);
+      }, { passive: true });
+
       function updateCharCount() {
         var len = promptInput.value.length;
         charCount.textContent = len;
@@ -1339,6 +1352,7 @@ function renderHtml(): string {
         if (!prompt) return;
 
         hideWelcome();
+        chatAutoScroll = true;
         appendMessage("user", prompt);
         promptInput.value = "";
         promptInput.style.height = "auto";
@@ -1532,6 +1546,7 @@ function renderHtml(): string {
 
       // --- History rendering ---
       async function renderSessionHistory() {
+        chatAutoScroll = true;
         chat.textContent = "";
         welcome.classList.add("hidden");
         currentAssistant = null;
@@ -1620,7 +1635,7 @@ function renderHtml(): string {
           }
           flushHistoryQuestion();
 
-          scrollToBottom(chat);
+          scrollToBottom(chat, true);
         } catch (e) {
           // ignore
         }
@@ -1678,6 +1693,7 @@ function renderHtml(): string {
             break;
           case "context_ready":
             hideWelcome();
+            updateProjectionBadge(event);
             break;
           case "user_message":
             hideWelcome();
@@ -2249,6 +2265,44 @@ function renderHtml(): string {
         ].join("\\n");
       }
 
+      function updateProjectionBadge(event) {
+        if (!projectionBadge || !event || event.type !== "context_ready") return;
+        var stats = event.stats || {};
+        var budget = Number(stats.toolResultBudgetReplacementCount || 0);
+        var compact = Number(stats.bulkyToolCompactCount || 0);
+        var snip = Number(stats.historySnipCount || 0);
+        var hardSnip = Boolean(stats.hardHistorySnipApplied);
+        var markerBudget = event.hasToolResultBudget ? 1 : 0;
+        var markerCompact = event.hasToolResultCompact ? 1 : 0;
+        var markerSnip = event.hasHistorySnipMarker ? 1 : 0;
+        var active = budget + compact + snip + markerBudget + markerCompact + markerSnip + (hardSnip ? 1 : 0);
+
+        if (!active) {
+          projectionBadge.className = "clean";
+          projectionBadge.textContent = "projection clean";
+          projectionBadge.title = "No projection compression was applied for the latest request.";
+          return;
+        }
+
+        var parts = ["projection"];
+        if (budget || markerBudget) parts.push("budget " + Math.max(budget, markerBudget));
+        if (compact || markerCompact) parts.push("compact " + Math.max(compact, markerCompact));
+        if (snip || markerSnip) parts.push("snip " + Math.max(snip, markerSnip));
+        if (hardSnip) parts.push("hard");
+        projectionBadge.className = "";
+        projectionBadge.innerHTML = '<span class="active">' + escapeHtml(parts.join(" 路 ")) + "</span>";
+        projectionBadge.title = [
+          "Latest request projection",
+          "Tool result budget replacements: " + budget,
+          "Bulky tool result compactions: " + compact,
+          "History snips: " + snip,
+          "Hard history snip applied: " + hardSnip,
+          "Tool result chars before budget: " + Number(stats.toolResultCharsBeforeBudget || 0),
+          "Tool result chars after budget: " + Number(stats.toolResultCharsAfterBudget || 0),
+          "Tool result chars after compact: " + Number(stats.toolResultCharsAfterCompact || 0),
+        ].join("\\n");
+      }
+
       function normalizeUsage(usage) {
         if (!usage) return null;
         return {
@@ -2280,8 +2334,15 @@ function renderHtml(): string {
         welcome.classList.add("hidden");
       }
 
-      function scrollToBottom(el) {
+      function scrollToBottom(el, force) {
+        if (el === chat && !force && !chatAutoScroll) {
+          return;
+        }
         el.scrollTop = el.scrollHeight;
+      }
+
+      function isNearBottom(el) {
+        return el.scrollHeight - el.scrollTop - el.clientHeight < 96;
       }
 
       function formatTime(date) {

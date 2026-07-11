@@ -9,11 +9,14 @@ import type {
   DeepSeekStreamEnvelope,
   DeepSeekStreamRequest,
 } from "../src/deepseek/types.js";
+import { applyAutoCompression } from "../src/auto-compress/index.js";
 import { query } from "../src/query.js";
 import { DEFAULT_SESSION_MEMORY_TEMPLATE } from "../src/session-memory/prompts.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 import { createMessage } from "../src/types/messages.js";
+
+process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS = "100";
 
 test("query auto-compresses oversized projections with session memory before model request", async () => {
   const createRequests: DeepSeekCreateRequest[] = [];
@@ -63,6 +66,19 @@ test("query auto-compresses oversized projections with session memory before mod
     deepSeekClient: client,
     MemoryConfig: createMemoryConfig(),
   });
+  state.historySnips.push({
+    id: "history_snip_stale_projection",
+    removedMessageIds: [state.Messages[1]!.id],
+    createdAtMessageId: state.Messages.at(-1)!.id,
+    reason: "prompt_budget",
+    createdAt: Date.now(),
+  });
+  state.toolResultBudgetState.seenIds.add("stale_tool_result");
+  state.toolResultBudgetState.replacements.set(
+    "stale_budget_key",
+    "<tool-result-compact>stale</tool-result-compact>",
+  );
+  runtime.toolResultBudgetState = state.toolResultBudgetState;
 
   const events = [];
   for await (const event of query(runtime, state, { maxTurns: 1 })) {
@@ -72,6 +88,17 @@ test("query auto-compresses oversized projections with session memory before mod
   assert.equal(createRequests.length, 0);
   assert.equal(streamRequests.length, 3);
   assert.deepEqual(getRequestToolNames(streamRequests[0]), ["Edit"]);
+  assert.ok(streamRequests[0]!.messages.length > 1);
+  const sessionMemoryTaskMessage = streamRequests[0]!.messages.at(-1);
+  assert.equal(sessionMemoryTaskMessage?.role, "user");
+  assert.match(
+    sessionMemoryTaskMessage!.content,
+    /Based on the user conversation above/,
+  );
+  assert.doesNotMatch(
+    sessionMemoryTaskMessage!.content,
+    /<conversation_transcript>/,
+  );
   assert.match(
     JSON.stringify(streamRequests[0]!.messages),
     /Available tools: Edit/,
@@ -83,6 +110,10 @@ test("query auto-compresses oversized projections with session memory before mod
   assert.equal(state.sessionMemory.status, "ready");
   assert.equal(state.autoCompress.summaries.length, 1);
   assert.ok(state.autoCompress.summaries.at(-1));
+  assert.equal(state.historySnips.length, 0);
+  assert.equal(state.toolResultBudgetState.seenIds.size, 0);
+  assert.equal(state.toolResultBudgetState.replacements.size, 0);
+  assert.equal(runtime.toolResultBudgetState, state.toolResultBudgetState);
 
   const sessionMemoryRaw = await readFile(
     join(runtime.cwd, ".opencat", "session-memory", `${runtime.sessionId}.json`),
@@ -113,6 +144,108 @@ test("query auto-compresses oversized projections with session memory before mod
     JSON.stringify(requestMessages).length < JSON.stringify(state.Messages).length,
   );
   assert.equal(events.at(-1)?.type, "done");
+});
+
+test("auto-compress clears bulky compact state but preserves recent group budget decisions", async () => {
+  const messages = Array.from({ length: 40 }, (_, index) =>
+    createMessage({
+      role: "user",
+      content: `message ${index}\n${"large context block ".repeat(700)}`,
+    })
+  );
+  const oldMessage = messages[0]!;
+  const recentMessage = messages.at(-1)!;
+  const state = createState({
+    messages,
+    sessionMemory: {
+      content: [
+        "# Session Title",
+        "Projection state preservation",
+        "# Current State",
+        "The older range has been summarized.",
+      ].join("\n"),
+      initialized: true,
+      status: "ready",
+      tokensAtLastUpdateAttempt: 0,
+      tokensAtLastExtraction: 0,
+      lastSummarizedMessageId: recentMessage.id,
+      config: {
+        minimumMessageTokensToInit: 10_000,
+        minimumTokensBetweenUpdate: 5_000,
+        toolCallsBetweenUpdates: 3,
+      },
+    },
+  });
+  const oldBudgetKey = `bulky_tool_result:${oldMessage.id}`;
+  const recentBudgetKey = `bulky_tool_result:${recentMessage.id}`;
+  const recentGroupBudgetKey = recentMessage.id;
+  state.historySnips.push({
+    id: "history_snip_before_auto_compress",
+    removedMessageIds: [oldMessage.id],
+    createdAtMessageId: recentMessage.id,
+    reason: "prompt_budget",
+    createdAt: Date.now(),
+  });
+  state.toolResultBudgetState.seenIds.add(oldBudgetKey);
+  state.toolResultBudgetState.seenIds.add(recentBudgetKey);
+  state.toolResultBudgetState.seenIds.add(recentGroupBudgetKey);
+  state.toolResultBudgetState.replacements.set(
+    oldBudgetKey,
+    "<tool-result-compact>old</tool-result-compact>",
+  );
+  state.toolResultBudgetState.replacements.set(
+    recentBudgetKey,
+    "<tool-result-compact>recent</tool-result-compact>",
+  );
+  state.toolResultBudgetState.replacements.set(
+    recentGroupBudgetKey,
+    "<tool-result-budget>recent</tool-result-budget>",
+  );
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-auto-compress-projection-")),
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    deepSeekClient: {
+      async create() {
+        throw new Error("session memory should already be ready");
+      },
+      async *stream() {
+        throw new Error("session memory should already be ready");
+      },
+      async collectStream() {
+        throw new Error("session memory should already be ready");
+      },
+    },
+    MemoryConfig: createMemoryConfig(),
+    transcriptStore: false,
+  });
+
+  const result = await applyAutoCompression(runtime, state);
+
+  assert.equal(result.status, "compressed");
+  assert.equal(state.historySnips.length, 0);
+  assert.equal(state.toolResultBudgetState.seenIds.has(oldBudgetKey), false);
+  assert.equal(
+    state.toolResultBudgetState.replacements.has(oldBudgetKey),
+    false,
+  );
+  assert.equal(state.toolResultBudgetState.seenIds.has(recentBudgetKey), false);
+  assert.equal(
+    state.toolResultBudgetState.replacements.has(recentBudgetKey),
+    false,
+  );
+  assert.equal(
+    state.toolResultBudgetState.seenIds.has(recentGroupBudgetKey),
+    true,
+  );
+  assert.equal(
+    state.toolResultBudgetState.replacements.get(recentGroupBudgetKey),
+    "<tool-result-budget>recent</tool-result-budget>",
+  );
+  assert.equal(runtime.toolResultBudgetState, state.toolResultBudgetState);
 });
 
 test("query flushes agent notifications after auto-compression", async () => {

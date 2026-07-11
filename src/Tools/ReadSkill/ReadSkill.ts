@@ -39,6 +39,17 @@ export class ReadSkill
     return true;
   }
 
+  formatResult({ output }: { output: ReadSkillOutput }): string {
+    return [
+      `Skill: ${output.name}`,
+      `Description: ${output.description}`,
+      ...(output.skillPath ? [`Path: ${output.skillPath}`] : []),
+      ...(output.truncated ? ["Note: content was truncated."] : []),
+      "",
+      output.content,
+    ].join("\n");
+  }
+
   call(
     input: ReadSkillInput,
     context: ToolUseContext,

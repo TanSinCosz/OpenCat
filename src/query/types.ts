@@ -5,10 +5,16 @@ import type {
   DeepSeekToolCall,
   DeepSeekUsage,
 } from "../deepseek/types.js";
+import type { Message } from "../types/messages.js";
 import type { RuntimeUsageStats } from "../types/runtime.js";
 
 export type QueryEvent =
-  | { type: "context_ready"; systemPrompt: string; messages: DeepSeekMessage[] }
+  | {
+    type: "context_ready";
+    systemPrompt: string;
+    messages: DeepSeekMessage[];
+    stats: MessageProjectionStats;
+  }
   | { type: "model_stream_start"; turn: number }
   | { type: "model_stream_event"; event: DeepSeekStreamEnvelope }
   | {
@@ -45,4 +51,16 @@ export interface QueryOptions {
 export interface MessagesForQuery {
   systemPrompt: string;
   messages: DeepSeekMessage[];
+  forkContextMessages: Message[];
+  stats: MessageProjectionStats;
+}
+
+export interface MessageProjectionStats {
+  toolResultBudgetReplacementCount: number;
+  bulkyToolCompactCount: number;
+  historySnipCount: number;
+  hardHistorySnipApplied: boolean;
+  toolResultCharsBeforeBudget: number;
+  toolResultCharsAfterBudget: number;
+  toolResultCharsAfterCompact: number;
 }

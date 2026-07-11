@@ -64,6 +64,19 @@ export class WebFetch
     return true;
   }
 
+  formatResult({ output }: { output: WebFetchOutput }): string {
+    return [
+      `URL: ${output.url}`,
+      ...(output.finalUrl !== output.url ? [`Final URL: ${output.finalUrl}`] : []),
+      `Status: ${output.code} ${output.codeText}`,
+      `Content-Type: ${output.contentType || "(unknown)"}`,
+      `Bytes read: ${output.bytes}${output.truncated ? " (truncated)" : ""}`,
+      ...(output.note ? [`Note: ${output.note}`] : []),
+      "",
+      output.text,
+    ].join("\n");
+  }
+
   async call(
     input: WebFetchInput,
     context: ToolUseContext,

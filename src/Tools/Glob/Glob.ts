@@ -42,6 +42,20 @@ export class Glob
         return true;
     }
 
+    formatResult({ output }: { output: typeOutput }): string {
+        if (output.filenames.length === 0) {
+            return `No files matched. Search completed in ${output.durationMs}ms.`;
+        }
+
+        return [
+            output.filenames.join("\n"),
+            "",
+            `Found ${output.numFiles} file(s) in ${output.durationMs}ms${
+                output.truncated ? " (truncated to first 100 results)" : ""
+            }.`,
+        ].join("\n");
+    }
+
     async validateInput({ pattern, path }: typeInput): Promise<ValidationResult> {
         if (!pattern.trim()) {
             return {

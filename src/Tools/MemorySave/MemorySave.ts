@@ -40,6 +40,19 @@ export class MemorySave
     return false;
   }
 
+  formatResult({ output }: { output: MemorySaveOutput }): string {
+    if (output.results.length === 0) {
+      return "No long-term memory was saved.";
+    }
+
+    return [
+      `Saved ${output.results.length} long-term memor${
+        output.results.length === 1 ? "y" : "ies"
+      }.`,
+      ...output.results.map((result) => `- ${result.id}: ${result.memory}`),
+    ].join("\n");
+  }
+
   async call(
     input: MemorySaveInput,
     _context: ToolUseContext,

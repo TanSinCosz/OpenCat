@@ -24,6 +24,13 @@ export type EvaluationEvent = TelemetryAgentFields & (
     hasSessionMemory: boolean;
     hasAutoCompressSummary: boolean;
     runtimeContextMessageCount: number;
+    toolResultBudgetReplacementCount: number;
+    bulkyToolCompactCount: number;
+    historySnipCount: number;
+    hardHistorySnipApplied: boolean;
+    toolResultCharsBeforeBudget: number;
+    toolResultCharsAfterBudget: number;
+    toolResultCharsAfterCompact: number;
   }
   | {
     type: "model_stream_started";
@@ -75,6 +82,10 @@ export type EvaluationEvent = TelemetryAgentFields & (
     type: "query_finished";
     reason: "completed" | "max_turns";
     durationMs: number;
+  }
+  | {
+    type: "session_memory_update_failed";
+    error: string;
   }
   | {
     type: "query_failed";

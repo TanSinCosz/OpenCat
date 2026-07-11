@@ -11,7 +11,7 @@ import type {
 } from "../src/deepseek/types.js";
 import { query } from "../src/query.js";
 import { createRuntimeContextMessage } from "../src/query/runtime-context.js";
-import { projectMessagesWithAutoCompress } from "../src/auto-compress/index.js";
+import { applyAutoCompressSummary } from "../src/auto-compress/index.js";
 import {
   loadStateFromTranscript,
   recordTranscriptMessage,
@@ -216,10 +216,10 @@ test("transcript restore hydrates only post auto-compress messages by default", 
   assert.equal(restored.Messages[0]?.id, third.id);
   assert.equal(restored.autoCompress.summaries.at(-1)?.id, "autocompress_test_summary");
 
-  const projected = projectMessagesWithAutoCompress(restored);
-  assert.equal(projected.length, 2);
-  assert.match(projected[0]?.content ?? "", /compressed earlier conversation/);
-  assert.equal(projected[1]?.id, third.id);
+  const messages = applyAutoCompressSummary(restored);
+  assert.equal(messages.length, 2);
+  assert.match(messages[0]?.content ?? "", /compressed earlier conversation/);
+  assert.equal(messages[1]?.id, third.id);
 
   assert.ok(full);
   assert.equal(full.Messages.length, 3);
@@ -298,6 +298,53 @@ test("transcript restore keeps runtime context separate from conversation messag
   );
 });
 
+test("transcript restore strips stale dynamic skill context blocks", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-projection-context-transcript-")),
+    sessionId: "session_projection_context_restore",
+    deepSeekRuntimeConfig: createRuntimeConfig(),
+    deepSeekClient: createNoopClient(),
+    MemoryConfig: createMemoryConfig(),
+  });
+  const userMessage = createMessage({
+    role: "user",
+    content: "real user prompt",
+  });
+  const contextMessage = createMessage({
+    role: "user",
+    name: "opencat_context",
+    content: [
+      "<opencat_context>",
+      "<context_block source=\"long_term_memory\">",
+      "<long_term_memory>keep me</long_term_memory>",
+      "</context_block>",
+      "<context_block source=\"dynamic_skill\">",
+      "<dynamic_skills>old</dynamic_skills>",
+      "</context_block>",
+      "</opencat_context>",
+    ].join("\n"),
+  }, { source: "runtime" });
+  const assistantMessage = createMessage({
+    role: "assistant",
+    content: "real assistant response",
+  });
+
+  await recordTranscriptMessage(runtime, userMessage);
+  await recordTranscriptMessage(runtime, contextMessage);
+  await recordTranscriptMessage(runtime, assistantMessage);
+
+  const restored = await loadStateFromTranscript(runtime.transcriptStore!, {
+    hydrate: "full",
+  });
+
+  assert.ok(restored);
+  assert.equal(restored.Messages.length, 3);
+  assert.equal(restored.Messages[0]?.content, "real user prompt");
+  assert.match(String(restored.Messages[1]?.content), /keep me/);
+  assert.doesNotMatch(String(restored.Messages[1]?.content), /dynamic_skills/);
+  assert.equal(restored.Messages[2]?.content, "real assistant response");
+});
+
 test("transcript restore keeps history snip boundaries from snapshots", async () => {
   const runtime = createRuntime({
     cwd: await mkdtemp(join(tmpdir(), "opencat-history-snip-transcript-")),
@@ -337,6 +384,33 @@ test("transcript restore keeps history snip boundaries from snapshots", async ()
   assert.equal(restored.historySnips.length, 1);
   assert.equal(restored.historySnips[0]?.id, "history_snip_restore");
   assert.deepEqual(restored.historySnips[0]?.removedMessageIds, [oldMessage.id]);
+});
+
+test("transcript restore keeps tool result projection replacement state", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-tool-budget-transcript-")),
+    sessionId: "session_tool_budget_restore",
+    deepSeekRuntimeConfig: createRuntimeConfig(),
+    deepSeekClient: createNoopClient(),
+    MemoryConfig: createMemoryConfig(),
+  });
+  const state = createState();
+  state.toolResultBudgetState.seenIds.add("tool_result:seen");
+  state.toolResultBudgetState.replacements.set(
+    "bulky_tool_result:message_1",
+    "<tool-result-compact>preview</tool-result-compact>",
+  );
+
+  await recordTranscriptStateSnapshot(runtime, state, "projection");
+
+  const restored = await loadStateFromTranscript(runtime.transcriptStore!);
+
+  assert.ok(restored);
+  assert.ok(restored.toolResultBudgetState.seenIds.has("tool_result:seen"));
+  assert.equal(
+    restored.toolResultBudgetState.replacements.get("bulky_tool_result:message_1"),
+    "<tool-result-compact>preview</tool-result-compact>",
+  );
 });
 
 test("transcript restore recovers reasoning-only assistant messages", async () => {

@@ -125,7 +125,7 @@ export async function loadDynamicSkillContextForQuery(
   runtime: Runtime,
   state: State,
 ): Promise<number> {
-  const skills = collectUnsentDynamicSkills(runtime);
+  const skills = collectActiveDynamicSkills(runtime);
   runtime.toolUseContext.dynamicSkillDirTriggers?.clear();
 
   if (skills.length === 0) {
@@ -167,16 +167,11 @@ function drainAgentNotifications(state: State): Message[] {
   );
 }
 
-function collectUnsentDynamicSkills(runtime: Runtime): SkillCommand[] {
+function collectActiveDynamicSkills(runtime: Runtime): SkillCommand[] {
   const skillRuntime = runtime.toolUseContext.skillRuntime;
   const selected: SkillCommand[] = [];
 
   for (const skill of skillRuntime.dynamicSkills.values()) {
-    if (skillRuntime.sentDynamicSkillNames.has(skill.name)) {
-      continue;
-    }
-
-    skillRuntime.sentDynamicSkillNames.add(skill.name);
     selected.push(skill);
 
     if (selected.length >= MAX_DYNAMIC_SKILLS_PER_ATTACHMENT) {

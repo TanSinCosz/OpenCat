@@ -82,6 +82,7 @@ export type RunAgentOptions = {
   canUseTool?: CanUseToolFn;
   readFileState?: FileStateCache;
   agentRole?: RuntimeAgentRole;
+  forkContextMessages?: readonly Message[];
 };
 
 type AgentWorktreeSession = {
@@ -288,9 +289,12 @@ function buildInitialMessages(
     : "";
 
   if (options.mode === "fork") {
+    const contextMessages = options.forkContextMessages ??
+      options.parentState.Messages;
+
     return [
       ...filterIncompleteToolCallMessages(
-        options.parentState.Messages,
+        contextMessages,
       ),
       createMessage({
         role: "user",

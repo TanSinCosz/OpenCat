@@ -11,7 +11,7 @@ OpenCat 是一个基于 **DeepSeek** 大语言模型的编码 AI 智能体（Cod
 | **文件操作**     | 读取、写入、搜索替换编辑文件                                 |
 | **代码搜索**     | 正则搜索（Grep）、文件模式匹配（Glob）                       |
 | **Shell 执行**   | 在隔离的工作目录中执行 Bash 命令                             |
-| **MCP 协议**     | 通过 stdio 或 HTTP 连接外部工具服务器                        |
+| **==MCP== 协议** | 通过 stdio 或 HTTP 连接外部工具服务器                        |
 | **项目技能**     | 自动发现并加载项目中的`.claude/skills/` 技能文件           |
 | **上下文压缩**   | 当对话过长时自动压缩历史，控制 API 成本                      |
 | **上下文恢复**   | 从 JSONL 对话记录中恢复完整的会话状态                        |
@@ -199,18 +199,18 @@ interface Tool<Input = unknown, Output = unknown> {
 
 ---
 
-## 四、MCP 协议支持（Model Context Protocol）
+## 四、==MCP== 协议支持（Model Context Protocol）
 
-MCP 允许 OpenCat 连接外部工具服务器，将外部工具动态注入到智能体的工具列表中。涉及文件：
+==MCP== 允许 OpenCat 连接外部工具服务器，将外部工具动态注入到智能体的工具列表中。涉及文件：
 
-| 文件 | 职责 |
-|------|------|
-| `src/mcp/types.ts` | JSON-RPC 2.0 类型定义、服务器配置、工具定义 |
-| `src/mcp/config.ts` | 配置加载（`.opencat/mcp.json`）、连接创建、工具合并 |
-| `src/mcp/stdio-client.ts` | Stdio 传输：子进程 + 行分隔 JSON-RPC |
-| `src/mcp/http-client.ts` | HTTP 传输：fetch + 会话管理 + SSE |
-| `src/mcp/tool-adapter.ts` | `McpToolAdapter`：将 MCP 工具伪装成 OpenCat Tool |
-| `src/mcp/index.ts` | 统一导出 |
+| 文件                        | 职责                                                   |
+| --------------------------- | ------------------------------------------------------ |
+| `src/mcp/types.ts`        | JSON-RPC 2.0 类型定义、服务器配置、工具定义            |
+| `src/mcp/config.ts`       | 配置加载（`.opencat/mcp.json`）、连接创建、工具合并  |
+| `src/mcp/stdio-client.ts` | Stdio 传输：子进程 + 行分隔 JSON-RPC                   |
+| `src/mcp/http-client.ts`  | HTTP 传输：fetch + 会话管理 + SSE                      |
+| `src/mcp/tool-adapter.ts` | `McpToolAdapter`：将 ==MCP== 工具伪装成 OpenCat Tool |
+| `src/mcp/index.ts`        | 统一导出                                               |
 
 ### 4.1 整体架构
 
@@ -250,6 +250,7 @@ OpenCat ──spawn("node", ["codegraph.js", "serve", "--mcp"])──▶ MCP Ser
 **请求-响应匹配机制**：每个请求带自增 `id`，Promise 存入 `pending Map<id, {resolve, reject, timer}>`。stdout 逐行解析 JSON，按 `id` 匹配对应的 Promise，`resolve(result)` 或 `reject(error)`。30 秒超时兜底。
 
 **生命周期**：
+
 - `connect()` → spawn 子进程，建立 readline 接口，执行初始化握手，**仅此一次**
 - 后续所有 `request()` / `notify()` → 往同一 `stdin` 写，从同一 `stdout` 读
 - `close()` → 关 readline，`kill()` 子进程，`rejectAllPending()`
@@ -266,15 +267,15 @@ OpenCat ──spawn("node", ["codegraph.js", "serve", "--mcp"])──▶ MCP Ser
 - **SSE 支持**：响应 `content-type: text/event-stream` 时解析 `data:` 行，从中提取匹配 `id` 的 JSON-RPC 响应
 - **关闭**：仅清空 `this.sessionId`，无持久连接
 
-| 维度 | Stdio | HTTP |
-|------|-------|------|
-| 连接方式 | `spawn()` 子进程 | HTTP POST (`fetch`) |
-| 请求匹配 | pending Map + ID | await fetch（天然同步） |
-| 超时 | setTimeout 30s | fetch 自带 |
-| 会话 | 无状态（进程即会话） | `mcp-session-id` header |
-| 认证 | 无（OS 信任边界） | Bearer token |
-| 流式响应 | 不支持 | SSE (`text/event-stream`) |
-| 连接模式 | 长连接（一个进程） | 每次请求独立 |
+| 维度     | Stdio                | HTTP                        |
+| -------- | -------------------- | --------------------------- |
+| 连接方式 | `spawn()` 子进程   | HTTP POST (`fetch`)       |
+| 请求匹配 | pending Map + ID     | await fetch（天然同步）     |
+| 超时     | setTimeout 30s       | fetch 自带                  |
+| 会话     | 无状态（进程即会话） | `mcp-session-id` header   |
+| 认证     | 无（OS 信任边界）    | Bearer token                |
+| 流式响应 | 不支持               | SSE (`text/event-stream`) |
+| 连接模式 | 长连接（一个进程）   | 每次请求独立                |
 
 ### 4.4 初始化握手（两种传输相同）
 
@@ -295,9 +296,9 @@ OpenCat ──spawn("node", ["codegraph.js", "serve", "--mcp"])──▶ MCP Ser
 
 > **注意**：OpenCat 当前丢弃了 `initialize` 返回值中的 `capabilities`。因为目前只使用 `tools` 功能（`tools/list`），不检查能力不会有实际影响。后续若需支持 `resources` 或 `prompts`，需补上能力检查。
 
-### 4.5 MCP 工具适配器（McpToolAdapter）
+### 4.5 ==MCP== 工具适配器（==Mcp==ToolAdapter）
 
-将 MCP 工具伪装成 OpenCat 的 `Tool` 接口，与内置工具完全平等：
+将 ==MCP== 工具伪装成 OpenCat 的 `Tool` 接口，与内置工具完全平等：
 
 ```typescript
 class McpToolAdapter implements Tool {
@@ -312,8 +313,9 @@ class McpToolAdapter implements Tool {
 ```
 
 **Schema 双轨制**：
-- **模型侧**：使用 MCP 服务器提供的原始 JSON Schema（`inputJsonSchema`），原封不动传给 DeepSeek 的 function calling
-- **验证侧**：使用宽松的 `z.record(z.string(), z.unknown())`，因为 MCP 服务器的 schema 格式可能不完全兼容 Zod，实际验证交还给服务器
+
+- **模型侧**：使用 ==MCP== 服务器提供的原始 JSON Schema（`inputJsonSchema`），原封不动传给 DeepSeek 的 function calling
+- **验证侧**：使用宽松的 `z.record(z.string(), z.unknown())`，因为 ==MCP== 服务器的 schema 格式可能不完全兼容 Zod，实际验证交还给服务器
 
 **工具命名**：`{serverName}__{toolName}`，非法字符替换为 `_`，长度限制 64 字符。
 
@@ -333,7 +335,7 @@ class McpToolAdapter implements Tool {
 }
 ```
 
-`createToolsWithConfiguredMcp()` 将 MCP 工具与内置工具合并：
+`createToolsWithConfiguredMcp()` 将 ==MCP== 工具与内置工具合并：
 
 ```
 内置工具 (12 个) + MCP 工具 (动态数量) → 统一 tools 数组
@@ -341,14 +343,14 @@ class McpToolAdapter implements Tool {
 
 ### 4.7 当前未实现的部分
 
-| 待实现 | 说明 | 影响 |
-|--------|------|------|
-| `notifications/tools/list_changed` | MCP 协议允许服务端通知客户端工具列表变更，但 Stdio 客户端的 `handleLine` 只处理带 `id` 的响应（通知无 `id`，被丢弃），HTTP 客户端无长连接接收推送 | 工具列表只在连接时获取一次，运行时不变 |
-| `.opencat/mcp.json` 热加载 | 配置文件只在启动时读取一次 | 运行时修改配置不生效 |
-| 子进程崩溃自动重连 | `process.once("exit")` 后将 `this.process` 设为 `undefined`，但不自动重新 spawn | 崩溃后下次请求直接报错 |
-| 服务端能力检查 | `initialize` 返回值中的 `capabilities` 被丢弃 | 当前无影响（只用 tools），未来需补 |
-| HTTP SSE 实时流式消费 | 当前使用 `response.text()` 一次性读完再解析 | 无法实时展示长时间工具调用的中间进度 |
-| Stdio stderr 处理 | 子进程 stderr 被静默忽略 | 调试困难
+| 待实现                               | 说明                                                                                                                                                       | 影响                                   |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| `notifications/tools/list_changed` | ==MCP== 协议允许服务端通知客户端工具列表变更，但 Stdio 客户端的`handleLine` 只处理带 `id` 的响应（通知无 `id`，被丢弃），HTTP 客户端无长连接接收推送 | 工具列表只在连接时获取一次，运行时不变 |
+| `.opencat/mcp.json` 热加载         | 配置文件只在启动时读取一次                                                                                                                                 | 运行时修改配置不生效                   |
+| 子进程崩溃自动重连                   | `process.once("exit")` 后将 `this.process` 设为 `undefined`，但不自动重新 spawn                                                                      | 崩溃后下次请求直接报错                 |
+| 服务端能力检查                       | `initialize` 返回值中的 `capabilities` 被丢弃                                                                                                          | 当前无影响（只用 tools），未来需补     |
+| HTTP SSE 实时流式消费                | 当前使用`response.text()` 一次性读完再解析                                                                                                               | 无法实时展示长时间工具调用的中间进度   |
+| Stdio stderr 处理                    | 子进程 stderr 被静默忽略                                                                                                                                   | 调试困难                               |
 
 ---
 
@@ -476,55 +478,227 @@ loadStateFromTranscript(sessionId)
 
 ## 八、长期记忆（Long-term Memory）
 
-长期记忆是一个基于向量搜索的持久化知识库，使智能体能够跨会话记住用户偏好、项目约定和重要发现。
+长期记忆是一个基于向量搜索的持久化知识库，使智能体能够跨会话记住用户偏好、项目约定和重要发现。涉及文件：
+
+| 文件 | 职责 |
+|------|------|
+| `src/Memory/Memory.ts`（970 行） | 核心引擎：搜索（11 步）+ 添加（8 阶段） |
+| `src/Memory/type.ts` | 类型定义：MemoryConfig、MemoryItem、实体 |
+| `src/Memory/runtime.ts` | 运行时层：懒加载、搜索适配、身份过滤 |
+| `src/Memory/config.ts` | 配置层：embedder/vectorStore/LLM 参数解析 |
+| `src/query/long-term-memory.ts`（292 行） | 查询循环层：注入构建、提取调度 |
+| `src/Memory/Embedding/openai.ts` | OpenAI 兼容 Embedding 客户端 |
+| `src/Memory/Embedding/entity-store.ts` | 实体存储（独立 `_entities.db`） |
+| `src/Memory/Embedding/scoring.ts` | 评分函数（BM25 归一化、综合 ranking） |
+| `src/Memory/Embedding/nlp-utils.ts` | NLP 工具：分词、词形还原 |
 
 ### 8.1 三层架构
 
 ```
-MemoryTool (Memory.ts)
-  ├── OpenAIEmbedder        ← 文本向量化（调用 OpenAI Embedding API）
-  ├── OpenAIStructuredLLM   ← 结构化提取（调用 LLM 抽取记忆条目）
-  ├── MemoryVectorStore     ← 向量存储后端
-  │   ├── SQLite (better-sqlite3, 默认)
-  │   ├── Qdrant (远程向量数据库)
-  │   └── pgvector (PostgreSQL 扩展)
-  └── EntityStore           ← 实体存储（独立 _entities.db）
+query/long-term-memory.ts        ← 查询循环层：注入 & 提取的入口
+         │
+         ▼
+Memory/runtime.ts                ← 运行时层：懒加载、搜索适配、身份过滤
+         │
+         ▼
+Memory/Memory.ts (970行)         ← 核心引擎：搜索（11步）/ 添加（8阶段）
+         │
+    ┌────┼────┐
+    ▼    ▼     ▼
+OpenAIEmbedder  OpenAIStructuredLLM  MemoryVectorStore
+  (嵌入向量)      (LLM提取记忆)      (SQLite向量存储)
+                                    + EntityStore (实体存储)
 ```
 
-### 8.2 搜索流程（7 步评分流水线）
+### 8.2 配置结构
+
+**存储层**（`Memory/config.ts`）：
+
+| 组件 | 默认值 | 说明 |
+|------|--------|------|
+| embedder | `text-embedding-3-small` via OpenAI API | 文本 → 1536 维向量 |
+| vectorStore | SQLite（`better-sqlite3`），路径 `.opencat/memory/vector_store.db` | 向量 + 负载持久化 |
+| LLM | `deepseek-chat` | 结构化提取：从对话中抽取记忆条目 |
+
+**行为层**（`LongTermMemoryRuntimeConfig`）：
+
+| 参数 | 默认值 | 作用 |
+|------|--------|------|
+| `enabled` | `true` | 总开关 |
+| `autoInject` | `true` | 每轮自动搜索相关记忆并注入上下文 |
+| `autoExtract` | `true` | 每轮结束后自动从对话中提取新记忆 |
+| `autoInjectTopK` | `6` | 每次注入最多几条 |
+| `searchThreshold` | `0.1` | 最低相似度阈值 |
+| `maxInjectedChars` | `8000` | 注入内容总字符上限 |
+| `userId` | 环境变量 `OPENCAT_MEMORY_USER_ID` 或 `default-user` | 记忆归属（跨会话隔离） |
+
+### 8.3 注入流程（每轮对话前自动执行）
+
+入口：`materializeContextForQuery()` → `createLongTermMemoryContextMessage()`
 
 ```
-用户查询 → search(query)
+1. 从最近 6 条 user/assistant 消息中构建搜索查询
+   → buildLongTermMemoryQuery()：取最近 6 条 → 拼成 "user: ...\nassistant: ..."
+   → 上限 4000 字符
+
+2. 调用 searchLongTermMemory(runtime, query, { topK: 6, threshold: 0.1 })
+   → 多路搜索 + 评分（详见 8.4）
+   → 按 user_id 过滤（scope="user"）
+
+3. 渲染结果：
+   <long_term_memory>
+   Relevant long-term memories retrieved for this request.
+   Use them as context, but prefer newer user messages if there is a conflict.
+   - id=xxx score=0.929: 记忆内容...
+   - id=yyy score=0.865: 记忆内容...
+   </long_term_memory>
+
+4. 包装进 <opencat_context>，追加到 state.Messages 末尾
+```
+
+每当 `state.Messages` 的最后一条是真实的用户消息（`source === "user"`）时触发。注入失败静默忽略，不阻塞主流程。
+
+### 8.4 搜索流程（Memsearch — 11 步评分流水线）
+
+```
+用户查询: "我们之前讨论过 skill 通知的 gap 吗？"
   │
-  1. 查询预处理         ← 词形还原 + 实体提取
-  2. 语义搜索           ← 向量相似度（余弦相似度）
-  3. 关键词搜索         ← BM25 全文检索
-  4. BM25 分数归一化    ← logistic sigmoid 压缩到 [0,1]
-  5. 实体增强           ← entity boost 加成
-  6. 候选集构建 + 评分  ← scoreAndRank 综合排序
-  7. 结果格式化         ← 返回格式化的记忆片段
-```
-
-### 8.3 添加流程（8 阶段提取流水线）
-
-```
-新对话完成 → add()
+  ├─ Step 1: 预处理
+  │   → lemmatizeForBm25(query)  ← 词形还原
+  │   → extractEntities(query)   ← 提取实体（人名、术语、文件名等）
   │
-  1. 上下文收集         ← 提取最近 20 条消息
-  2. 已有记忆检索       ← 避免重复
-  3. LLM 结构化提取     ← 使用 ADDITIVE_EXTRACTION_PROMPT
-  4. 批量嵌入           ← OpenAI Embedding API
-  5. 哈希去重           ← 内容哈希
-  6. 批量持久化         ← 写入向量存储
-  7. 实体链接           ← 写入实体存储
-  8. 返回保存结果
+  ├─ Step 2: 嵌入查询向量
+  │   → embedder.embed(query) → 1536 维向量
+  │
+  ├─ Step 3: 语义搜索
+  │   → vectorStore.search(embedding, limit=topK*4, filters)
+  │   → 余弦相似度，过取 4 倍为后续重排提供候选池
+  │
+  ├─ Step 4: 关键词搜索
+  │   → vectorStore.keywordSearch(queryLemmatized, limit, filters)
+  │   → BM25 全文检索
+  │
+  ├─ Step 5: BM25 分数归一化
+  │   → normalizeBm25(rawScore, midpoint, steepness)
+  │   → logistic sigmoid 压缩到 [0, 1]
+  │
+  ├─ Step 6: 实体增强（entity boost）
+  │   → 对查询中的每个实体（最多 8 个），在 EntityStore 中搜索
+  │   → 找到的实体 → 获取 linkedMemoryIds → 给这些记忆加分
+  │   → boost = similarity × ENTITY_BOOST_WEIGHT × memoryCountWeight
+  │
+  ├─ Step 7: 构建候选集
+  │   → 语义搜索结果作为基础候选
+  │
+  ├─ Step 8: 综合评分（scoreAndRank）
+  │   → semantic + bm25 + entityBoost → 最终分数
+  │   → 按 threshold 过滤 → 按分数降序 → 取 topK
+  │
+  └─ Step 9: 格式化结果
+      → 过滤 payload → 提取 data/id/score/metadata
+      → 返回 { results: MemoryItem[] }
 ```
 
-### 8.4 自动注入与提取
+**三大评分维度**：
 
-- **注入时机**：每轮对话开始前，自动搜索与当前问题相关的长期记忆
-- **提取时机**：对话完成后，自动从本轮对话中提取可记忆内容
-- **懒加载**：MemoryTool 在首次使用时才初始化，避免不必要的资源消耗
+| 维度 | 来源 | 权重 | 说明 |
+|------|------|------|------|
+| 语义相似度（semantic） | 向量余弦距离 | 主要 | 捕捉同义词和语义关联 |
+| 关键词匹配（BM25） | 全文检索 | 补充 | 捕捉精确术语匹配 |
+| 实体增强（entity boost） | 实体 ↔ 记忆关联图 | 加成 | 通过实体作为桥接链接相关记忆 |
+
+### 8.5 添加流程（8 阶段提取流水线）
+
+```
+messages: [
+  { role: "user", content: "skill 通知已被压缩会被永久丢失" },
+  { role: "assistant", content: "是的，这是一个真实的 gap..." },
+]
+  │
+  ├─ Phase 1: 检索已有记忆
+  │   → 搜索相关已有记忆，提供上下文用于 LLM 去重判断
+  │
+  ├─ Phase 2: LLM 结构化提取
+  │   → ADDITIVE_EXTRACTION_PROMPT
+  │   → LLM 输出 JSON: [{ id, text, attributed_to, linked_memory_ids }]
+  │   → Zod schema 校验（AdditiveExtractionSchema）
+  │
+  ├─ Phase 3: 批量嵌入
+  │   → embedder.embedBatch(texts) — 减少 API 调用
+  │   → 失败回退到逐条 embed()
+  │
+  ├─ Phase 4-5: 哈希去重
+  │   → MD5 哈希 → 与已有记忆比对 → 跳过重复
+  │
+  ├─ Phase 6: 批量持久化
+  │   → vectorStore.insert(vectors, ids, payloads)
+  │   → payload: data, hash, textLemmatized, createdAt, user_id, agent_id, run_id
+  │
+  ├─ Phase 7: 实体链接（7a → 7b → 7c）
+  │   → extractEntitiesBatch(texts) — 每段文字提取实体
+  │   → 全局去重：unique entities across all memories
+  │   → 批量嵌入实体 → EntityStore 搜索 → 更新/插入
+  │   → linkedMemoryIds 关联记忆，形成实体 ↔ 记忆图
+  │   → 相似度 >= 0.95 视为同一实体，合并 linkedMemoryIds
+  │
+  └─ Phase 8: 返回结果
+```
+
+**LLM 提取输出结构**：每条记忆包含 `id`、`text`（记忆正文）、`attributed_to`（归属于 user 或 assistant）、`linked_memory_ids`（与已有记忆的关联）。提取是一次性增量式的——LLM 只从本轮新消息中提取**新出现**的知识点。
+
+### 8.6 提取调度
+
+入口：`query.ts` → 当模型本轮**无工具调用**时触发 `extractLongTermMemoryForCompletedQuery()`
+
+```
+1. resolveLongTermMemoryTurnMessages(state, turnStartIndex)
+   → 从 state.Messages 中找到本轮开始之后的新消息
+   → 只取 role: "user"/"assistant" 且 source: "user"/"assistant"
+   → 如果 state 已被压缩（消息丢失），回退到 transcript JSONL 全量恢复
+
+2. 分成两组：
+   → newMessages: 本轮新消息（要提取的源数据）
+   → contextMessages: 本轮之前的最近 20 条（提供上下文给 LLM 去重）
+
+3. 调用 memory.add(newMessages, {
+      infer: true,
+      userId, agentId, runId,
+      contextMessages,
+    })
+```
+
+### 8.7 懒加载设计
+
+```typescript
+// Memory/runtime.ts
+function getOrCreateLongTermMemory(runtime) {
+  if (!runtime.longTermMemoryConfig.enabled) return null;
+  runtime.longTermMemory ??= new MemoryTool(runtime.MemoryConfig);
+  //                      ↑ 第一次真正使用时才初始化
+  return runtime.longTermMemory;
+}
+```
+
+不创建 SQLite 文件、不实例化 Embedding/LLM 客户端，直到第一次 `search()` 或 `add()` 调用。
+
+### 8.8 与技能通知系统的区别
+
+| 维度 | 技能通知（`<dynamic_skills>`） | 长期记忆（`<long_term_memory>`） |
+|------|------|------|
+| 数据来源 | 项目文件系统（`.claude/skills/SKILL.md`） | 对话历史的语义提取 |
+| 触发方式 | FileRead/Write/Edit 后自动发现 | 每轮语义搜索（基于向量 + BM25 + 实体） |
+| 注入频率 | 每轮（所有活跃技能全部重新注入） | 每轮（基于搜索查询动态变化） |
+| 内容性质 | 技能指令（操作指南、约束规则） | 事实性记忆（偏好、决策、知识点） |
+| 存储位置 | 项目文件系统 | SQLite 向量数据库（`.opencat/memory/`） |
+| 跨会话 | 取决于文件是否存在于项目中 | 持久化，跨会话保留 |
+
+### 8.9 当前未实现的部分
+
+| 待实现 | 说明 |
+|--------|------|
+| 记忆更新/删除 API | 目前只能 add 和 search，无法通过 MemorySave 工具修改或删除已有记忆 |
+| EntityStore 健康检查 | `_entities.db` 与主 `vector_store.db` 的一致性无校验 |
+| 嵌入模型本地化 | 强依赖 OpenAI Embedding API，无本地 embedder 回退 |
 
 ---
 
@@ -710,7 +884,7 @@ interface AgentDefinition {
 
 ### 设计要点
 
-- **前缀缓存优化**：所有稳定章节（角色、规则、上下文、工程规范、沟通、效率、环境）放在工具章节之前。当 MCP 工具热加载导致工具列表变化时，只有末尾的工具章节缓存失效，前面的大段稳定内容继续命中缓存。
+- **前缀缓存优化**：所有稳定章节（角色、规则、上下文、工程规范、沟通、效率、环境）放在工具章节之前。当 ==MCP== 工具热加载导致工具列表变化时，只有末尾的工具章节缓存失效，前面的大段稳定内容继续命中缓存。
 - **`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 已移除**：该标记原本是模板内容和运行时信息的纯文本分隔符，没有代码逻辑依赖，已从代码和提示词中完全删除。
 - **各段以 `\n\n` 拼接**，作为单条 `role: "system"` 消息发送。
 
@@ -800,18 +974,18 @@ MemoryTool 在首次使用时才初始化，避免不必要的资源消耗（不
 
 ## 十四、技术栈
 
-| 层级               | 技术                               |
-| ------------------ | ---------------------------------- |
-| **运行时**   | Node.js + TypeScript               |
-| **LLM 接口** | DeepSeek API（HTTP + SSE 流式）    |
-| **类型校验** | Zod（运行时类型安全）              |
-| **向量存储** | better-sqlite3 / Qdrant / pgvector |
-| **嵌入模型** | OpenAI Embedding API               |
-| **MCP 协议** | JSON-RPC 2.0                       |
-| **对话存储** | JSONL（自定义格式）                |
-| **Web 界面** | 内嵌 HTML/CSS/JS（无外部前端依赖） |
-| **进程管理** | child_process（MCP stdio、Bash）   |
-| **文件搜索** | ripgrep（Grep）、fast-glob（Glob） |
+| 层级                   | 技术                                 |
+| ---------------------- | ------------------------------------ |
+| **运行时**       | Node.js + TypeScript                 |
+| **LLM 接口**     | DeepSeek API（HTTP + SSE 流式）      |
+| **类型校验**     | Zod（运行时类型安全）                |
+| **向量存储**     | better-sqlite3 / Qdrant / pgvector   |
+| **嵌入模型**     | OpenAI Embedding API                 |
+| **==MCP== 协议** | JSON-RPC 2.0                         |
+| **对话存储**     | JSONL（自定义格式）                  |
+| **Web 界面**     | 内嵌 HTML/CSS/JS（无外部前端依赖）   |
+| **进程管理**     | child_process（==MCP== stdio、Bash） |
+| **文件搜索**     | ripgrep（Grep）、fast-glob（Glob）   |
 
 ---
 
@@ -832,9 +1006,9 @@ MemoryTool 在首次使用时才初始化，避免不必要的资源消耗（不
 | `src/session-memory/session-memory.ts`         | 滚动会话笔记管理           |
 | `src/Memory/Memory.ts`                         | 长期记忆核心               |
 | `src/Memory/runtime.ts`                        | 长期记忆运行时集成         |
-| `src/mcp/tool-adapter.ts`                      | MCP 工具适配器             |
-| `src/mcp/stdio-client.ts`                      | MCP stdio 客户端           |
-| `src/mcp/http-client.ts`                       | MCP HTTP 客户端            |
+| `src/mcp/tool-adapter.ts`                      | ==MCP== 工具适配器         |
+| `src/mcp/stdio-client.ts`                      | ==MCP== stdio 客户端       |
+| `src/mcp/http-client.ts`                       | ==MCP== HTTP 客户端        |
 | `src/transcript/persistence.ts`                | 对话持久化与恢复           |
 | `src/system-prompt.ts`                         | 系统提示词组装             |
 | `src/types/runtime.ts`                         | Runtime 类型定义           |
@@ -852,12 +1026,12 @@ MemoryTool 在首次使用时才初始化，避免不必要的资源消耗（不
 
 ### 待解答
 
-| # | 问题 | 提问时间 | 回答 |
-|---|------|----------|------|
-| — | _等待你的第一个问题..._ | — | — |
+| #  | 问题                      | 提问时间 | 回答 |
+| -- | ------------------------- | -------- | ---- |
+| — | _等待你的第一个问题..._ | —       | —   |
 
 ### 已解答
 
-| # | 问题 | 提问时间 | 回答 |
-|---|------|----------|------|
-| 1 | `parentAgentId` 在 Runtime 中的作用是什么？ | 2026-07-02 | 用于追踪 agent 父子层级关系。父 agent spawn 子 agent 时，在 `createChildAgentRuntime()` 中设置。被 transcript 持久化、telemetry 事件、Perfetto trace 可视化等模块消费，提供 agent 调用链溯源能力。 |
+| # | 问题                                          | 提问时间   | 回答                                                                                                                                                                                                |
+| - | --------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 | `parentAgentId` 在 Runtime 中的作用是什么？ | 2026-07-02 | 用于追踪 agent 父子层级关系。父 agent spawn 子 agent 时，在`createChildAgentRuntime()` 中设置。被 transcript 持久化、telemetry 事件、Perfetto trace 可视化等模块消费，提供 agent 调用链溯源能力。 |

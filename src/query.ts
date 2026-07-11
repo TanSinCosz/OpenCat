@@ -1,20 +1,11 @@
 import { executeToolCall } from "./Tools/executor.js";
 import { drainAgentMessages } from "./Tools/Agent/state.js";
 import type { DeepSeekAssistantMessage } from "./deepseek/types.js";
-import { createMessage, toDeepSeekMessage, type Message, type ToolMessage } from "./types/messages.js";
-import { persistLargeToolResultIfNeeded } from "./tool-results/persistence.js";
+import { createMessage, toDeepSeekMessage, type ToolMessage } from "./types/messages.js";
 import type { Runtime } from "./types/runtime.js";
 import type { State } from "./types/state.js";
 import { streamAssistantWithReasoningContinuation } from "./query/reasoning-continuation.js";
-import {
-  applyBulkyToolResultCompression,
-  applyHistorySnip,
-  applyToolResultBudget,
-  createHistorySnipBoundaryIfNeeded,
-  getHistorySnipBoundaries,
-  getOrCreateSystemPrompt,
-  projectMessagesWithHistorySnips,
-} from "./query/messages.js";
+import { buildMessagesForQuery } from "./query/messages.js";
 import { createStreamRequest } from "./query/request.js";
 import type { MessagesForQuery, QueryEvent, QueryOptions } from "./query/types.js";
 import { snapshotRuntimeUsage } from "./query/usage.js";
@@ -31,7 +22,7 @@ import {
 } from "./query/runtime-context.js";
 import {
   applyAutoCompression,
-  projectMessagesWithAutoCompress,
+  applyAutoCompressSummary,
 } from "./auto-compress/index.js";
 import {
   recordTranscriptMessage,
@@ -85,19 +76,42 @@ export async function* _query(
     for (let turn = 1; turn <= maxTurns; turn++) {
       throwIfQueryAborted(runtime);
 
-      // Phase A: attach per-turn context into state.Messages before projection.
-      // Subagent: drain queued parent-agent messages into state.Messages.
+      // Phase A: drain durable parent-to-child messages before building.
       await drainPendingAgentMessagesForRuntime(runtime, state);
-      // Notifications from completed async subagents → runtimeContextMessages.
-      await loadRuntimeContextForQuery(runtime, state);
-      // Newly discovered project skills → runtimeContextMessages.
-      await loadDynamicSkillContextForQuery(runtime, state);
-      // Long-term memory recall + pack runtimeContextMessages → state.Messages.
-      await materializeProjectionContextForQuery(runtime, state);
 
-      // Phase B: project + compress (tool result budget → history snip).
-      const messagesForQuery = await projectMessages(runtime, state);
-      
+      // Phase B: project first, then compact State only if the request is still too large.
+      const historySnipCountBeforeBuild = state.historySnips.length;
+      let messagesForQuery = await buildMessagesForQuery(runtime, state);
+      await recordHistorySnipSnapshotIfNeeded(
+        runtime,
+        state,
+        historySnipCountBeforeBuild,
+      );
+
+      if (shouldApplyAutoCompression(runtime, messagesForQuery)) {
+        const autoCompressResult = await applyAutoCompressionWithTelemetry(
+          runtime,
+          state,
+          messagesForQuery.forkContextMessages,
+        );
+
+        if (autoCompressResult.status === "compressed") {
+          await recordTranscriptStateSnapshot(runtime, state, "auto_compress");
+        }
+      }
+
+      // Phase C: append volatile/generated context after auto-compress so it is
+      // visible to the model but not swallowed by the compaction prompt.
+      await materializeRequestContext(runtime, state);
+      const historySnipCountBeforeFinalBuild = state.historySnips.length;
+      messagesForQuery = await buildMessagesForQuery(runtime, state);
+      await recordHistorySnipSnapshotIfNeeded(
+        runtime,
+        state,
+        historySnipCountBeforeFinalBuild,
+      );
+      await recordProjectionSnapshotIfNeeded(runtime, state, messagesForQuery);
+
       await emitRunEvent(runtime, {
         type: "context_ready",
         turn,
@@ -110,11 +124,23 @@ export async function* _query(
           "<local_compact_summary>",
         ) || hasTaggedMessage(messagesForQuery, "<session_memory>"),
         runtimeContextMessageCount: state.runtimeContextMessages.length,
+        toolResultBudgetReplacementCount:
+          messagesForQuery.stats.toolResultBudgetReplacementCount,
+        bulkyToolCompactCount: messagesForQuery.stats.bulkyToolCompactCount,
+        historySnipCount: messagesForQuery.stats.historySnipCount,
+        hardHistorySnipApplied: messagesForQuery.stats.hardHistorySnipApplied,
+        toolResultCharsBeforeBudget:
+          messagesForQuery.stats.toolResultCharsBeforeBudget,
+        toolResultCharsAfterBudget:
+          messagesForQuery.stats.toolResultCharsAfterBudget,
+        toolResultCharsAfterCompact:
+          messagesForQuery.stats.toolResultCharsAfterCompact,
       });
       yield {
         type: "context_ready",
         systemPrompt: messagesForQuery.systemPrompt,
         messages: messagesForQuery.messages,
+        stats: messagesForQuery.stats,
       };
 
       const request = await createStreamRequest(runtime, messagesForQuery.messages);
@@ -130,6 +156,7 @@ export async function* _query(
 
       const persistedAssistantMessage = createMessage(assistantMessage, {
         usage: assistantResult.usage,
+        contextTokenCount: assistantResult.contextTokenCount,
       });
       state.Messages.push(persistedAssistantMessage);
       await recordTranscriptMessage(runtime, persistedAssistantMessage);
@@ -191,34 +218,27 @@ export async function* _query(
           runtime,
           state,
         );
-        const persistedToolResultMessage = await persistLargeToolResultIfNeeded({
-          runtime,
-          message: createMessage(toolResultMessage) as ToolMessage,
+        const stateToolResultMessage = {
+          ...(createMessage(toolResultMessage) as ToolMessage),
           toolName: toolCall.function.name,
-          maxResultSizeChars: runtime.tools.find((tool) =>
-            tool.name === toolCall.function.name
-          )?.maxResultSizeChars,
-        });
+        };
         await emitRunEvent(runtime, {
           type: "tool_call_finished",
           turn,
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
-          resultChars: persistedToolResultMessage.content.length,
+          resultChars: stateToolResultMessage.content.length,
           durationMs: Date.now() - toolStartedAt,
-          persistedToolResult: Boolean(
-            persistedToolResultMessage.persistedToolResult,
-          ),
-          persistedToolResultPath:
-            persistedToolResultMessage.persistedToolResult?.path,
+          persistedToolResult: false,
+          persistedToolResultPath: undefined,
         });
         throwIfQueryAborted(runtime);
-        state.Messages.push(persistedToolResultMessage);
-        await recordTranscriptMessage(runtime, persistedToolResultMessage);
+        state.Messages.push(stateToolResultMessage);
+        await recordTranscriptMessage(runtime, stateToolResultMessage);
         yield {
           type: "tool_result",
           toolCall,
-          message: toDeepSeekMessage(persistedToolResultMessage),
+          message: toDeepSeekMessage(stateToolResultMessage),
         };
       }
 
@@ -250,71 +270,41 @@ export async function* _query(
   }
 }
 
-/**
- * Project messages for a model request.  Tool result budget → history snip.
- * Read-only on state.Messages.  State.historySnips may grow when hard
- * truncation alone cannot bring the projection under the context limit.
- */
-async function projectMessages(
+async function materializeRequestContext(
   runtime: Runtime,
   state: State,
-): Promise<MessagesForQuery> {
-  const systemPrompt = await getOrCreateSystemPrompt(runtime);
-
-  // Work on a copy so prompt projection never mutates state.Messages.
-  const budgetedMessages = applyBulkyToolResultCompression(
-    applyToolResultBudget(
-      cloneMessages(state.Messages),
-      runtime,
-    ),
-    runtime,
-  );
-
-  // Apply existing history snip boundaries (business messages).
-  let projectedMessages = projectMessagesWithHistorySnips(
-    state,
-    budgetedMessages,
-  );
-
-  const boundaryCandidateMessages = [
-    { role: "system" as const, content: systemPrompt },
-    ...projectedMessages.map(toDeepSeekMessage),
-  ];
-  const historySnipBoundary = createHistorySnipBoundaryIfNeeded(
-    boundaryCandidateMessages,
-    projectedMessages,
-  );
-
-  if (historySnipBoundary) {
-    getHistorySnipBoundaries(state).push(historySnipBoundary);
-    const reprojectedBudgetedMessages = applyBulkyToolResultCompression(
-      applyToolResultBudget(
-        cloneMessages(state.Messages),
-        runtime,
-      ),
-      runtime,
-    );
-    projectedMessages = projectMessagesWithHistorySnips(
-      state,
-      reprojectedBudgetedMessages,
-    );
-  }
-
-  // History snip — hard truncation from the head.
-  const sniped = applyHistorySnip(projectedMessages);
-
-  // Convert to DeepSeek wire format at the end.
-  return {
-    systemPrompt,
-    messages: [
-      { role: "system" as const, content: systemPrompt },
-      ...sniped.map(toDeepSeekMessage),
-    ],
-  };
+): Promise<void> {
+  await loadRuntimeContextForQuery(runtime, state);
+  await loadDynamicSkillContextForQuery(runtime, state);
+  await materializeContextForQuery(runtime, state);
 }
 
-function cloneMessages(messages: readonly Message[]): Message[] {
-  return messages.map((message) => ({ ...message }) as Message);
+async function recordHistorySnipSnapshotIfNeeded(
+  runtime: Runtime,
+  state: State,
+  historySnipCountBefore: number,
+): Promise<void> {
+  if (state.historySnips.length <= historySnipCountBefore) {
+    return;
+  }
+
+  await recordTranscriptStateSnapshot(runtime, state, "history_snip");
+}
+
+async function recordProjectionSnapshotIfNeeded(
+  runtime: Runtime,
+  state: State,
+  messagesForQuery: MessagesForQuery,
+): Promise<void> {
+  const stats = messagesForQuery.stats;
+  if (
+    stats.toolResultBudgetReplacementCount === 0 &&
+    stats.bulkyToolCompactCount === 0
+  ) {
+    return;
+  }
+
+  await recordTranscriptStateSnapshot(runtime, state, "projection");
 }
 
 async function drainPendingAgentMessagesForRuntime(
@@ -365,16 +355,16 @@ function renderPendingAgentMessages(messages: readonly string[]): string {
   ].join("\n");
 }
 
-async function materializeProjectionContextForQuery(
+async function materializeContextForQuery(
   runtime: Runtime,
   state: State,
 ): Promise<number> {
-  // TODO: this couples attachment logic to auto-compress projection.
-  // Should use raw state.Messages (or a non-auto-compress projection)
+  // TODO: this couples attachment logic to the auto-compress summary view.
+  // Should use raw state.Messages (or a non-auto-compress request view)
   // for the long-term-memory recall query instead.
-  const projectedMessages = projectMessagesWithAutoCompress(state);
+  const visibleMessages = applyAutoCompressSummary(state);
   const longTermMemoryMessage = shouldAttachLongTermMemory(state)
-    ? await createLongTermMemoryContextMessage(runtime, projectedMessages)
+    ? await createLongTermMemoryContextMessage(runtime, visibleMessages)
     : null;
   const contextMessage = createProjectionContextStateMessage([
     ...(longTermMemoryMessage
@@ -395,11 +385,48 @@ async function materializeProjectionContextForQuery(
     return 0;
   }
 
+  removePreviousDynamicSkillContext(state);
   state.Messages.push(contextMessage);
   state.runtimeContextMessages = [];
   await recordTranscriptMessage(runtime, contextMessage);
   await recordTranscriptStateSnapshot(runtime, state, "runtime_context");
   return 1;
+}
+
+function removePreviousDynamicSkillContext(state: State): number {
+  let changed = 0;
+  state.Messages = state.Messages.flatMap((message) => {
+    if (
+      message.role !== "user" ||
+      message.name !== "opencat_context" ||
+      typeof message.content !== "string"
+    ) {
+      return [message];
+    }
+
+    const content = stripDynamicSkillContextBlocks(message.content);
+    if (content === message.content) {
+      return [message];
+    }
+
+    changed++;
+    if (!content.includes("<context_block source=")) {
+      return [];
+    }
+
+    return [{ ...message, content }];
+  });
+  return changed;
+}
+
+function stripDynamicSkillContextBlocks(content: string): string {
+  return content
+    .replace(
+      /(?:\r?\n)?<context_block source="dynamic_skill">[\s\S]*?<\/context_block>(?:\r?\n)?/g,
+      "\n",
+    )
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\n<\/opencat_context>/, "\n</opencat_context>");
 }
 
 function shouldAttachLongTermMemory(state: State): boolean {
@@ -410,13 +437,16 @@ function shouldAttachLongTermMemory(state: State): boolean {
 async function applyAutoCompressionWithTelemetry(
   runtime: Runtime,
   state: State,
+  forkContextMessages: MessagesForQuery["forkContextMessages"],
 ) {
   const beforeMessageCount = state.Messages.length;
   await emitRunEvent(runtime, {
     type: "auto_compress_started",
     messageCount: beforeMessageCount,
   });
-  const result = await applyAutoCompression(runtime, state);
+  const result = await applyAutoCompression(runtime, state, {
+    forkContextMessages,
+  });
   await emitRunEvent(runtime, {
     type: "auto_compress_finished",
     status: result.status,

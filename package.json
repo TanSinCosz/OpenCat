@@ -11,6 +11,8 @@
     "web": "tsx src/web-cli.ts",
     "deepseek:example": "tsx src/deepseek/example.ts",
     "smoke:auto-compress:real": "tsx scripts/smoke-auto-compress-real.ts",
+    "eval:swe-cache:prepare": "python scripts/load_swe_verified_dataset.py --output .opencat/evals/swe-verified-cache/dataset.jsonl --limit 5",
+    "eval:swe-cache": "tsx scripts/eval-swe-verified-cache.ts",
     "test:auto-compress": "tsx --test tests/query-auto-compress.test.ts",
     "start": "node dist/main.js"
   },

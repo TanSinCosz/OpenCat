@@ -15,20 +15,20 @@ const LONG_TERM_MEMORY_CONTEXT_MESSAGES = 20;
 /**
  * Builds a transient model-visible memory block.
  *
- * This deliberately returns a projection message instead of mutating
+ * This deliberately returns a transient context message instead of mutating
  * State.Messages: long-term memory is external context, not part of the
  * authoritative conversation transcript.
  */
 export async function createLongTermMemoryContextMessage(
   runtime: Runtime,
-  projectedMessages: readonly Message[],
+  messages: readonly Message[],
 ): Promise<DeepSeekMessage | null> {
   const config = runtime.longTermMemoryConfig;
   if (!config.enabled || !config.autoInject) {
     return null;
   }
 
-  const query = buildLongTermMemoryQuery(projectedMessages);
+  const query = buildLongTermMemoryQuery(messages);
   if (!query) {
     return null;
   }

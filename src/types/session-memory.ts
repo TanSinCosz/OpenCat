@@ -4,14 +4,12 @@ export interface SessionMemoryConfig {
   minimumMessageTokensToInit: number;
   minimumTokensBetweenUpdate: number;
   toolCallsBetweenUpdates: number;
-  maxTranscriptChars: number;
 }
 
 export const DEFAULT_SESSION_MEMORY_CONFIG: SessionMemoryConfig = {
-  minimumMessageTokensToInit: 80_000,
-  minimumTokensBetweenUpdate: 20_000,
+  minimumMessageTokensToInit: 10_000,
+  minimumTokensBetweenUpdate: 5_000,
   toolCallsBetweenUpdates: 3,
-  maxTranscriptChars: 120_000,
 };
 
 export type SessionMemoryStatus = "idle" | "ready" | "failed";

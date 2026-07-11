@@ -50,6 +50,14 @@ export class FileWrite implements Tool<typeInput, typeOutput, typeof inputSchema
         return false;
     }
 
+    formatResult({ output }: { output: typeOutput }): string {
+        if (output.type === 'create') {
+            return `The file ${output.filePath} has been created successfully.`
+        }
+
+        return `The file ${output.filePath} has been updated successfully.`
+    }
+
     async validateInput(
         { file_path }: typeInput,
         context: ToolUseContext,

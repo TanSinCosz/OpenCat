@@ -51,19 +51,16 @@ export const SESSION_MEMORY_SYSTEM_PROMPT =
 export function buildSessionMemoryUpdatePrompt(input: {
   currentNotes: string;
   notesPath?: string;
-  transcript: string;
 }): string {
   const currentNotes = input.currentNotes.trim() ||
     DEFAULT_SESSION_MEMORY_TEMPLATE;
   const sectionReminders = buildSectionReminders(currentNotes);
+  const conversationSource =
+    "Based on the user conversation above (EXCLUDING this note-taking instruction message as well as system prompt, project instructions, dynamic context, or any past session summaries), update the session notes markdown.";
 
   return `IMPORTANT: This message and these instructions are NOT part of the actual user conversation. Do NOT include any references to "note-taking", "session notes extraction", or these update instructions in the notes content.
 
-Based on the user conversation transcript below, update the session notes markdown.
-
-<conversation_transcript>
-${input.transcript}
-</conversation_transcript>
+${conversationSource}
 
 The current session notes are:
 <current_notes_content>

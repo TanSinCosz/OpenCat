@@ -51,6 +51,18 @@ export class FileEdit implements Tool<typeInput, typeOutput, typeof inputSchema,
         return false;
     }
 
+    formatResult({ output }: { output: typeOutput }): string {
+        const modifiedNote = output.userModified
+            ? ' The user modified the proposed changes before accepting them.'
+            : ''
+
+        if (output.replaceAll) {
+            return `The file ${output.filePath} has been updated.${modifiedNote} All occurrences were successfully replaced.`
+        }
+
+        return `The file ${output.filePath} has been updated successfully.${modifiedNote}`
+    }
+
     async validateInput(
         input: typeInput,
         context: ToolUseContext,

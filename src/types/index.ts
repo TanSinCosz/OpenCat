@@ -55,10 +55,6 @@ export {
   type TranscriptStateSnapshotEntry,
   type TranscriptStore,
 } from "../transcript/persistence.js";
-export {
-  persistLargeToolResultIfNeeded,
-  type PersistToolResultOptions,
-} from "../tool-results/persistence.js";
 export type { EvaluationEvent } from "../telemetry/events.js";
 export { JsonlRunObserver } from "../telemetry/jsonl.js";
 export {
