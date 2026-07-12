@@ -57,9 +57,9 @@ export interface MessagesForQuery {
 
 export interface MessageProjectionStats {
   toolResultBudgetReplacementCount: number;
+  bulkyToolCompactNeeded: boolean;
   bulkyToolCompactCount: number;
   historySnipCount: number;
-  hardHistorySnipApplied: boolean;
   toolResultCharsBeforeBudget: number;
   toolResultCharsAfterBudget: number;
   toolResultCharsAfterCompact: number;

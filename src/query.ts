@@ -48,7 +48,7 @@ export {
   loadRuntimeContextForQuery,
 } from "./query/runtime-context.js";
 
-const DEFAULT_AUTO_COMPRESS_TRIGGER_TOKENS = 160_000;
+const DEFAULT_AUTO_COMPRESS_TRIGGER_TOKENS = 180_000;
 
 export async function* query(
   runtime: Runtime,
@@ -92,7 +92,6 @@ export async function* _query(
         const autoCompressResult = await applyAutoCompressionWithTelemetry(
           runtime,
           state,
-          messagesForQuery.forkContextMessages,
         );
 
         if (autoCompressResult.status === "compressed") {
@@ -128,7 +127,6 @@ export async function* _query(
           messagesForQuery.stats.toolResultBudgetReplacementCount,
         bulkyToolCompactCount: messagesForQuery.stats.bulkyToolCompactCount,
         historySnipCount: messagesForQuery.stats.historySnipCount,
-        hardHistorySnipApplied: messagesForQuery.stats.hardHistorySnipApplied,
         toolResultCharsBeforeBudget:
           messagesForQuery.stats.toolResultCharsBeforeBudget,
         toolResultCharsAfterBudget:
@@ -437,16 +435,13 @@ function shouldAttachLongTermMemory(state: State): boolean {
 async function applyAutoCompressionWithTelemetry(
   runtime: Runtime,
   state: State,
-  forkContextMessages: MessagesForQuery["forkContextMessages"],
 ) {
   const beforeMessageCount = state.Messages.length;
   await emitRunEvent(runtime, {
     type: "auto_compress_started",
     messageCount: beforeMessageCount,
   });
-  const result = await applyAutoCompression(runtime, state, {
-    forkContextMessages,
-  });
+  const result = await applyAutoCompression(runtime, state);
   await emitRunEvent(runtime, {
     type: "auto_compress_finished",
     status: result.status,

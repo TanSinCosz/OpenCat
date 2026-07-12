@@ -27,7 +27,6 @@ export type EvaluationEvent = TelemetryAgentFields & (
     toolResultBudgetReplacementCount: number;
     bulkyToolCompactCount: number;
     historySnipCount: number;
-    hardHistorySnipApplied: boolean;
     toolResultCharsBeforeBudget: number;
     toolResultCharsAfterBudget: number;
     toolResultCharsAfterCompact: number;

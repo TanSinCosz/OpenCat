@@ -5,58 +5,27 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   compactBulkyToolResults,
-  enforceHistoryLimit,
   budgetToolResults,
   buildMessagesForQuery,
 } from "../src/query/messages.js";
-import { createMessage, type Message } from "../src/types/messages.js";
+import { createMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 
-test("enforceHistoryLimit does not snip around the old 260k char threshold", () => {
-  const originalHardTokens = process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS;
-
-  try {
-    delete process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS;
-
-    const messages = createMessages(30, 10_000);
-    const limited = enforceHistoryLimit(messages);
-
-    assert.equal(limited.length, messages.length);
-    assert.equal(limited, messages);
-  } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_TOKENS", originalHardTokens);
-  }
-});
-
-test("enforceHistoryLimit still works as a hard fallback when explicitly configured", () => {
-  const originalHardTokens = process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS;
+test("buildMessagesForQuery records durable snip boundaries after bulky compact misses target", async () => {
+  const originalTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
+  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalBulkyCompactTargetTokens =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
+  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS = "300";
-    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "3";
-
-    const messages = createMessages(10, 500);
-    const limited = enforceHistoryLimit(messages);
-
-    assert.ok(limited.length < messages.length);
-    assert.equal(limited[0]?.role, "system");
-    assert.match(limited[1]?.content ?? "", /History snipped/);
-    assert.ok(limited.length >= 5);
-  } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_TOKENS", originalHardTokens);
-    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
-  }
-});
-
-test("buildMessagesForQuery records durable snip boundaries before hard snipping", async () => {
-  const originalHardTokens = process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS;
-  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
-
-  try {
-    process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS = "3500";
+    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "800";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "2000";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
 
     const state = createState({
       messages: [
@@ -99,8 +68,8 @@ test("buildMessagesForQuery records durable snip boundaries before hard snipping
       tools: [],
     });
 
-    // The old tool round is eligible for durable removal, so the decision is
-    // recorded before the hard snip fallback runs.
+    // The old tool round is eligible for durable removal after bulky compact
+    // cannot reach the configured context target.
     const first = await buildMessagesForQuery(runtime, state);
     const removedIds = new Set(
       state.historySnips[0]?.removedMessageIds ?? [],
@@ -116,19 +85,23 @@ test("buildMessagesForQuery records durable snip boundaries before hard snipping
 
     assert.equal(state.historySnips.length, 1);
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_TOKENS", originalHardTokens);
+    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalTargetTokens);
     restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
+    restoreEnv(
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalBulkyCompactTargetTokens,
+    );
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
   }
 });
 
 test("buildMessagesForQuery does not mark snipped Read cache entries as partial views", async () => {
-  const originalHardTokens = process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS;
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
   const cwd = await mkdtemp(join(tmpdir(), "opencat-snip-read-"));
   const filePath = join(cwd, "old.ts");
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS = "3500";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
 
     const state = createState({
@@ -186,21 +159,27 @@ test("buildMessagesForQuery does not mark snipped Read cache entries as partial 
       undefined,
     );
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_TOKENS", originalHardTokens);
     restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
   }
 });
 
-test("buildMessagesForQuery persists hard snip fallback boundaries", async () => {
-  const originalHardTokens = process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS;
+test("buildMessagesForQuery persists snip boundaries after bulky compact misses target", async () => {
+  const originalTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
+  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalBulkyCompactTargetTokens =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
+  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
 
   try {
-    // Use a threshold low enough that selective candidates cannot satisfy the
-    // removal target. The hard fallback is still recorded as a durable boundary
-    // so subsequent turns keep the same prefix shape.
-    process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS = "950";
+    // Use a target low enough that bulky compact alone cannot satisfy the
+    // removal target. The snip is still recorded as a durable boundary so
+    // subsequent turns keep the same prefix shape.
+    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "500";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "2000";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
 
     const state = createState({
       messages: [
@@ -259,15 +238,25 @@ test("buildMessagesForQuery persists hard snip fallback boundaries", async () =>
       /large old tool result/,
     );
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_TOKENS", originalHardTokens);
+    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalTargetTokens);
     restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
+    restoreEnv(
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalBulkyCompactTargetTokens,
+    );
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
   }
 });
 
 
 test("buildMessagesForQuery records durable snip boundaries for old attachment context", async () => {
-  const originalHardTokens = process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS;
+  const originalTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
+  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalBulkyCompactTargetTokens =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
+  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
   const attachmentSources = [
     "runtime",
     "long_term_memory",
@@ -278,8 +267,11 @@ test("buildMessagesForQuery records durable snip boundaries for old attachment c
   ] as const;
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS = "3500";
+    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "800";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "4000";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
 
     for (const source of attachmentSources) {
       const attachment = createMessage({
@@ -290,6 +282,25 @@ test("buildMessagesForQuery records durable snip boundaries for old attachment c
         messages: [
           createMessage({ role: "user", content: "old user request" }),
           attachment,
+          createMessage({
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              {
+                id: `call_old_read_${source}`,
+                type: "function",
+                function: {
+                  name: "Read",
+                  arguments: "{\"file_path\":\"old.ts\"}",
+                },
+              },
+            ],
+          }),
+          createMessage({
+            role: "tool",
+            tool_call_id: `call_old_read_${source}`,
+            content: "large old tool result\n" + "x".repeat(12_000),
+          }),
           ...Array.from({ length: 8 }, (_, index) =>
             createMessage({
               role: "user",
@@ -319,20 +330,31 @@ test("buildMessagesForQuery records durable snip boundaries for old attachment c
       assert.doesNotMatch(JSON.stringify(first.messages), /old attachment/);
     }
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_TOKENS", originalHardTokens);
+    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalTargetTokens);
     restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
+    restoreEnv(
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalBulkyCompactTargetTokens,
+    );
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
   }
 });
 
 test("buildMessagesForQuery keeps old user and assistant text as content-only history", async () => {
-  const originalHardTokens = process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS;
   const originalTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
   const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
+  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalBulkyCompactTargetTokens =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
+  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_HARD_TOKENS = "1500";
     process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "800";
     process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "5";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "1200";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
 
     const oldUser = createMessage({
       role: "user",
@@ -404,18 +426,99 @@ test("buildMessagesForQuery keeps old user and assistant text as content-only hi
 
     assert.equal(state.historySnips.length, 1);
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_HARD_TOKENS", originalHardTokens);
     restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalTargetTokens);
     restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
+    restoreEnv(
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalBulkyCompactTargetTokens,
+    );
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
   }
 });
 
-test("compactBulkyToolResults compacts older read-like outputs when the target pool is oversized", () => {
-  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS;
+test("buildMessagesForQuery skips history snip when bulky compact reaches the target", async () => {
+  const originalHistoryTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
+  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalBulkyCompactTargetTokens =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
   const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
 
   try {
-    process.env.OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS = "3000";
+    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "5000";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "5000";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
+
+    const state = createState({
+      messages: [
+        createMessage({ role: "user", content: "old user request" }),
+        createMessage({
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_large_read",
+              type: "function",
+              function: {
+                name: "Read",
+                arguments: "{\"file_path\":\"large.ts\"}",
+              },
+            },
+          ],
+        }),
+        createMessage({
+          role: "tool",
+          tool_call_id: "call_large_read",
+          content: "large-read-head\n" + "x".repeat(30_000) + "\nlarge-read-tail",
+        }),
+        ...Array.from({ length: 5 }, (_, index) =>
+          createMessage({
+            role: "user",
+            content: `recent user ${index}`,
+          })
+        ),
+      ],
+    });
+    const runtime = createRuntime({
+      deepSeekRuntimeConfig: {
+        apiKey: "test-key",
+        model: "deepseek-v4-flash",
+        maxTokens: 1024,
+      },
+      MemoryConfig: createMemoryConfig(),
+      transcriptStore: false,
+      tools: [],
+    });
+
+    const result = await buildMessagesForQuery(runtime, state);
+    const serialized = JSON.stringify(result.messages);
+
+    assert.equal(state.historySnips.length, 0);
+    assert.equal(result.stats.historySnipCount, 0);
+    assert.ok(result.stats.bulkyToolCompactCount > 0);
+    assert.match(serialized, /<tool-result-compact>/);
+    assert.doesNotMatch(serialized, /x{5000}/);
+  } finally {
+    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalHistoryTargetTokens);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
+    restoreEnv(
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalBulkyCompactTargetTokens,
+    );
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+  }
+});
+
+test("compactBulkyToolResults compacts older read-like outputs under context pressure", () => {
+  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalCompactTarget =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
+  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+
+  try {
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "3000";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "3000";
     process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "1";
     const runtime = createRuntime({
       deepSeekRuntimeConfig: {
@@ -497,20 +600,27 @@ test("compactBulkyToolResults compacts older read-like outputs when the target p
     assert.equal(secondCompacted[1]?.role, "tool");
     assert.equal(oldReadResult.content, secondCompacted[1].content);
   } finally {
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS", originalThreshold);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalThreshold);
+    restoreEnv(
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalCompactTarget,
+    );
     restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
   }
 });
 
 test("compactBulkyToolResults does not mark compacted Read cache entries as partial views", async () => {
-  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS;
+  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalCompactTarget =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
   const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
   const cwd = await mkdtemp(join(tmpdir(), "opencat-partial-read-"));
   const oldFilePath = join(cwd, "old.ts");
   const recentFilePath = join(cwd, "recent.ts");
 
   try {
-    process.env.OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS = "3000";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "3000";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "3000";
     process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "1";
     const runtime = createRuntime({
       cwd,
@@ -582,20 +692,24 @@ test("compactBulkyToolResults does not mark compacted Read cache entries as part
       undefined,
     );
   } finally {
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS", originalThreshold);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalThreshold);
+    restoreEnv(
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalCompactTarget,
+    );
     restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
   }
 });
 
 test("compactBulkyToolResults compacts read-like outputs under context pressure", () => {
-  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS;
-  const originalContextThreshold =
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalCompactTarget =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
   const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
 
   try {
-    process.env.OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS = "12500";
     process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "2500";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "2500";
     process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "1";
     const runtime = createRuntime({
       deepSeekRuntimeConfig: {
@@ -659,24 +773,24 @@ test("compactBulkyToolResults compacts read-like outputs under context pressure"
     assert.match(oldReadResult.content, /Tool result from Read was compacted/);
     assert.match(recentReadResult.content, /recent-read-tail/);
   } finally {
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS", originalThreshold);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalThreshold);
     restoreEnv(
-      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS",
-      originalContextThreshold,
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalCompactTarget,
     );
     restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
   }
 });
 
 test("compactBulkyToolResults defaults to context-pressure compact with five recent results kept", () => {
-  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS;
-  const originalContextThreshold =
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalCompactTarget =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
   const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
 
   try {
-    delete process.env.OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS;
     delete process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+    delete process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
     delete process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
     const runtime = createRuntime({
       deepSeekRuntimeConfig: {
@@ -729,10 +843,10 @@ test("compactBulkyToolResults defaults to context-pressure compact with five rec
     assert.match(oldReadResult.content, /<tool-result-compact>/);
     assert.match(firstProtectedReadResult.content, /read-4-tail/);
   } finally {
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_TARGET_TOKENS", originalThreshold);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalThreshold);
     restoreEnv(
-      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS",
-      originalContextThreshold,
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalCompactTarget,
     );
     restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
   }
@@ -969,21 +1083,6 @@ test("budgetToolResults keys decisions by local tool message id", async () => {
   assert.equal(secondToolResult.content, "small-result");
 });
 
-function createMessages(count: number, charsPerMessage: number): Message[] {
-  return [
-    createMessage({
-      role: "system",
-      content: "stable system prompt",
-    }),
-    ...Array.from({ length: count }, (_, index) =>
-      createMessage({
-        role: "user" as const,
-        content: `message ${index}\n${"x".repeat(charsPerMessage)}`,
-      })
-    ),
-  ];
-}
-
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
     delete process.env[name];
@@ -1009,3 +1108,5 @@ function createMemoryConfig() {
     },
   };
 }
+
+

@@ -6,18 +6,18 @@ OpenCat 是一个基于 **DeepSeek** 大语言模型的编码 AI 智能体（Cod
 
 ### 核心能力一览
 
-| 能力                   | 说明                                                         |
-| ---------------------- | ------------------------------------------------------------ |
-| **文件操作**     | 读取、写入、搜索替换编辑文件                                 |
-| **代码搜索**     | 正则搜索（Grep）、文件模式匹配（Glob）                       |
-| **Shell 执行**   | 在隔离的工作目录中执行 Bash 命令                             |
+| 能力                       | 说明                                                         |
+| -------------------------- | ------------------------------------------------------------ |
+| **文件操作**         | 读取、写入、搜索替换编辑文件                                 |
+| **代码搜索**         | 正则搜索（Grep）、文件模式匹配（Glob）                       |
+| **Shell 执行**       | 在隔离的工作目录中执行 Bash 命令                             |
 | **==MCP== 协议** | 通过 stdio 或 HTTP 连接外部工具服务器                        |
-| **项目技能**     | 自动发现并加载项目中的`.claude/skills/` 技能文件           |
-| **上下文压缩**   | 当对话过长时自动压缩历史，控制 API 成本                      |
-| **上下文恢复**   | 从 JSONL 对话记录中恢复完整的会话状态                        |
-| **长期记忆**     | 基于向量搜索的持久化记忆系统                                 |
-| **多智能体协作** | 主智能体可将任务委派给专用子智能体（支持 git worktree 隔离） |
-| **Web 调试界面** | 内置 Web CLI，支持流式消息展示和历史会话管理                 |
+| **项目技能**         | 自动发现并加载项目中的`.claude/skills/` 技能文件           |
+| **上下文压缩**       | 当对话过长时自动压缩历史，控制 API 成本                      |
+| **上下文恢复**       | 从 JSONL 对话记录中恢复完整的会话状态                        |
+| **长期记忆**         | 基于向量搜索的持久化记忆系统                                 |
+| **多智能体协作**     | 主智能体可将任务委派给专用子智能体（支持 git worktree 隔离） |
+| **Web 调试界面**     | 内置 Web CLI，支持流式消息展示和历史会话管理                 |
 
 ---
 
@@ -156,46 +156,329 @@ src/
 
 ## 三、工具系统（Tool System）
 
-### 3.1 Tool 接口
+### 3.1 文件与职责
 
-每个工具实现统一的 `Tool<Input, Output>` 接口：
+| 文件                        | 职责                                                                             |
+| --------------------------- | -------------------------------------------------------------------------------- |
+| `src/Tools/types.ts`      | `Tool` 接口、`ToolUseContext`、`FileStateCache`、`SkillRuntimeState`     |
+| `src/Tools/executor.ts`   | 工具执行管道：查找 → 解析 → 校验 → 权限 → 调用 → 格式化                     |
+| `src/Tools/index.ts`      | 内置 12 工具的注册数组，MCP 工具合并                                             |
+| 各`src/Tools/{ToolName}/` | 每个工具独立目录：`{ToolName}.ts` + `prompt.ts` + `type.ts` + `state.ts` |
+
+### 3.2 Tool 接口
+
+每个工具实现统一的 `Tool<TInput, TOutput>` 泛型接口：
 
 ```typescript
-interface Tool<Input = unknown, Output = unknown> {
-  name: string;
-  inputSchema: () => ZodSchema;      // 输入参数校验（Zod）
-  outputSchema: ZodSchema;           // 输出类型校验
-  strict: boolean;                   // 是否要求 DeepSeek 严格函数调用
-  maxResultSizeChars?: number;       // 结果字符上限
-  shouldDefer: boolean;              // 是否推迟到下一轮执行
-  alwaysLoad: boolean;               // 是否始终加载
-  isConcurrencySafe(): boolean;      // 是否并发安全
-  description(): Promise<string>;    // 工具描述（写入系统提示词）
-  prompt(): Promise<string>;         // 使用指南（写入系统提示词）
-  call(input, context, runtime, state): Promise<Output>;
+interface Tool<
+    TInput = Record<string, unknown>,
+    TOutput = ToolExecutionValue,
+    TInputSchema extends ToolInputSchema = ToolInputSchema,
+    TOutputSchema extends ToolOutputSchema = ToolOutputSchema,
+> {
+    name: string;
+    inputSchema: TInputSchema;         // Zod schema，用于参数校验+function calling
+    outputSchema: TOutputSchema;       // Zod schema，输出类型校验
+    inputJsonSchema?: JSONSchemaObject; // 可选的 JSON Schema（MCP 工具的 schema 双轨制）
+    maxResultSizeChars?: number;       // 结果字符上限，超出的触发大体积工具压缩
+    searchHint?: string;              // 搜索提示（未充分使用）
+    shouldDefer?: boolean;            // 推迟到下一轮批量执行
+    alwaysLoad?: boolean;             // 始终加载（不受工具过滤影响）
+    strict?: boolean;                 // DeepSeek strict function calling 模式
+
+    description(): MaybePromise<string>;   // 系统提示词中的工具描述
+    prompt(): MaybePromise<string>;        // 系统提示词中的使用指南
+
+    isEnabled?(): MaybePromise<boolean>;   // 动态启用/禁用
+    userFacingName?(): string;             // 用户界面展示名
+    isConcurrencySafe?(): boolean;         // 同轮是否可多次调用
+
+    formatResult?(options: { output: TOutput }): string;
+    // 将 Tool 的内部输出格式化为发给模型的字符串。
+    // 工具可保留富结构用于 UI/状态，同时只给模型发送简洁结果。
+
+    call(
+        input: TInput,
+        context: ToolUseContext,
+        runtime: Runtime,
+        state: State,
+    ): MaybePromise<TOutput>;
 }
 ```
 
-### 3.2 内置工具列表
+### 3.3 执行管道（executor.ts）
 
-| 工具                 | 功能                         | 特殊行为                      |
-| -------------------- | ---------------------------- | ----------------------------- |
-| **FileRead**   | 读取文件内容，支持图片和 PDF | 读取后自动发现项目技能        |
-| **FileWrite**  | 创建或覆盖文件               | 更新文件读取缓存              |
-| **FileEdit**   | 基于字符串搜索替换的精确编辑 | 支持`replace_all` 批量替换  |
-| **Grep**       | 正则表达式搜索代码           | 并行搜索，支持文件类型过滤    |
-| **Glob**       | 文件模式匹配                 | 按修改时间排序                |
-| **Bash**       | 执行 Shell 命令              | 30s 超时，cwd 隔离，权限检查  |
-| **Agent**      | 启动子智能体                 | 详见"多智能体协作"章节        |
-| **MemorySave** | 长期记忆操作                 | 保存 / 搜索 / 获取 / 删除记忆 |
-| **ReadSkill**  | 读取项目技能                 | 只能读取已发现的技能          |
+所有工具共享同一执行管道，入口函数 `executeToolCall`：
 
-### 3.3 工具中的并发控制
+```
+tool_calls 解析
+    → findTool() 查找工具
+        → 未找到 → renderUnavailableToolMessage（列出 agent 可用工具）
+    → parseToolArguments() 解析 JSON 参数
+    → validateToolInput() Zod schema 校验
+        → 校验失败 → 返回错误消息
+    → applyToolPermission() canUseTool 回调
+        → 拒绝 → "Permission denied..."
+    → tool.call() 执行工具逻辑
+    → formatToolResult() 格式化输出
+        → 有 formatResult() → 用工具自定义格式化
+        → 无 → JSON.stringify
+    → createToolResultMessage() 封装为 DeepSeekMessage(tool)
+```
 
-通过 `hasActiveUsage`（计数器）和 `isConcurrencySafe()` 协同控制：
+异常捕获：工具执行抛出任何异常 → `stringifyError()` → 作为工具错误结果返回（不中断主循环）。
 
-- 并发不安全的工具在同一轮中只调用一次
-- `shouldDefer: true` 的工具推迟到下一轮一起执行
+### 3.4 12 工具总览
+
+| #  | 工具                  | strict | 并发安全 | 结果上限 | 特殊标志                |
+| -- | --------------------- | ------ | -------- | -------- | ----------------------- |
+| 1  | **Read**        | ✅     | ✅       | -        | alwaysLoad              |
+| 2  | **Write**       | ✅     | ❌       | 100K     | -                       |
+| 3  | **Edit**        | ✅     | ❌       | 100K     | -                       |
+| 4  | **Bash**        | ✅     | ❌       | 100K     | -                       |
+| 5  | **Agent**       | ✅     | ❌       | 20K      | alwaysLoad              |
+| 6  | **MemorySave**  | ✅     | ❌       | 20K      | alwaysLoad              |
+| 7  | **ReadSkill**   | ✅     | ✅       | 80K      | alwaysLoad              |
+| 8  | **SendMessage** | ✅     | ❌       | 4K       | alwaysLoad              |
+| 9  | **Grep**        | ❌     | ✅       | 20K      | -                       |
+| 10 | **Glob**        | ❌     | ✅       | 100K     | -                       |
+| 11 | **WebSearch**   | ❌     | ✅       | 100K     | alwaysLoad              |
+| 12 | **WebFetch**    | ❌     | ✅       | -        | shouldDefer, alwaysLoad |
+
+---
+
+### 3.5 各工具详解
+
+#### 3.5.1 Read — 文件读取
+
+| 属性 | 值                                                                               |
+| ---- | -------------------------------------------------------------------------------- |
+| 输入 | `file_path`（绝对路径）、`offset`（起始行号）、`limit`（行数）             |
+| 输出 | `{ filePath, content, numLines, startLine, totalLines }` 或 `file_unchanged` |
+| 安全 | 拒绝二进制文件；文件大于 256KB 报错                                              |
+
+**读缓存机制**：同一文件、相同 offset/limit、mtime 未变 → 返回 `file_unchanged` 标志，调用方跳过输出。缓存使用 LRU（`FileStateCache`），最大 100 条目 / 25MB。
+
+**多格式支持**：
+
+- 图片（PNG/JPG 等）：以多模态方式展示给模型
+- PDF：最多 20 页，通过 `pages` 参数指定范围
+- Jupyter Notebook（.ipynb）：渲染所有 cell（代码 + 输出 + 文本）
+
+**副作用**：读取成功后调用 `discoverSkillsForReadPath()`，沿目录链扫描 `.claude/skills/` 目录。
+
+**限制**：每次最多返回 2000 行。超过此限制需要使用 offset 分批读取。文件 > 256KB 直接拒绝。
+
+#### 3.5.2 Write — 文件写入
+
+| 属性 | 值                                                                  |
+| ---- | ------------------------------------------------------------------- |
+| 输入 | `file_path`（必须绝对路径）、`content`                          |
+| 输出 | `{ type: 'create'\|'update', filePath, content, structuredPatch }` |
+
+**read-before-write 机制**：
+
+```
+1. 检查 readFileState 中是否有该文件的记录
+2. 无记录 → 拒绝："File has not been read yet. Read it first before writing."
+3. 记录存在但 isPartialView → 拒绝（模型只看到了部分内容）
+4. 检查 mtime：如果文件被外部修改（mtime > read 时间戳）→ 拒绝
+5. 全部通过 → 允许写入
+```
+
+**原子写入**：自动创建父目录（`mkdir recursive`）。
+
+**规则约束**：prompt 明确禁止未经用户要求就创建 `.md` 文档，禁止自行添加 emoji。
+
+#### 3.5.3 Edit — 搜索替换编辑
+
+| 属性 | 值                                                                         |
+| ---- | -------------------------------------------------------------------------- |
+| 输入 | `file_path`、`old_string`、`new_string`（必须不同）、`replace_all` |
+| 输出 | `{ filePath, oldString, newString, structuredPatch, replaceAll }`        |
+
+**prepareEdit 校验链**（6 步）：
+
+```
+1. old_string === new_string → 拒绝
+2. 文件不存在
+   → old_string === '' → 允许（创建新文件）
+   → old_string !== '' → 拒绝
+3. old_string === '' 但文件已有内容 → 拒绝（防止清空已有文件）
+4. read-before-edit：检查 readFileState（同 Write）
+5. mtime 检查（同 Write）
+6. 唯一性检查：old_string 匹配次数 > 1 且未设 replace_all → 拒绝
+```
+
+**CRLF/LF 自动纠正**（`findActualString`）：
+
+```
+1. 先尝试精确匹配 old_string
+2. 失败 → 尝试将所有 \n 替换为 \r\n 后匹配（模型给 LF，文件是 CRLF）
+3. 失败 → 尝试将所有 \r\n 替换为 \n 后匹配（模型给 CRLF，文件是 LF）
+4. 全部失败 → 返回 null
+```
+
+**结果覆盖**：写入成功后更新 `readFileState` 缓存。
+
+#### 3.5.4 Grep — 正则搜索
+
+| 属性 | 值                                                                                   |
+| ---- | ------------------------------------------------------------------------------------ |
+| 输入 | `pattern`（正则）、`path`、`glob`、`output_mode`、`head_limit`（默认 250） |
+| 输出 | 依 output_mode 不同                                                                  |
+
+**三种输出模式**：
+
+- `content`：带行号的匹配行（支持 `-A`/`-B`/`-C` 上下文行）
+- `files_with_matches`：匹配的文件路径，按修改时间排序
+- `count`：每个文件的匹配数
+
+**底层**：ripgrep，参数 `--hidden --max-columns 500`。排除 VCS 目录（`.git`/`.svn`/`.hg`）。
+
+**多行搜索**：`multiline: true` 启用 `-U --multiline-dotall`，`.` 匹配换行。
+
+#### 3.5.5 Glob — 文件模式匹配
+
+| 属性 | 值                                                 |
+| ---- | -------------------------------------------------- |
+| 输入 | `pattern`（glob 表达式）、`path`（搜索目录）   |
+| 输出 | `{ filenames, numFiles, durationMs, truncated }` |
+
+**底层**：ripgrep `--files --glob`，按修改时间排序。
+
+**特性**：包含隐藏文件（`--hidden`），忽略 `.gitignore`（`--no-ignore`）。结果上限 100 个文件。
+
+#### 3.5.6 Bash — Shell 执行
+
+| 属性 | 值                                                                                               |
+| ---- | ------------------------------------------------------------------------------------------------ |
+| 输入 | `command`、`timeout`（默认 120s，最大 600s）、`description`、`dangerouslyDisableSandbox` |
+| 输出 | `{ stdout, stderr, interrupted, returnCodeInterpretation }`                                    |
+
+**安全校验层**（`getBlockedCommandReason`）：
+
+1. 空命令 → 拒绝
+2. 超长命令（>10K 字符）→ 拒绝
+3. 超时 > 600s → 拒绝
+4. `dangerouslyDisableSandbox` → 拒绝（暂不支持）
+5. 后台执行（`&`） → 拒绝
+6. 交互式命令（vim、nano、ssh、python REPL 等）→ 拒绝
+7. 命令替换（反引号、`$()`）→ 拒绝
+8. Heredoc → 拒绝
+9. Shell 重定向（`>`、`>>`、`<`）→ 拒绝
+10. 长管道（>3 个 `|`）→ 拒绝
+11. 危险命令匹配（rm、git push --force、curl/wget、npm install 等）→ 拒绝
+
+**缓冲上限**：stdout/stderr 各 100K 字符，超出截断并标注。
+
+**formatResult**：按优先级输出 `returnCodeInterpretation → interrupted → stdout → stderr → persistedOutputPath`。
+
+#### 3.5.7 Agent — 子智能体
+
+| 属性 | 值                                                                                                                    |
+| ---- | --------------------------------------------------------------------------------------------------------------------- |
+| 输入 | `prompt`、`description`、`subagent_type`、`execution_mode`（sync/async/fork）、`isolation`（none/worktree） |
+| 输出 | sync → 完整结果 + changedFiles；async → agentId + outputFile                                                        |
+
+**三种执行模式**：
+
+- **sync**：等待子 agent 完成，返回完整结果。结果上限 20K 字符，超出截断。
+- **async**：后台启动，返回 agentId + 输出文件路径。后续用 `SendMessage` 通信。
+- **fork**：继承完整父上下文（消息历史），子 agent 的工具输出不污染父对话。只能从 main agent 发起，不能用 subagent_type。
+
+**worktree 隔离**：在 `git worktree` 中运行子 agent。有修改 → 保留 worktree 路径；无修改 → 自动清理。
+
+**工具权限**（`tool-policy.ts`）：
+
+- `Agent` 工具所有子 agent 默认禁止（防止无限递归）
+- 只读 agent（explore/plan）默认只能访问 `Read/Glob/Grep/WebSearch/WebFetch/ReadSkill`
+- verify agent 额外可访问 `Bash`
+- MCP 工具默认允许
+
+#### 3.5.8 MemorySave — 长期记忆
+
+| 属性 | 值                                                     |
+| ---- | ------------------------------------------------------ |
+| 输入 | `memory`（一条记忆文本）、`reason`（可选保存原因） |
+| 输出 | `{ results: [{ id, memory }] }`                      |
+
+**行为**：调用 `memory.add()` → 经过 8 阶段提取流水线（LLM 结构化提取 → 嵌入 → MD5 去重 → SQLite 写入 → 实体链接）。按 `user_id`/`agent_id`/`run_id` 隔离。
+
+**约束**：不支持删除或更新已有记忆。prompt 要求不保存敏感信息。
+
+#### 3.5.9 ReadSkill — 读取项目技能
+
+| 属性 | 值                                                                   |
+| ---- | -------------------------------------------------------------------- |
+| 输入 | `name` 或 `path`（二选一）                                       |
+| 输出 | `{ name, description, skillDir?, skillPath?, content, truncated }` |
+
+**沙箱**：只能读取 `skillRuntime.dynamicSkills` 中已发现的技能，不能读任意文件。这是一个安全机制——防止模型通过 ReadSkill 绕过文件访问控制。
+
+**内容上限**：64K 字符。超出截断并标注 `[ReadSkill content truncated]`，`truncated: true`。
+
+**变量替换**：`${OPENCAT_SKILL_DIR}` / `${CLAUDE_SKILL_DIR}` 替换为实际技能目录路径。
+
+**副作用**：`recordInvokedSkill()` → 存入 `state.invokedSkills`，供 auto-compress 后的恢复逻辑使用。
+
+#### 3.5.10 WebSearch — 网页搜索
+
+| 属性 | 值                                                                                      |
+| ---- | --------------------------------------------------------------------------------------- |
+| 输入 | `query`（2-1000 字符）、`allowed_domains`/`blocked_domains`（各最多 20 个，互斥） |
+| 输出 | `{ results: [{ title, url }], summary }`                                              |
+
+**实现**：通过 DeepSeek API 的服务端搜索能力，而非自行 HTTP 请求。domain 过滤只接受 hostname，不支持通配符。
+
+**安全**：prompt 明确警告搜索结果不可信，不能作为系统指令执行。
+
+#### 3.5.11 WebFetch — 网页抓取
+
+| 属性 | 值                                                             |
+| ---- | -------------------------------------------------------------- |
+| 输入 | `url`（HTTP/HTTPS）、`prompt`（1-4000 字符，提取目标描述） |
+| 输出 | `{ url, code, contentType, text, truncated, redirected }`    |
+
+**shouldDefer: true**：推迟到下一轮批量执行（避免并发 HTTP 请求带来的问题和资源竞争）。
+
+**HTML 提取流程**：去 script/style 标签 → 去注释 → 换行规范化 → 实体解码。
+
+**重定向策略**：同源最多 5 次；跨域不自动跟随，返回目标 URL 让模型决定。
+
+**上限**：响应体 2MB，提取文本 100K 字符。
+
+#### 3.5.12 SendMessage — 子 agent 通信
+
+| 属性 | 值                                                      |
+| ---- | ------------------------------------------------------- |
+| 输入 | `to`（agentId）、`message`、`summary`（可选预览） |
+| 输出 | `{ success, queued, pendingMessageCount }`            |
+
+**功能**：向正在运行的子 agent 发送消息。消息入队 `task.pendingMessages[]`，子 agent 在下一轮读取并处理。
+
+**约束**：
+
+- 只支持直接 agentId（不支持广播、跨会话、或 resume）
+- 目标 agent 必须 running 状态
+- 消息上限 4K 字符
+
+---
+
+### 3.6 执行管道控制
+
+**并发控制**：`isConcurrencySafe()` 决定工具在同一轮是否可被多次调用。不安全的工具（如 Edit、Write、Bash、Agent）同轮只调用一次。
+
+**延迟执行**：`shouldDefer: true` 的工具（WebFetch）推迟到下一轮批量执行，让模型在同轮继续推理而不等待 HTTP 响应。
+
+**strict 模式**：`strict: true` 的工具要求 DeepSeek 在调用时启用 strict function calling 模式，确保参数类型严格匹配。
+
+**大体积结果压缩**：工具输出超过 `maxResultSizeChars` 时，触发 `persistToolResultForBudget` 逻辑——将大结果离线存储，替换为摘要传给模型。涉及文件 `src/tool-results/persistence.ts`。
+
+**formatResult 双层设计**：工具内部保留富结构输出（`TOutput`），通过 `formatResult()` 只给模型发送简洁摘要。例如：
+
+- Edit：输出包含完整 `structuredPatch`，但发给模型的只有 "has been updated successfully"
+- Bash：输出包含 `stdout`/`stderr`/`returnCodeInterpretation`，发给模型的按优先级排列
 
 ---
 
@@ -203,14 +486,14 @@ interface Tool<Input = unknown, Output = unknown> {
 
 ==MCP== 允许 OpenCat 连接外部工具服务器，将外部工具动态注入到智能体的工具列表中。涉及文件：
 
-| 文件                        | 职责                                                   |
-| --------------------------- | ------------------------------------------------------ |
-| `src/mcp/types.ts`        | JSON-RPC 2.0 类型定义、服务器配置、工具定义            |
-| `src/mcp/config.ts`       | 配置加载（`.opencat/mcp.json`）、连接创建、工具合并  |
-| `src/mcp/stdio-client.ts` | Stdio 传输：子进程 + 行分隔 JSON-RPC                   |
-| `src/mcp/http-client.ts`  | HTTP 传输：fetch + 会话管理 + SSE                      |
+| 文件                        | 职责                                                       |
+| --------------------------- | ---------------------------------------------------------- |
+| `src/mcp/types.ts`        | JSON-RPC 2.0 类型定义、服务器配置、工具定义                |
+| `src/mcp/config.ts`       | 配置加载（`.opencat/mcp.json`）、连接创建、工具合并      |
+| `src/mcp/stdio-client.ts` | Stdio 传输：子进程 + 行分隔 JSON-RPC                       |
+| `src/mcp/http-client.ts`  | HTTP 传输：fetch + 会话管理 + SSE                          |
 | `src/mcp/tool-adapter.ts` | `McpToolAdapter`：将 ==MCP== 工具伪装成 OpenCat Tool |
-| `src/mcp/index.ts`        | 统一导出                                               |
+| `src/mcp/index.ts`        | 统一导出                                                   |
 
 ### 4.1 整体架构
 
@@ -343,49 +626,233 @@ class McpToolAdapter implements Tool {
 
 ### 4.7 当前未实现的部分
 
-| 待实现                               | 说明                                                                                                                                                       | 影响                                   |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| 待实现                               | 说明                                                                                                                                                           | 影响                                   |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
 | `notifications/tools/list_changed` | ==MCP== 协议允许服务端通知客户端工具列表变更，但 Stdio 客户端的`handleLine` 只处理带 `id` 的响应（通知无 `id`，被丢弃），HTTP 客户端无长连接接收推送 | 工具列表只在连接时获取一次，运行时不变 |
-| `.opencat/mcp.json` 热加载         | 配置文件只在启动时读取一次                                                                                                                                 | 运行时修改配置不生效                   |
-| 子进程崩溃自动重连                   | `process.once("exit")` 后将 `this.process` 设为 `undefined`，但不自动重新 spawn                                                                      | 崩溃后下次请求直接报错                 |
-| 服务端能力检查                       | `initialize` 返回值中的 `capabilities` 被丢弃                                                                                                          | 当前无影响（只用 tools），未来需补     |
-| HTTP SSE 实时流式消费                | 当前使用`response.text()` 一次性读完再解析                                                                                                               | 无法实时展示长时间工具调用的中间进度   |
-| Stdio stderr 处理                    | 子进程 stderr 被静默忽略                                                                                                                                   | 调试困难                               |
+| `.opencat/mcp.json` 热加载         | 配置文件只在启动时读取一次                                                                                                                                     | 运行时修改配置不生效                   |
+| 子进程崩溃自动重连                   | `process.once("exit")` 后将 `this.process` 设为 `undefined`，但不自动重新 spawn                                                                          | 崩溃后下次请求直接报错                 |
+| 服务端能力检查                       | `initialize` 返回值中的 `capabilities` 被丢弃                                                                                                              | 当前无影响（只用 tools），未来需补     |
+| HTTP SSE 实时流式消费                | 当前使用`response.text()` 一次性读完再解析                                                                                                                   | 无法实时展示长时间工具调用的中间进度   |
+| Stdio stderr 处理                    | 子进程 stderr 被静默忽略                                                                                                                                       | 调试困难                               |
 
 ---
 
-## 五、项目技能系统（Skills）
-
-### 5.1 什么是 Skill
+### 5.1 核心概念
 
 Skill 是项目目录下的 `.claude/skills/{name}/SKILL.md` 文件，包含：
 
-- YAML frontmatter（名称、描述、激活条件）
-- Markdown 正文（技能指令）
+- **YAML frontmatter**：`description`（描述）、`paths`（可选的 glob 激活条件）
+- **Markdown 正文**：技能指令内容
 
-### 5.2 自动发现机制
+涉及文件：
+
+| 文件 | 职责 |
+|------|------|
+| `src/Tools/utils/discoverSkillsForReadPath.ts` | 技能发现引擎（核心） |
+| `src/Tools/ReadSkill/ReadSkill.ts` | ReadSkill 工具入口 |
+| `src/Tools/ReadSkill/prompt.ts` | 工具描述和 prompt |
+| `src/Tools/ReadSkill/type.ts` | 输入/输出 Zod schema |
+| `src/Tools/ReadSkill/state.ts` | 内容渲染 + 调用记录 |
+| `src/Tools/types.ts` | `SkillRuntimeState`、`SkillCommand` 类型 |
+| `src/query/runtime-context.ts` | 注入逻辑：收集技能 → 渲染 XML → 追加到 `state.runtimeContextMessages` |
+| `src/auto-compress/invoked-skill-restore.ts` | 压缩后技能恢复 |
+
+### 5.2 两种技能类型
+
+| 类型 | frontmatter 特征 | 激活时机 | 存储位置 |
+|------|------------------|----------|----------|
+| **动态技能** | 无 `paths` 字段 | 发现后立即可用 | `skillRuntime.dynamicSkills` |
+| **条件性技能** | 有 `paths` 字段 | 访问的文件匹配 `paths` glob 后才激活 | 先存 `conditionalSkills`，匹配后移到 `dynamicSkills` |
+
+路径匹配支持三种模式：精确匹配（`src/Tools/FileRead/foo.txt`）、目录通配（`src/components/**`）、前缀通配（`src/components/*`）。
+
+### 5.3 完整生命周期（6 阶段）
 
 ```
-FileRead 读取文件
-  │
-  └─→ discoverSkillsForReadPath(filePath)
-        │
-        ├─ 检查文件路径链上的 .claude/skills/ 目录
-        ├─ 解析 SKILL.md 的 YAML frontmatter
-        ├─ 条件性技能根据 paths 字段匹配文件后激活
-        └─ 将新发现的技能写入 state.invokedSkills
+┌─────────────────────────────────────────────────────────────────┐
+│ 阶段 1：发现                                                    │
+│   FileRead / FileWrite / FileEdit 操作文件                       │
+│     → discoverSkillsForReadPath(filePath, context)               │
+│       → 沿目录链向上扫描 .claude/skills/ 目录                    │
+│       → 解析 SKILL.md（YAML frontmatter + Markdown 正文）        │
+│       → 无 paths → 直接进入 dynamicSkills                        │
+│       → 有 paths → 进入 conditionalSkills（待匹配激活）           │
+└─────────────────────────────────────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 阶段 2：注入（每轮 Query Phase C）                              │
+│   loadDynamicSkillContextForQuery(runtime, state)                │
+│     → collectActiveDynamicSkills() 收集所有 dynamicSkills        │
+│       （不同于旧版的 collectUnsentDynamicSkills，不再一次性）     │
+│     → 每次最多 8 个，总计不超过 32K 字符                          │
+│     → 渲染为 <dynamic_skills> XML，放入 runtimeContextMessages   │
+└─────────────────────────────────────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 阶段 3：合并（materializeContextForQuery）                       │
+│   materializeContextForQuery(runtime, state)                     │
+│     → removePreviousDynamicSkillContext(state)                   │
+│       → 遍历 state.Messages，正则剥离旧的                        │
+│         <context_block source="dynamic_skill">...</context_block>│
+│       → 如果删除后 <opencat_context> 为空，移除整个消息          │
+│     → 收集长期记忆 + runtimeContextMessages                      │
+│     → 合并为一个 <opencat_context> 消息                          │
+│     → state.Messages.push(contextMessage)                        │
+│     → state.runtimeContextMessages = []                          │
+└─────────────────────────────────────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 阶段 4：模型读取                                                │
+│   模型看到 <dynamic_skills> 元数据后                              │
+│     → 调用 ReadSkill(name="frontend-design")                     │
+│       → 从 skillRuntime.dynamicSkills 中按名查找                 │
+│       → renderSkillContentForModel() 渲染完整技能内容             │
+│         → 替换 ${OPENCAT_SKILL_DIR} / ${CLAUDE_SKILL_DIR} 占位符 │
+│       → 上限 64K 字符（超出截断并标注 truncated）               │
+│       → recordInvokedSkill() 记录到 state.invokedSkills          │
+│       → 返回给模型                                               │
+└─────────────────────────────────────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 阶段 5：执行                                                    │
+│   模型根据技能指令调整行为                                       │
+└─────────────────────────────────────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 阶段 6：压缩后恢复（auto-compress 触发时）                       │
+│   restorePostAutoCompressContext(runtime, state, summaryId)       │
+│     → applyAutoCompressSummary(state) 获取尾部保留消息            │
+│     → restoreInvokedSkillsAfterAutoCompress(runtime, state,       │
+│         summaryId, preservedMessages)                             │
+│       → selectPostCompactInvokedSkills() 筛选需要恢复的技能       │
+│         • agentId 匹配当前 agent                                  │
+│         • 不在 preservedMessages 的 ReadSkill 结果中（防重复）    │
+│         • 按 invokedAt 降序，取最近 5 个                          │
+│       → limitInvokedSkillsForRestore() 控制体积                   │
+│         • 单个最多 16K 字符                                       │
+│         • 总计最多 48K 字符                                       │
+│       → 渲染为 <post-compact-invoked-skills> XML                  │
+│       → 追加到 state.runtimeContextMessages                       │
+│       → 每个 summaryId 只恢复一次（防重复）                      │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.3 技能使用流程
+### 5.4 注入位置详解
 
-1. **发现阶段**：读取文件时自动发现相关技能
-2. **通知阶段**：`loadDynamicSkillContextForQuery()` 将新技能通知模型
-3. **读取阶段**：模型调用 `ReadSkill` 工具读取技能完整内容
-4. **执行阶段**：模型根据技能指令调整行为
+技能通知在每一轮 Query 的 **Phase C**（`finalizeQueryContext` 内）被注入，位置是消息数组的**末尾**：
 
----
+```
+callModel()                                          ← Phase A/B: 调用模型
+  ↓
+finalizeQueryContext()                                ← Phase C 开始
+  ↓
+loadLongTermMemoryContextForQuery()                   ← Step 1: 收集长期记忆
+  ↓
+loadDynamicSkillContextForQuery()                     ← Step 2: 收集技能通知
+  → collectActiveDynamicSkills()                      ← 每轮全量收集
+  → 渲染 <dynamic_skills> XML
+  → appendRuntimeContextMessages(state, messages)     ← 暂存到 runtimeContextMessages[]
+  ↓
+loadRuntimeContextForQuery()                          ← Step 3: 收集智能体通知
+  ↓
+materializeContextForQuery()                          ← Step 4: 合并为一条消息
+  → 长期记忆 + runtimeContextMessages[] → <opencat_context>
+  → removePreviousDynamicSkillContext(state)          ← 剥离旧的技能块
+  → state.Messages.push(contextMessage)               ← 追加到末尾
+```
 
-## 六、上下文压缩（Auto Compress）
+**最终消息结构**：
+
+```
+... (旧消息历史) ...
+[user: <opencat_context>                              ← 本轮新追加的
+  <context_block source="long_term_memory">...</context_block>
+  <context_block source="dynamic_skill">              ← 每轮都出现
+    <dynamic_skills>
+      <skill name="frontend-design">...</skill>
+    </dynamic_skills>
+  </context_block>
+</opencat_context>]
+```
+
+关键设计决策：
+- **每轮注入**（`collectActiveDynamicSkills` 无去重逻辑），确保技能通知在压缩后不会丢失
+- **先剥离再追加**（`removePreviousDynamicSkillContext`），防止历史中 `<opencat_context>` 消息堆积
+- **剥离是正则操作**：`/<context_block source="dynamic_skill">[\s\S]*?<\/context_block>/g`，不做 DOM 解析
+
+### 5.5 压缩恢复机制
+
+auto-compress 压缩后，包含 ReadSkill 结果的旧消息可能被摘要替换，模型会丢失技能指令。恢复链路：
+
+```
+applyAutoCompression(runtime, state)
+  → 压缩完成
+  → restorePostAutoCompressContext(runtime, state, summaryId)
+      → applyAutoCompressSummary(state)               // 获取尾部保留的消息
+      → restoreReadFileStateAfterAutoCompress()        // 恢复 ReadFile 缓存
+      → restoreInvokedSkillsAfterAutoCompress()        // 恢复技能内容
+          → selectPostCompactInvokedSkills()
+          → limitInvokedSkillsForRestore()
+          → state.runtimeContextMessages.push(...)     // 注入恢复的 XML
+```
+
+恢复的 XML 格式：
+
+```xml
+<post-compact-invoked-skills>
+The following skill instructions were read before auto-compress
+and have been restored into the current context.
+
+<skill name="frontend-design">
+  <description>Create distinctive, production-grade frontend...</description>
+  <skill_dir>/project/.skill/frontend-design</skill_dir>
+  <content>
+  完整的 SKILL.md 正文...
+  </content>
+</skill>
+</post-compact-invoked-skills>
+```
+
+**恢复条件**：
+1. 技能必须曾被模型调用过 `ReadSkill`（即 `state.invokedSkills` 中有记录）
+2. 该技能不在尾部保留消息中已存在的 ReadSkill 结果里（防重复）
+3. 属于当前 agent 调用的（`agentId` 匹配）
+
+**恢复限制**：
+
+| 参数 | 值 |
+|------|-----|
+| 最多恢复技能数 | 5 |
+| 单技能最大字符 | 16,000 |
+| 总计最大字符 | 48,000 |
+| 防重复 | 每个 `summaryId` 只恢复一次 |
+
+### 5.6 已修复：技能通知被压缩后丢失
+
+**旧行为**（`collectUnsentDynamicSkills`）：
+- 每个技能通知只发一次，`sentDynamicSkillNames` 永久标记
+- 如果压缩删除了通知且模型未调用 ReadSkill → 技能永久丢失
+- 两条恢复路径都走不通：重新通知被标记阻止，压缩恢复依赖 `invokedSkills`（未读就没有）
+
+**新行为**（`collectActiveDynamicSkills`）：
+- 每轮全量收集所有 dynamicSkills，不再依赖一次性标记
+- `removePreviousDynamicSkillContext` 剥离旧的技能块，避免堆积
+- 压缩后如果技能仍在 `dynamicSkills` 中，下一轮自然重新注入
+
+### 5.7 当前项目中的 Skill
+
+| 路径 | 类型 | 用途 |
+|------|------|------|
+| `.claude/skills/file-read-path-rule/SKILL.md` | 条件性 | 测试用：匹配 `src/Tools/FileRead/skill-rule-test.fixture.txt` |
+| `.skill/frontend-design/SKILL.md` | 动态 | 前端设计指南（无 paths，发现即激活） |
+
+### 5.8 当前未实现
+
+| 项目 | 描述 |
+|------|------|
+| 条件性技能的热卸载 | 技能激活后没有"逆激活"机制（匹配文件被删除后技能仍保持 active） |
+| 技能依赖/继承 | 不存在 SKILL.md 之间的引用或继承关系 |
+| 跨会话技能抑制 | 无"关闭某个技能"的用户命令或 UI |
 
 当对话历史超过 DeepSeek 上下文窗口限制时，系统自动触发压缩，采用**两层压缩策略**。
 
@@ -480,17 +947,17 @@ loadStateFromTranscript(sessionId)
 
 长期记忆是一个基于向量搜索的持久化知识库，使智能体能够跨会话记住用户偏好、项目约定和重要发现。涉及文件：
 
-| 文件 | 职责 |
-|------|------|
-| `src/Memory/Memory.ts`（970 行） | 核心引擎：搜索（11 步）+ 添加（8 阶段） |
-| `src/Memory/type.ts` | 类型定义：MemoryConfig、MemoryItem、实体 |
-| `src/Memory/runtime.ts` | 运行时层：懒加载、搜索适配、身份过滤 |
-| `src/Memory/config.ts` | 配置层：embedder/vectorStore/LLM 参数解析 |
-| `src/query/long-term-memory.ts`（292 行） | 查询循环层：注入构建、提取调度 |
-| `src/Memory/Embedding/openai.ts` | OpenAI 兼容 Embedding 客户端 |
-| `src/Memory/Embedding/entity-store.ts` | 实体存储（独立 `_entities.db`） |
-| `src/Memory/Embedding/scoring.ts` | 评分函数（BM25 归一化、综合 ranking） |
-| `src/Memory/Embedding/nlp-utils.ts` | NLP 工具：分词、词形还原 |
+| 文件                                        | 职责                                      |
+| ------------------------------------------- | ----------------------------------------- |
+| `src/Memory/Memory.ts`（970 行）          | 核心引擎：搜索（11 步）+ 添加（8 阶段）   |
+| `src/Memory/type.ts`                      | 类型定义：MemoryConfig、MemoryItem、实体  |
+| `src/Memory/runtime.ts`                   | 运行时层：懒加载、搜索适配、身份过滤      |
+| `src/Memory/config.ts`                    | 配置层：embedder/vectorStore/LLM 参数解析 |
+| `src/query/long-term-memory.ts`（292 行） | 查询循环层：注入构建、提取调度            |
+| `src/Memory/Embedding/openai.ts`          | OpenAI 兼容 Embedding 客户端              |
+| `src/Memory/Embedding/entity-store.ts`    | 实体存储（独立`_entities.db`）          |
+| `src/Memory/Embedding/scoring.ts`         | 评分函数（BM25 归一化、综合 ranking）     |
+| `src/Memory/Embedding/nlp-utils.ts`       | NLP 工具：分词、词形还原                  |
 
 ### 8.1 三层架构
 
@@ -514,23 +981,23 @@ OpenAIEmbedder  OpenAIStructuredLLM  MemoryVectorStore
 
 **存储层**（`Memory/config.ts`）：
 
-| 组件 | 默认值 | 说明 |
-|------|--------|------|
-| embedder | `text-embedding-3-small` via OpenAI API | 文本 → 1536 维向量 |
-| vectorStore | SQLite（`better-sqlite3`），路径 `.opencat/memory/vector_store.db` | 向量 + 负载持久化 |
-| LLM | `deepseek-chat` | 结构化提取：从对话中抽取记忆条目 |
+| 组件        | 默认值                                                                 | 说明                             |
+| ----------- | ---------------------------------------------------------------------- | -------------------------------- |
+| embedder    | `text-embedding-3-small` via OpenAI API                              | 文本 → 1536 维向量              |
+| vectorStore | SQLite（`better-sqlite3`），路径 `.opencat/memory/vector_store.db` | 向量 + 负载持久化                |
+| LLM         | `deepseek-chat`                                                      | 结构化提取：从对话中抽取记忆条目 |
 
 **行为层**（`LongTermMemoryRuntimeConfig`）：
 
-| 参数 | 默认值 | 作用 |
-|------|--------|------|
-| `enabled` | `true` | 总开关 |
-| `autoInject` | `true` | 每轮自动搜索相关记忆并注入上下文 |
-| `autoExtract` | `true` | 每轮结束后自动从对话中提取新记忆 |
-| `autoInjectTopK` | `6` | 每次注入最多几条 |
-| `searchThreshold` | `0.1` | 最低相似度阈值 |
-| `maxInjectedChars` | `8000` | 注入内容总字符上限 |
-| `userId` | 环境变量 `OPENCAT_MEMORY_USER_ID` 或 `default-user` | 记忆归属（跨会话隔离） |
+| 参数                 | 默认值                                                 | 作用                             |
+| -------------------- | ------------------------------------------------------ | -------------------------------- |
+| `enabled`          | `true`                                               | 总开关                           |
+| `autoInject`       | `true`                                               | 每轮自动搜索相关记忆并注入上下文 |
+| `autoExtract`      | `true`                                               | 每轮结束后自动从对话中提取新记忆 |
+| `autoInjectTopK`   | `6`                                                  | 每次注入最多几条                 |
+| `searchThreshold`  | `0.1`                                                | 最低相似度阈值                   |
+| `maxInjectedChars` | `8000`                                               | 注入内容总字符上限               |
+| `userId`           | 环境变量`OPENCAT_MEMORY_USER_ID` 或 `default-user` | 记忆归属（跨会话隔离）           |
 
 ### 8.3 注入流程（每轮对话前自动执行）
 
@@ -601,10 +1068,10 @@ OpenAIEmbedder  OpenAIStructuredLLM  MemoryVectorStore
 
 **三大评分维度**：
 
-| 维度 | 来源 | 权重 | 说明 |
-|------|------|------|------|
-| 语义相似度（semantic） | 向量余弦距离 | 主要 | 捕捉同义词和语义关联 |
-| 关键词匹配（BM25） | 全文检索 | 补充 | 捕捉精确术语匹配 |
+| 维度                     | 来源               | 权重 | 说明                         |
+| ------------------------ | ------------------ | ---- | ---------------------------- |
+| 语义相似度（semantic）   | 向量余弦距离       | 主要 | 捕捉同义词和语义关联         |
+| 关键词匹配（BM25）       | 全文检索           | 补充 | 捕捉精确术语匹配             |
 | 实体增强（entity boost） | 实体 ↔ 记忆关联图 | 加成 | 通过实体作为桥接链接相关记忆 |
 
 ### 8.5 添加流程（8 阶段提取流水线）
@@ -683,22 +1150,22 @@ function getOrCreateLongTermMemory(runtime) {
 
 ### 8.8 与技能通知系统的区别
 
-| 维度 | 技能通知（`<dynamic_skills>`） | 长期记忆（`<long_term_memory>`） |
-|------|------|------|
-| 数据来源 | 项目文件系统（`.claude/skills/SKILL.md`） | 对话历史的语义提取 |
-| 触发方式 | FileRead/Write/Edit 后自动发现 | 每轮语义搜索（基于向量 + BM25 + 实体） |
-| 注入频率 | 每轮（所有活跃技能全部重新注入） | 每轮（基于搜索查询动态变化） |
-| 内容性质 | 技能指令（操作指南、约束规则） | 事实性记忆（偏好、决策、知识点） |
-| 存储位置 | 项目文件系统 | SQLite 向量数据库（`.opencat/memory/`） |
-| 跨会话 | 取决于文件是否存在于项目中 | 持久化，跨会话保留 |
+| 维度     | 技能通知（`<dynamic_skills>`）            | 长期记忆（`<long_term_memory>`）        |
+| -------- | ------------------------------------------- | ----------------------------------------- |
+| 数据来源 | 项目文件系统（`.claude/skills/SKILL.md`） | 对话历史的语义提取                        |
+| 触发方式 | FileRead/Write/Edit 后自动发现              | 每轮语义搜索（基于向量 + BM25 + 实体）    |
+| 注入频率 | 每轮（所有活跃技能全部重新注入）            | 每轮（基于搜索查询动态变化）              |
+| 内容性质 | 技能指令（操作指南、约束规则）              | 事实性记忆（偏好、决策、知识点）          |
+| 存储位置 | 项目文件系统                                | SQLite 向量数据库（`.opencat/memory/`） |
+| 跨会话   | 取决于文件是否存在于项目中                  | 持久化，跨会话保留                        |
 
 ### 8.9 当前未实现的部分
 
-| 待实现 | 说明 |
-|--------|------|
-| 记忆更新/删除 API | 目前只能 add 和 search，无法通过 MemorySave 工具修改或删除已有记忆 |
-| EntityStore 健康检查 | `_entities.db` 与主 `vector_store.db` 的一致性无校验 |
-| 嵌入模型本地化 | 强依赖 OpenAI Embedding API，无本地 embedder 回退 |
+| 待实现               | 说明                                                               |
+| -------------------- | ------------------------------------------------------------------ |
+| 记忆更新/删除 API    | 目前只能 add 和 search，无法通过 MemorySave 工具修改或删除已有记忆 |
+| EntityStore 健康检查 | `_entities.db` 与主 `vector_store.db` 的一致性无校验           |
+| 嵌入模型本地化       | 强依赖 OpenAI Embedding API，无本地 embedder 回退                  |
 
 ---
 
@@ -974,18 +1441,18 @@ MemoryTool 在首次使用时才初始化，避免不必要的资源消耗（不
 
 ## 十四、技术栈
 
-| 层级                   | 技术                                 |
-| ---------------------- | ------------------------------------ |
-| **运行时**       | Node.js + TypeScript                 |
-| **LLM 接口**     | DeepSeek API（HTTP + SSE 流式）      |
-| **类型校验**     | Zod（运行时类型安全）                |
-| **向量存储**     | better-sqlite3 / Qdrant / pgvector   |
-| **嵌入模型**     | OpenAI Embedding API                 |
-| **==MCP== 协议** | JSON-RPC 2.0                         |
-| **对话存储**     | JSONL（自定义格式）                  |
-| **Web 界面**     | 内嵌 HTML/CSS/JS（无外部前端依赖）   |
-| **进程管理**     | child_process（==MCP== stdio、Bash） |
-| **文件搜索**     | ripgrep（Grep）、fast-glob（Glob）   |
+| 层级                       | 技术                                     |
+| -------------------------- | ---------------------------------------- |
+| **运行时**           | Node.js + TypeScript                     |
+| **LLM 接口**         | DeepSeek API（HTTP + SSE 流式）          |
+| **类型校验**         | Zod（运行时类型安全）                    |
+| **向量存储**         | better-sqlite3 / Qdrant / pgvector       |
+| **嵌入模型**         | OpenAI Embedding API                     |
+| **==MCP== 协议** | JSON-RPC 2.0                             |
+| **对话存储**         | JSONL（自定义格式）                      |
+| **Web 界面**         | 内嵌 HTML/CSS/JS（无外部前端依赖）       |
+| **进程管理**         | child_process（==MCP== stdio、Bash） |
+| **文件搜索**         | ripgrep（Grep）、fast-glob（Glob）       |
 
 ---
 
@@ -1006,9 +1473,9 @@ MemoryTool 在首次使用时才初始化，避免不必要的资源消耗（不
 | `src/session-memory/session-memory.ts`         | 滚动会话笔记管理           |
 | `src/Memory/Memory.ts`                         | 长期记忆核心               |
 | `src/Memory/runtime.ts`                        | 长期记忆运行时集成         |
-| `src/mcp/tool-adapter.ts`                      | ==MCP== 工具适配器         |
-| `src/mcp/stdio-client.ts`                      | ==MCP== stdio 客户端       |
-| `src/mcp/http-client.ts`                       | ==MCP== HTTP 客户端        |
+| `src/mcp/tool-adapter.ts`                      | ==MCP== 工具适配器     |
+| `src/mcp/stdio-client.ts`                      | ==MCP== stdio 客户端   |
+| `src/mcp/http-client.ts`                       | ==MCP== HTTP 客户端    |
 | `src/transcript/persistence.ts`                | 对话持久化与恢复           |
 | `src/system-prompt.ts`                         | 系统提示词组装             |
 | `src/types/runtime.ts`                         | Runtime 类型定义           |

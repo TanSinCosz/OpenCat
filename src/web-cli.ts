@@ -2271,11 +2271,10 @@ function renderHtml(): string {
         var budget = Number(stats.toolResultBudgetReplacementCount || 0);
         var compact = Number(stats.bulkyToolCompactCount || 0);
         var snip = Number(stats.historySnipCount || 0);
-        var hardSnip = Boolean(stats.hardHistorySnipApplied);
         var markerBudget = event.hasToolResultBudget ? 1 : 0;
         var markerCompact = event.hasToolResultCompact ? 1 : 0;
         var markerSnip = event.hasHistorySnipMarker ? 1 : 0;
-        var active = budget + compact + snip + markerBudget + markerCompact + markerSnip + (hardSnip ? 1 : 0);
+        var active = budget + compact + snip + markerBudget + markerCompact + markerSnip;
 
         if (!active) {
           projectionBadge.className = "clean";
@@ -2288,7 +2287,6 @@ function renderHtml(): string {
         if (budget || markerBudget) parts.push("budget " + Math.max(budget, markerBudget));
         if (compact || markerCompact) parts.push("compact " + Math.max(compact, markerCompact));
         if (snip || markerSnip) parts.push("snip " + Math.max(snip, markerSnip));
-        if (hardSnip) parts.push("hard");
         projectionBadge.className = "";
         projectionBadge.innerHTML = '<span class="active">' + escapeHtml(parts.join(" 路 ")) + "</span>";
         projectionBadge.title = [
@@ -2296,7 +2294,6 @@ function renderHtml(): string {
           "Tool result budget replacements: " + budget,
           "Bulky tool result compactions: " + compact,
           "History snips: " + snip,
-          "Hard history snip applied: " + hardSnip,
           "Tool result chars before budget: " + Number(stats.toolResultCharsBeforeBudget || 0),
           "Tool result chars after budget: " + Number(stats.toolResultCharsAfterBudget || 0),
           "Tool result chars after compact: " + Number(stats.toolResultCharsAfterCompact || 0),

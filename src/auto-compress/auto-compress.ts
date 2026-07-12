@@ -8,7 +8,6 @@ import {
 } from "../session-memory/persistence.js";
 import {
   formatMessagesForSessionMemory,
-  updateSessionMemoryForAutoCompress,
 } from "../session-memory/session-memory.js";
 import { restoreReadFileStateAfterAutoCompress } from "./read-file-restore.js";
 import { restoreInvokedSkillsAfterAutoCompress } from "./invoked-skill-restore.js";
@@ -39,10 +38,6 @@ export type AutoCompressResult =
   | AutoCompressCompressedResult
   | { status: "skipped"; reason: string };
 
-export type AutoCompressOptions = {
-  forkContextMessages?: readonly Message[];
-};
-
 type AutoCompressCompressedResult = {
   status: "compressed";
   summary: AutoCompressSummary;
@@ -52,13 +47,12 @@ type AutoCompressCompressedResult = {
  * Runs the durable auto-compress step against State.
  *
  * The caller is responsible for deciding that the current request is too
- * large. This function only prepares session memory and records an
- * AutoCompressSummary that a later request build can render.
+ * large. Main-session compression only reuses the session memory that already
+ * exists at this point; it does not trigger a session memory update itself.
  */
 export async function applyAutoCompression(
   runtime: Runtime,
   state: State,
-  options: AutoCompressOptions = {},
 ): Promise<AutoCompressResult> {
   if (runtime.agentRole === "session") {
     return { status: "skipped", reason: "session_runtime" };
@@ -68,13 +62,12 @@ export async function applyAutoCompression(
     return applySubagentLocalCompression(runtime, state);
   }
 
-  return applyMainSessionMemoryCompression(runtime, state, options);
+  return applyMainSessionMemoryCompression(runtime, state);
 }
 
 async function applyMainSessionMemoryCompression(
   runtime: Runtime,
   state: State,
-  options: AutoCompressOptions,
 ): Promise<AutoCompressResult> {
   const autoCompress = ensureAutoCompressState(state);
   await loadPersistedSessionMemory(runtime, state);
@@ -85,17 +78,6 @@ async function applyMainSessionMemoryCompression(
     const result = activateAutoCompressSummary(autoCompress, existingSummary);
     await restorePostAutoCompressContext(runtime, state, result.summary.id);
     return result;
-  }
-
-  if (!autoCompress.sessionMemoryUpdated) {
-    const updateResult = await updateSessionMemoryForAutoCompress(runtime, state, {
-      forkContextMessages: options.forkContextMessages,
-    });
-    if (updateResult.status === "updated") {
-      autoCompress.sessionMemoryUpdated = true;
-    } else {
-      return updateResult;
-    }
   }
 
   const summary = createSessionMemoryAutoCompressSummary(state);
