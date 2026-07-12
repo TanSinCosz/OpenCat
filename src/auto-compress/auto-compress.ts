@@ -43,6 +43,10 @@ type AutoCompressCompressedResult = {
   summary: AutoCompressSummary;
 };
 
+export type AutoCompressOptions = {
+  snippedContentThroughMessageId?: MessageId;
+};
+
 /**
  * Runs the durable auto-compress step against State.
  *
@@ -53,6 +57,7 @@ type AutoCompressCompressedResult = {
 export async function applyAutoCompression(
   runtime: Runtime,
   state: State,
+  options: AutoCompressOptions = {},
 ): Promise<AutoCompressResult> {
   if (runtime.agentRole === "session") {
     return { status: "skipped", reason: "session_runtime" };
@@ -62,20 +67,35 @@ export async function applyAutoCompression(
     return applySubagentLocalCompression(runtime, state);
   }
 
-  return applyMainSessionMemoryCompression(runtime, state);
+  return applyMainSessionMemoryCompression(runtime, state, options);
 }
 
 async function applyMainSessionMemoryCompression(
   runtime: Runtime,
   state: State,
+  options: AutoCompressOptions,
 ): Promise<AutoCompressResult> {
   const autoCompress = ensureAutoCompressState(state);
   await loadPersistedSessionMemory(runtime, state);
   resetSessionMemoryUpdateFlagIfSummaryHasTail(autoCompress, state);
 
+  if (
+    options.snippedContentThroughMessageId &&
+    !doesSessionMemoryCoverMessage(
+      state,
+      options.snippedContentThroughMessageId,
+    )
+  ) {
+    return {
+      status: "skipped",
+      reason: "session_memory_does_not_cover_snipped_content",
+    };
+  }
+
   const existingSummary = createSessionMemoryAutoCompressSummary(state);
   if (existingSummary && isSummaryCurrentForLatestMessage(existingSummary, state)) {
     const result = activateAutoCompressSummary(autoCompress, existingSummary);
+    recordSnippedContentCompactionBoundary(autoCompress, options);
     await restorePostAutoCompressContext(runtime, state, result.summary.id);
     return result;
   }
@@ -84,6 +104,7 @@ async function applyMainSessionMemoryCompression(
   if (!summary) {
     if (existingSummary) {
       const result = activateAutoCompressSummary(autoCompress, existingSummary);
+      recordSnippedContentCompactionBoundary(autoCompress, options);
       await restorePostAutoCompressContext(runtime, state, result.summary.id);
       return result;
     }
@@ -91,6 +112,7 @@ async function applyMainSessionMemoryCompression(
   }
 
   const result = activateAutoCompressSummary(autoCompress, summary);
+  recordSnippedContentCompactionBoundary(autoCompress, options);
   await restorePostAutoCompressContext(runtime, state, result.summary.id);
   return result;
 }
@@ -157,7 +179,6 @@ function resetProjectionCompressionStateAfterAutoCompress(
   state: State,
   preservedMessages: readonly Message[],
 ): void {
-  state.historySnips = [];
   state.toolResultBudgetState = preserveRecentToolResultBudgetState(
     state.toolResultBudgetState,
     preservedMessages,
@@ -225,6 +246,37 @@ export function ensureAutoCompressState(state: State): AutoCompressState {
   state.autoCompress.sessionMemoryUpdated ??= false;
   state.autoCompress.summaries ??= [];
   return state.autoCompress;
+}
+
+function doesSessionMemoryCoverMessage(
+  state: State,
+  messageId: MessageId,
+): boolean {
+  const summarizedMessageId = state.sessionMemory.lastSummarizedMessageId;
+  if (!summarizedMessageId) {
+    return false;
+  }
+
+  const targetIndex = state.Messages.findIndex(
+    (message) => message.id === messageId,
+  );
+  const summarizedIndex = state.Messages.findIndex(
+    (message) => message.id === summarizedMessageId,
+  );
+
+  return targetIndex !== -1 &&
+    summarizedIndex !== -1 &&
+    targetIndex <= summarizedIndex;
+}
+
+function recordSnippedContentCompactionBoundary(
+  autoCompress: AutoCompressState,
+  options: AutoCompressOptions,
+): void {
+  if (options.snippedContentThroughMessageId) {
+    autoCompress.snippedContentCompactedThroughMessageId =
+      options.snippedContentThroughMessageId;
+  }
 }
 
 /**

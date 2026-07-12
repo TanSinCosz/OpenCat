@@ -782,16 +782,26 @@ test("compactBulkyToolResults compacts read-like outputs under context pressure"
   }
 });
 
-test("compactBulkyToolResults defaults to context-pressure compact with five recent results kept", () => {
+test("compactBulkyToolResults defaults to recent-tail protection under context pressure", () => {
   const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
   const originalCompactTarget =
     process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
   const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+  const originalTailTarget = process.env.OPENCAT_PROJECTION_RECENT_TAIL_TARGET_TOKENS;
+  const originalTailMax = process.env.OPENCAT_PROJECTION_RECENT_TAIL_MAX_TOKENS;
+  const originalTailMinApi =
+    process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES;
+  const originalTailMinText =
+    process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES;
 
   try {
     delete process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
     delete process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
     delete process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+    delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_TARGET_TOKENS;
+    delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_MAX_TOKENS;
+    delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES;
+    delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES;
     const runtime = createRuntime({
       deepSeekRuntimeConfig: {
         apiKey: "test-key",
@@ -829,19 +839,25 @@ test("compactBulkyToolResults defaults to context-pressure compact with five rec
         createMessage({
           role: "tool" as const,
           tool_call_id: `call_default_read_${index}`,
-          content: `read-${index}-head\n${"r".repeat(8_000)}\nread-${index}-tail`,
+          content: `read-${index}-head\n${"r".repeat(20_000)}\nread-${index}-tail`,
+        })
+      ),
+      ...Array.from({ length: 5 }, (_, index) =>
+        createMessage({
+          role: "user" as const,
+          content: `recent text ${index}`,
         })
       ),
     ];
 
     const compacted = compactBulkyToolResults(messages, runtime);
     const oldReadResult = compacted[2];
-    const firstProtectedReadResult = compacted[6];
+    const protectedReadResult = compacted[4];
 
     assert.equal(oldReadResult?.role, "tool");
-    assert.equal(firstProtectedReadResult?.role, "tool");
+    assert.equal(protectedReadResult?.role, "tool");
     assert.match(oldReadResult.content, /<tool-result-compact>/);
-    assert.match(firstProtectedReadResult.content, /read-4-tail/);
+    assert.match(protectedReadResult.content, /read-2-tail/);
   } finally {
     restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalThreshold);
     restoreEnv(
@@ -849,6 +865,16 @@ test("compactBulkyToolResults defaults to context-pressure compact with five rec
       originalCompactTarget,
     );
     restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+    restoreEnv("OPENCAT_PROJECTION_RECENT_TAIL_TARGET_TOKENS", originalTailTarget);
+    restoreEnv("OPENCAT_PROJECTION_RECENT_TAIL_MAX_TOKENS", originalTailMax);
+    restoreEnv(
+      "OPENCAT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES",
+      originalTailMinApi,
+    );
+    restoreEnv(
+      "OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES",
+      originalTailMinText,
+    );
   }
 });
 

@@ -5,7 +5,11 @@ import { createMessage, toDeepSeekMessage, type ToolMessage } from "./types/mess
 import type { Runtime } from "./types/runtime.js";
 import type { State } from "./types/state.js";
 import { streamAssistantWithReasoningContinuation } from "./query/reasoning-continuation.js";
-import { buildMessagesForQuery } from "./query/messages.js";
+import {
+  buildMessagesForQuery,
+  getVisibleSnippedContentOnlyStats,
+  type SnippedContentOnlyStats,
+} from "./query/messages.js";
 import { createStreamRequest } from "./query/request.js";
 import type { MessagesForQuery, QueryEvent, QueryOptions } from "./query/types.js";
 import { snapshotRuntimeUsage } from "./query/usage.js";
@@ -48,7 +52,7 @@ export {
   loadRuntimeContextForQuery,
 } from "./query/runtime-context.js";
 
-const DEFAULT_AUTO_COMPRESS_TRIGGER_TOKENS = 180_000;
+const DEFAULT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS = 40_000;
 
 export async function* query(
   runtime: Runtime,
@@ -88,10 +92,15 @@ export async function* _query(
         historySnipCountBeforeBuild,
       );
 
-      if (shouldApplyAutoCompression(runtime, messagesForQuery)) {
+      const autoCompressRequest = getAutoCompressionRequest(
+        runtime,
+        state,
+      );
+      if (autoCompressRequest) {
         const autoCompressResult = await applyAutoCompressionWithTelemetry(
           runtime,
           state,
+          autoCompressRequest,
         );
 
         if (autoCompressResult.status === "compressed") {
@@ -432,16 +441,25 @@ function shouldAttachLongTermMemory(state: State): boolean {
   return lastMessage?.role === "user" && lastMessage.source === "user";
 }
 
+type AutoCompressionRequest = {
+  reason: "snipped_content";
+  snippedContentThroughMessageId?: SnippedContentOnlyStats["lastMessageId"];
+};
+
 async function applyAutoCompressionWithTelemetry(
   runtime: Runtime,
   state: State,
+  request: AutoCompressionRequest,
 ) {
   const beforeMessageCount = state.Messages.length;
   await emitRunEvent(runtime, {
     type: "auto_compress_started",
     messageCount: beforeMessageCount,
+    reason: request.reason,
   });
-  const result = await applyAutoCompression(runtime, state);
+  const result = await applyAutoCompression(runtime, state, {
+    snippedContentThroughMessageId: request.snippedContentThroughMessageId,
+  });
   await emitRunEvent(runtime, {
     type: "auto_compress_finished",
     status: result.status,
@@ -460,13 +478,26 @@ async function applyAutoCompressionWithTelemetry(
   return result;
 }
 
-function shouldApplyAutoCompression(
+function getAutoCompressionRequest(
   runtime: Runtime,
-  messagesForQuery: MessagesForQuery,
-): boolean {
-  return canRuntimeAutoCompress(runtime) &&
-    estimateMessagesForQueryTokens(messagesForQuery) >=
-    getAutoCompressTriggerTokens();
+  state: State,
+): AutoCompressionRequest | null {
+  if (!canRuntimeAutoCompress(runtime)) {
+    return null;
+  }
+
+  const snippedContent = getVisibleSnippedContentOnlyStats(state);
+  if (
+    snippedContent.lastMessageId &&
+    snippedContent.tokens >= getSnippedContentAutoCompressTriggerTokens()
+  ) {
+    return {
+      reason: "snipped_content",
+      snippedContentThroughMessageId: snippedContent.lastMessageId,
+    };
+  }
+
+  return null;
 }
 
 function canRuntimeAutoCompress(runtime: Runtime): boolean {
@@ -477,14 +508,16 @@ function estimateMessagesForQueryTokens(messagesForQuery: MessagesForQuery): num
   return Math.ceil(JSON.stringify(messagesForQuery.messages).length / 4);
 }
 
-function getAutoCompressTriggerTokens(): number {
-  const configured = Number(process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS);
+function getSnippedContentAutoCompressTriggerTokens(): number {
+  const configured = Number(
+    process.env.OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS,
+  );
 
   if (Number.isFinite(configured) && configured > 0) {
     return configured;
   }
 
-  return DEFAULT_AUTO_COMPRESS_TRIGGER_TOKENS;
+  return DEFAULT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS;
 }
 
 function throwIfQueryAborted(runtime: Runtime): void {

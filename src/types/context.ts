@@ -15,6 +15,12 @@ export interface AutoCompressSummary {
 export interface AutoCompressState {
   summaries: AutoCompressSummary[];
   sessionMemoryUpdated: boolean;
+  /**
+   * Content-only history snips at or before this message are covered by an
+   * auto-compress summary, so projection can hide them instead of keeping their
+   * text in the request.
+   */
+  snippedContentCompactedThroughMessageId?: MessageId;
   readFileStateRestoredForSummaryId?: AutoCompressSummaryId;
   invokedSkillsRestoredForSummaryId?: AutoCompressSummaryId;
 }

@@ -14,6 +14,7 @@ import {
   estimateDeepSeekMessageSize,
   toDeepSeekMessage,
   type Message,
+  type MessageId,
   withMessageSize,
 } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
@@ -35,9 +36,17 @@ const DEFAULT_HISTORY_SNIP_TARGET_TOKENS = 30_000;
 const DEFAULT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = 160_000;
 const DEFAULT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = 70_000;
 const BULKY_TOOL_RESULT_COMPACT_PREVIEW_TOKENS = 1_000;
-const DEFAULT_BULKY_TOOL_RESULT_KEEP_RECENT = 5;
-const DEFAULT_MIN_RECENT_MESSAGES_AFTER_SNIP = 8;
+const DEFAULT_PROJECTION_RECENT_TAIL_TARGET_TOKENS = 30_000;
+const DEFAULT_PROJECTION_RECENT_TAIL_MAX_TOKENS = 40_000;
+const DEFAULT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES = 12;
+const DEFAULT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES = 5;
 const TOOL_RESULT_BUDGET_TAG = "<tool-result-budget>";
+
+export type SnippedContentOnlyStats = {
+  tokens: number;
+  messageCount: number;
+  lastMessageId?: MessageId;
+};
 
 export async function buildMessagesForQuery(
   runtime: Runtime,
@@ -285,6 +294,17 @@ function collectBulkyToolResultCandidates(
   return candidates;
 }
 
+function selectProtectedBulkyToolResultBudgetKeys(
+  candidates: readonly BulkyToolResultCandidate[],
+  protectedStart: number,
+): Set<string> {
+  return new Set(
+    candidates
+      .filter((candidate) => candidate.messageIndex >= protectedStart)
+      .map((candidate) => candidate.budgetKey),
+  );
+}
+
 function selectRecentBulkyToolResultBudgetKeys(
   candidates: readonly BulkyToolResultCandidate[],
   keepRecent: number,
@@ -458,12 +478,14 @@ function createBulkyToolCompactionsWithStats(
   const budgetState = getOrCreateToolResultBudgetState(runtime, ownerState);
   const toolNameById = buildToolNameById(messages);
   const contextTarget = getBulkyToolResultCompactTargetContextTokens();
-  const keepRecent = getBulkyToolResultKeepRecentCount();
   const candidates = collectBulkyToolResultCandidates(messages, toolNameById);
-  const protectedBudgetKeys = selectRecentBulkyToolResultBudgetKeys(
-    candidates,
-    keepRecent,
-  );
+  const legacyKeepRecent = getLegacyBulkyToolResultKeepRecentCount();
+  const protectedBudgetKeys = legacyKeepRecent === null
+    ? selectProtectedBulkyToolResultBudgetKeys(
+      candidates,
+      calculateProjectionRecentTailStart(messages),
+    )
+    : selectRecentBulkyToolResultBudgetKeys(candidates, legacyKeepRecent);
   const replacementByMessageIndex = new Map<number, string>();
   let projectedTotalTokens = contextBaseTokens + totalProjectedMessageTokens(messages);
 
@@ -721,6 +743,8 @@ export function applyHistorySnipBoundaries(
   const contentOnlyMessageIds = new Set(
     historySnips.flatMap((boundary) => boundary.contentOnlyMessageIds ?? []),
   );
+  const compactedContentOnlyMessageIds =
+    collectCompactedSnipContentOnlyMessageIds(state);
 
   return messages.flatMap((message) => {
     if (removedMessageIds.has(message.id)) {
@@ -728,12 +752,88 @@ export function applyHistorySnipBoundaries(
     }
 
     if (contentOnlyMessageIds.has(message.id)) {
+      if (compactedContentOnlyMessageIds.has(message.id)) {
+        return [];
+      }
+
       const contentOnlyMessage = createHistorySnipContentOnlyMessage(message);
       return contentOnlyMessage ? [contentOnlyMessage] : [];
     }
 
     return [message];
   });
+}
+
+export function getVisibleSnippedContentOnlyStats(
+  state: State,
+): SnippedContentOnlyStats {
+  const contentOnlyMessageIds = new Set(
+    ensureHistorySnips(state).flatMap(
+      (boundary) => boundary.contentOnlyMessageIds ?? [],
+    ),
+  );
+  const compactedContentOnlyMessageIds =
+    collectCompactedSnipContentOnlyMessageIds(state);
+  const stats: SnippedContentOnlyStats = {
+    tokens: 0,
+    messageCount: 0,
+  };
+
+  if (contentOnlyMessageIds.size === 0) {
+    return stats;
+  }
+
+  for (const message of state.Messages) {
+    if (
+      !contentOnlyMessageIds.has(message.id) ||
+      compactedContentOnlyMessageIds.has(message.id)
+    ) {
+      continue;
+    }
+
+    const contentOnlyMessage = createHistorySnipContentOnlyMessage(message);
+    if (!contentOnlyMessage) {
+      continue;
+    }
+
+    stats.tokens += getMessageTokenSize(contentOnlyMessage);
+    stats.messageCount++;
+    stats.lastMessageId = message.id;
+  }
+
+  return stats;
+}
+
+function collectCompactedSnipContentOnlyMessageIds(state: State): Set<MessageId> {
+  const throughMessageId =
+    state.autoCompress.snippedContentCompactedThroughMessageId;
+  const compactedIds = new Set<MessageId>();
+
+  if (!throughMessageId) {
+    return compactedIds;
+  }
+
+  const throughIndex = state.Messages.findIndex(
+    (message) => message.id === throughMessageId,
+  );
+  if (throughIndex === -1) {
+    return compactedIds;
+  }
+
+  const contentOnlyMessageIds = new Set(
+    ensureHistorySnips(state).flatMap(
+      (boundary) => boundary.contentOnlyMessageIds ?? [],
+    ),
+  );
+
+  for (let index = 0; index <= throughIndex; index++) {
+    const messageId = state.Messages[index]?.id;
+    if (messageId && contentOnlyMessageIds.has(messageId)) {
+      compactedIds.add(messageId);
+    }
+  }
+
+  return compactedIds;
 }
 
 export function ensureHistorySnips(state: State): HistorySnipBoundary[] {
@@ -902,11 +1002,79 @@ function isRegenerableAttachmentMessage(message: Message): boolean {
     message.source === "agent_message";
 }
 
-function calculateProtectedRecentTailStart(messages: Message[]): number {
-  const minRecentMessages = getHistorySnipMinRecentMessages();
-  const start = Math.max(0, messages.length - minRecentMessages);
+type ProjectionRecentTailStats = {
+  tokens: number;
+  apiMessages: number;
+  textMessages: number;
+};
 
-  return moveToSafeBusinessTailBoundary(messages, start);
+function calculateProtectedRecentTailStart(messages: Message[]): number {
+  return moveToSafeBusinessTailBoundary(
+    messages,
+    calculateProjectionRecentTailStart(messages),
+  );
+}
+
+function calculateProjectionRecentTailStart(messages: Message[]): number {
+  const legacyMinRecentMessages = getLegacyHistorySnipMinRecentMessages();
+  if (legacyMinRecentMessages !== null) {
+    return Math.max(0, messages.length - legacyMinRecentMessages);
+  }
+
+  let start = messages.length;
+  const stats: ProjectionRecentTailStats = {
+    tokens: 0,
+    apiMessages: 0,
+    textMessages: 0,
+  };
+
+  while (start > 0) {
+    if (isProjectionRecentTailLargeEnough(stats)) {
+      break;
+    }
+
+    if (stats.tokens >= getProjectionRecentTailMaxTokens()) {
+      break;
+    }
+
+    start--;
+    addMessageToProjectionRecentTailStats(stats, messages[start]!);
+  }
+
+  return start;
+}
+
+function isProjectionRecentTailLargeEnough(
+  stats: ProjectionRecentTailStats,
+): boolean {
+  return stats.tokens >= getProjectionRecentTailTargetTokens() &&
+    stats.apiMessages >= getProjectionRecentTailMinApiMessages() &&
+    stats.textMessages >= getProjectionRecentTailMinTextMessages();
+}
+
+function addMessageToProjectionRecentTailStats(
+  stats: ProjectionRecentTailStats,
+  message: Message,
+): void {
+  stats.tokens += getMessageTokenSize(message);
+  stats.apiMessages++;
+
+  if (hasProjectionTextContent(message)) {
+    stats.textMessages++;
+  }
+}
+
+function hasProjectionTextContent(message: Message): boolean {
+  if (message.role === "user") {
+    return message.content.trim().length > 0;
+  }
+
+  if (message.role === "assistant") {
+    return typeof message.content === "string" &&
+      message.content.trim().length > 0;
+  }
+
+  return false;
 }
 
 function moveToSafeBusinessTailBoundary(
@@ -1005,10 +1173,43 @@ function getDesiredHistorySnipTokens(): number {
   return getHistorySnipTargetTokens();
 }
 
-function getHistorySnipMinRecentMessages(): number {
+function getProjectionRecentTailTargetTokens(): number {
   return getPositiveIntegerEnv(
+    "OPENCAT_PROJECTION_RECENT_TAIL_TARGET_TOKENS",
+    DEFAULT_PROJECTION_RECENT_TAIL_TARGET_TOKENS,
+  );
+}
+
+function getProjectionRecentTailMaxTokens(): number {
+  return getPositiveIntegerEnv(
+    "OPENCAT_PROJECTION_RECENT_TAIL_MAX_TOKENS",
+    DEFAULT_PROJECTION_RECENT_TAIL_MAX_TOKENS,
+  );
+}
+
+function getProjectionRecentTailMinApiMessages(): number {
+  return getNonNegativeIntegerEnv(
+    "OPENCAT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES",
+    DEFAULT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES,
+  );
+}
+
+function getProjectionRecentTailMinTextMessages(): number {
+  return getNonNegativeIntegerEnv(
+    "OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES",
+    DEFAULT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES,
+  );
+}
+
+function getLegacyHistorySnipMinRecentMessages(): number | null {
+  return getOptionalNonNegativeIntegerEnv(
     "OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES",
-    DEFAULT_MIN_RECENT_MESSAGES_AFTER_SNIP,
+  );
+}
+
+function getLegacyBulkyToolResultKeepRecentCount(): number | null {
+  return getOptionalNonNegativeIntegerEnv(
+    "OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT",
   );
 }
 
@@ -1020,6 +1221,20 @@ function getPositiveIntegerEnv(name: string, fallback: number): number {
   }
 
   return fallback;
+}
+
+function getOptionalNonNegativeIntegerEnv(name: string): number | null {
+  if (!(name in process.env)) {
+    return null;
+  }
+
+  const configured = Number(process.env[name]);
+
+  if (Number.isFinite(configured) && configured >= 0) {
+    return Math.floor(configured);
+  }
+
+  return null;
 }
 
 function getNonNegativeIntegerEnv(name: string, fallback: number): number {
@@ -1206,13 +1421,6 @@ function getBulkyToolResultCompactTargetContextTokens(): number {
   return getPositiveIntegerEnv(
     "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
     DEFAULT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS,
-  );
-}
-
-function getBulkyToolResultKeepRecentCount(): number {
-  return getNonNegativeIntegerEnv(
-    "OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT",
-    DEFAULT_BULKY_TOOL_RESULT_KEEP_RECENT,
   );
 }
 

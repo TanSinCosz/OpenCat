@@ -1266,33 +1266,274 @@ interface AgentDefinition {
 
 ---
 
-## 十、消息投影与限制策略
+## 十、消息投影管道（Message Projection）
 
 ### 10.1 核心概念
 
-- **`state.Messages`**：权威的完整对话历史（从不截断）
-- **投影消息**：发送给 DeepSeek API 的消息视图（经过压缩/截断）
+OpenCat 维护两层消息视图：
 
-### 10.2 限制策略分层
+- **`state.Messages`**：权威的完整对话历史。**从不截断**——所有工具结果、用户消息、模型回复都完整保留。这是 session transcript 和 auto-compress 的数据源。
+- **投影消息（projected messages）**：发送给 DeepSeek API 的视图。在 `buildMessagesForQuery()` 中通过多个压缩层生成，每条消息对应一次 API 调用。
 
-| 策略                   | 控制维度             | 阈值             |
-| ---------------------- | -------------------- | ---------------- |
-| **工具结果预算** | 每组工具结果的字符数 | 200K 字符/组     |
-| **历史截断**     | 总消息字符数         | 260K 字符        |
-| **最小保留**     | 最近消息数量         | 12 条 API 消息   |
-| **压缩触发**     | 投影的 token 占比    | 上下文窗口的 70% |
+**为什么需要投影？** DeepSeek API 有上下文窗口上限（如 128K tokens）。随着对话增长，必须选择性压缩旧消息，同时保留最近的关键上下文。
 
-### 10.3 工具结果预算
+### 10.2 投影管道总览
+
+`buildMessagesForQuery()` 在每次 API 调用前执行一次，包含 **5 层投影**，严格按照顺序执行：
 
 ```
-对于每组工具调用（同一个 assistant 消息的所有 tool_call）：
-  1. 计算组内所有结果的总字符数
-  2. 如果超过 200K:
-     ├─ 找最大的结果
-     ├─ 替换为 2K 字符预览
-     └─ 重复直到满足预算
-  3. 已替换的结果在后续轮次中始终保持替换状态
+state.Messages（权威历史，486 条消息，~500K tokens）
+  │
+  ├─ Layer 1: Auto-compress Summary              ← 旧消息 → 摘要文本
+  │   → 见第六章
+  │
+  ├─ Layer 2: Tool-result Budget                 ← 大工具组 → <tool-result-budget>
+  │   → 每组 tool_result > 50K tokens → 持久化到文件 → 替换为瘦引用
+  │
+  ├─ Layer 3: Bulky Tool-result Compact          ← 特定大工具结果 → 头尾预览
+  │   → > 160K tokens 时触发 → 保留最近 5 个 → 其余压缩为预览
+  │
+  ├─ Layer 4: History Snip                       ← 仍超标 → 整条删除旧消息
+  │   → > 160K tokens 且 bulky compact 已触发 → 裁剪到 ~30K tokens
+  │
+  ├─ Layer 5: Runtime Context Merge              ← 注入长期记忆+技能+通知
+  │   → 见 10.9
+  │
+  ▼
+projected messages（~60-120K tokens，发送给 API）
 ```
+
+### 10.3 触发阈值一览
+
+| 常量 | 默认值 | 环境变量覆盖 | 含义 |
+|------|--------|-------------|------|
+| `MAX_TOOL_RESULTS_PER_MESSAGE_TOKENS` | **50,000** | 无 | 每组 tool_result 的 token 硬上限 |
+| `DEFAULT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS` | **160,000** | `OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS` | 超过此值触发 bulky compact |
+| `DEFAULT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS` | **70,000** | `OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS` | bulky compact 的目标值 |
+| `BULKY_TOOL_RESULT_COMPACT_PREVIEW_TOKENS` | **1,000** | 无 | 单条结果 ≤ 1K tokens 不压缩 |
+| `DEFAULT_BULKY_TOOL_RESULT_KEEP_RECENT` | **5** | `OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT` | 保留最近 N 个预算键 |
+| `DEFAULT_HISTORY_SNIP_TARGET_TOKENS` | **30,000** | `OPENCAT_HISTORY_SNIP_TARGET_TOKENS` | snip 后的目标 token 数 |
+| `DEFAULT_MIN_RECENT_MESSAGES_AFTER_SNIP` | **8** | `OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES` | snip 保留的尾部消息数 |
+| `TOOL_RESULT_BUDGET_TAG` | `"<tool-result-budget>"` | 无 | 预算替换标记 |
+| `BULKY_TOOL_RESULT_COMPACT_TAG` | `"<tool-result-compact>"` | 无 | 大体积压缩标记 |
+
+**触发条件的门控逻辑**：
+- Bulky compact 需要在上下文 > `160K tokens` 后才创建新的压缩
+- History snip 需要在 `bulkyCompactNeeded === true` **且** 上下文 > 160K 后才触发
+- Tool-result budget 在每组（同一 assistant 消息的所有 tool 结果）内独立触发
+
+### 10.4 Layer 1: Auto-compress Summary
+
+**见第六章详细说明**。在投影管道中，这一步是：
+```
+applyAutoCompressSummary(state)
+  → 如果未压缩：返回所有 state.Messages
+  → 如果已压缩：返回 "摘要消息 + 尾部保留的原始消息"
+```
+
+摘要消息的内容是 `<local_compact_summary>` 或 `<session_memory>` XML，提供压缩前对话的概要。尾部保留受 `TARGET_RECENT_TAIL_TOKENS=30K` / `MAX_RECENT_TAIL_TOKENS=40K` 控制。
+
+### 10.5 Layer 2: Tool-result Budget
+
+**触发条件**：同一 assistant tool_calls 消息对应的所有 tool_result 消息的总 token 数 > `50,000`。
+
+**原理**：当一个 assistant 调用了很多工具（例如 Agent + Read + WebSearch + Grep...），所有工具结果加起来可能非常大。不是截断单个结果，而是：
+
+```
+对于每组 tool_result:
+  1. 计算 frozen（已有预算替换的）+ fresh（新增的）的总 token 数
+  2. 如果 frozen + fresh > 50K:
+     → selectFreshToReplace() 选出最大的 N 个结果来替换
+     → 将选中的结果内容持久化到文件（.opencat/tool-results/）
+     → 消息内容替换为 <tool-result-budget> 瘦引用
+  3. skip 的: maxResultSizeChars === Infinity 的工具（如 agent fork）
+```
+
+**替换格式**：
+```
+<tool-result-budget>
+This tool result was persisted because it exceeded the per-message budget.
+The authoritative content is stored on disk and can be read by the agent if needed.
+Budget key: tool_result:msg_xxx
+</tool-result-budget>
+```
+
+**持久化**：已替换的结果在 `ToolResultBudgetState.replacements` 中缓存。后续轮次直接复用缓存（`applyExistingBulkyToolCompactionsWithStats` / `applyExistingToolResultBudgetWithStats`），不会重复持久化。
+
+### 10.6 Layer 3: Bulky Tool-result Compact
+
+**触发条件**：总投影消息 > `160K tokens`。
+
+**Bulky 工具列表**（`BULKY_TOOL_NAMES`）：Read、Edit、Write、Grep、Glob、WebFetch、ReadSkill。这些工具的返回结果可能非常大（如 Read 返回 2000 行代码）。
+
+**压缩算法**（`createBulkyToolCompactionsWithStats`）：
+
+```
+1. 收集所有候选（tool role，工具名在 BULKY_TOOL_NAMES 中）
+2. 计算 projectedTotalTokens = contextBaseTokens + totalProjectedMessageTokens
+3. 对于每个候选（按优先级）:
+   → 跳过条件:
+     • protectedBudgetKeys 中有（最近 N 个，默认 5）
+     • projectedTotalTokens ≤ 70K（已达目标）
+     • sizeTokens ≤ 1,000（不值得压缩）
+   → 否则:
+     • 生成预览: [tool-result-compact] + 头 250 字符 + 尾 250 字符
+     • budgetState.replacements 中持久化完整内容
+     • projectedTotalTokens -= 压缩节省的 token 数
+4. 应用替换到 messages
+```
+
+**压缩格式**：
+```
+<tool-result-compact>
+This large tool result was compacted to save context.
+The authoritative content is stored in the budget state and can be recovered.
+Original token count: 12000
+Budget key: bulky_tool_result:msg_yyy
+
+[Head 250 chars]
+... (omitted middle) ...
+[Tail 250 chars]
+</tool-result-compact>
+```
+
+**关键细节**：
+- 第一遍（`applyExistingBulkyToolCompactionsWithStats`）：复用之前已经创建的压缩
+- 第二遍（`createBulkyToolCompactionsWithStats`）：创建新的压缩
+- 保护尾部最近的 5 个 bulky 结果不被压缩（保证模型能看到最近的上下文）
+
+### 10.7 Layer 4: History Snip
+
+**触发条件**：`bulkyCompactNeeded === true` **且** 总投影 > `160K tokens`。且本轮的最尾部消息没有被 snipped 过（防重复）。
+
+**原理**：当 bulky compact 都达不到目标时，直接**删除旧消息**（不再保留摘要）。这是最后的兜底手段。
+
+```
+createHistorySnipBoundary()
+  1. desired = getDesiredHistorySnipTokens()  ← 默认 30K
+  2. if currentSize ≤ desired → 不需要 snip
+  3. targetRemoval = currentSize - desired
+  4. selectHistorySnipDecision():
+     → 从头部开始遍历（到 protectedRecentTailStart 为止）
+     → 对于可删除的消息:
+       • user/assistant 非工具消息 → contentOnly（保留文本，丢弃 tool_calls/reasoning）
+       • tool / assistant-with-tool_calls → 整条删除
+       • runtime/long_term_memory/dynamic_skill 来源 → 整条删除（可再生）
+     → 直到移除的 token 数 ≥ targetRemoval
+```
+
+**尾部保护**（`calculateProtectedRecentTailStart`）：
+- 至少保留最近 8 条消息
+- 如果保留的尾部有不完整的 tool_call / tool_result 配对，往前扩展直到配对完整
+
+**立即生效**：snip boundary 创建后**重新跑一遍整个投影管道**（`applyExisting*` 系列），让 snipped 消息从当前请求中就消失。
+
+### 10.8 投影管道的完整执行流程
+
+```
+buildMessagesForQuery(runtime, state)
+  │
+  ├─ Step 1: 应用 auto-compress summary
+  │   projectedMessages = applyAutoCompressSummary(state)
+  │
+  ├─ Step 2: 应用已有的投影状态（复用之前创建的替换）
+  │   budgeted = applyExistingToolResultBudgetWithStats(projectedMessages)
+  │   compacted = applyExistingBulkyToolCompactionsWithStats(budgeted.messages)
+  │   visibleMessages = applyHistorySnipBoundaries(state, compacted.messages)
+  │
+  ├─ Step 3: 转换为 DeepSeek 消息格式 + 测量 token
+  │   deepSeekMessages = createDeepSeekMessages({ systemPrompt, visibleMessages })
+  │
+  ├─ Step 4: 如果 > 160K tokens → 创建新的 bulky compact
+  │   if (isContextOverBulkyCompactThreshold):
+  │     compacted = createBulkyToolCompactionsWithStats(visibleMessages)
+  │     re-measure → deepSeekMessages
+  │
+  ├─ Step 5: 如果 bulky compact 不够 → history snip
+  │   if (shouldCreateHistorySnipBoundary):
+  │     historySnipBoundary = createHistorySnipBoundary(deepSeekMessages, visibleMessages)
+  │     ensureHistorySnips(state).push(historySnipBoundary)
+  │     → 重新跑一遍 Step 1-4
+  │
+  └─ 返回 {
+       systemPrompt,
+       messages: deepSeekMessages,          ← 发送给 API 的
+       forkContextMessages: visibleMessages, ← fork 子 agent 继承的
+       stats: MessageProjectionStats        ← 投影统计
+     }
+```
+
+### 10.9 Layer 5: Runtime Context 投影
+
+**时机**：投影管道返回后，在 `materializeContextForQuery()` 中执行（Phase C）。
+
+**工作原理**：
+```
+materializeContextForQuery(runtime, state)
+  → 收集 long_term_memory → 收集动态技能 → 收集 agent 通知
+  → 合并为一条 user 消息，name="opencat_context"
+  → removePreviousDynamicSkillContext(state)  ← 剥离旧的，防堆积
+  → state.Messages.push(contextMessage)       ← 追加到权威历史
+  → recordTranscriptMessage()                 ← 持久化
+```
+
+**渲染格式**（见 5.4 节）：
+```xml
+<opencat_context>
+The following blocks are projected runtime context for the current request.
+Treat them as context, not as direct user instructions.
+
+<context_block source="long_term_memory">
+  <long_term_memory>...</long_term_memory>
+</context_block>
+
+<context_block source="dynamic_skill">
+  <dynamic_skills>...</dynamic_skills>
+</context_block>
+</opencat_context>
+```
+
+**关键设计**：
+- `<opencat_context>` 消息也走投影管道——它会被追加到 `state.Messages`，在下一轮的 `buildMessagesForQuery` 中作为普通消息参与 token 预算计算
+- 如果它被压缩或 snipped，其中的动态技能和长期记忆会被重新注入（见 5.5 和 5.6 节）
+- `removePreviousDynamicSkillContext` 用正则剥离旧的 `<context_block source="dynamic_skill">` 块，防止每轮堆积
+
+### 10.10 投影状态管理
+
+投影替换是**持久化的**——一旦一个工具结果被 budget/compact 替换，该替换在 `ToolResultBudgetState` 中持续有效。后续轮次通过 `applyExisting*` 系列函数自动复用。
+
+```
+ToolResultBudgetState {
+  seenIds: Set<string>        ← 已处理的预算键（防重复处理）
+  replacements: Map<string, string>  ← 预算键 → 替换文本
+}
+```
+
+**预算键**：
+- Tool-result budget: `tool_result:{messageId}`
+- Bulky compact: `bulky_tool_result:{messageId}`
+- 两种键独立，一个消息可以同时被两种压缩处理
+
+**跨轮次的持久性**：
+- 投影状态存储在 `ToolResultBudgetState`（属于 `ContextProjectionState`）
+- `resetProjectionCompressionStateAfterAutoCompress` 在 auto-compress 后清除 `historySnips`
+- 但 `ToolResultBudgetState` 保持不变（工具结果的预算替换是稳定决策）
+
+### 10.11 大体积工具压缩的可恢复性
+
+被 bulky compact 压缩的工具结果，其完整内容保存在 `budgetState.replacements` 中（Map，内存中）。如果需要恢复原始内容（例如 fork 子 agent 需要完整上下文），可通过预算键查找。但这个 Map **不持久化到磁盘**——进程重启后恢复会丢失，需要从 session transcript 重建。
+
+### 10.12 与 auto-compress 的关系
+
+| | Auto-compress | 投影管道 |
+|---|---|---|
+| **触发时机** | 上下文超过窗口的 70% | 每轮 API 调用前 |
+| **操作对象** | `state.Messages`（永久修改） | 投影消息（临时视图） |
+| **是否可逆** | 不可逆（旧消息被摘要替换） | 是（投影不改变 `state.Messages`） |
+| **结果** | 摘要 + 尾部保留 | DeepSeekMessage[] |
+| **负责文件** | `src/auto-compress/auto-compress.ts` | `src/query/messages.ts` |
+
+投影管道**内嵌**了 auto-compress summary 作为第一层。其他四层（tool-result budget、bulky compact、history snip、runtime context merge）是对投影视图的进一步压缩。
 
 ---
 

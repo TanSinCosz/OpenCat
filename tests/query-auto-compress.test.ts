@@ -79,7 +79,7 @@ test("query auto-compresses oversized projections with existing session memory b
   assert.equal(state.sessionMemory.status, "ready");
   assert.equal(state.autoCompress.summaries.length, 1);
   assert.ok(state.autoCompress.summaries.at(-1));
-  assert.equal(state.historySnips.length, 0);
+  assert.equal(state.historySnips.length, 1);
   assert.equal(state.toolResultBudgetState.seenIds.size, 0);
   assert.equal(state.toolResultBudgetState.replacements.size, 0);
   assert.equal(runtime.toolResultBudgetState, state.toolResultBudgetState);
@@ -187,7 +187,7 @@ test("auto-compress clears bulky compact state but preserves recent group budget
   const result = await applyAutoCompression(runtime, state);
 
   assert.equal(result.status, "compressed");
-  assert.equal(state.historySnips.length, 0);
+  assert.equal(state.historySnips.length, 1);
   assert.equal(state.toolResultBudgetState.seenIds.has(oldBudgetKey), false);
   assert.equal(
     state.toolResultBudgetState.replacements.has(oldBudgetKey),
@@ -207,6 +207,159 @@ test("auto-compress clears bulky compact state but preserves recent group budget
     "<tool-result-budget>recent</tool-result-budget>",
   );
   assert.equal(runtime.toolResultBudgetState, state.toolResultBudgetState);
+});
+
+test("query compacts visible snip content-only history after session memory covers it", async () => {
+  const originalAutoCompressTrigger =
+    process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS;
+  const originalSnippedContentTrigger =
+    process.env.OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS;
+  const streamRequests: DeepSeekStreamRequest[] = [];
+  const client: DeepSeekClient = {
+    async create() {
+      throw new Error("session memory should already be ready");
+    },
+    async *stream(input) {
+      streamRequests.push(input);
+      yield createAssistantChunk("snipped content covered");
+      yield {
+        chunk: null,
+        raw: "[DONE]",
+        done: true,
+      };
+    },
+    async collectStream() {
+      throw new Error("collectStream is not used in this test");
+    },
+  };
+  const oldUser = createMessage({
+    role: "user",
+    content: `OLD_CONTENT_ONLY_USER\n${"old user text ".repeat(300)}`,
+  });
+  const oldAssistant = createMessage({
+    role: "assistant",
+    content: `OLD_CONTENT_ONLY_ASSISTANT\n${"old assistant text ".repeat(300)}`,
+  });
+  const recentMessages = Array.from({ length: 8 }, (_, index) =>
+    createMessage({
+      role: "user",
+      content: `recent user ${index}`,
+    })
+  );
+  const state = createState({
+    messages: [
+      oldUser,
+      oldAssistant,
+      ...recentMessages,
+    ],
+    sessionMemory: {
+      ...createReadySessionMemory("The old content-only range has been summarized."),
+      lastSummarizedMessageId: oldAssistant.id,
+    },
+  });
+  state.historySnips.push({
+    id: "history_snip_content_only_for_compact",
+    removedMessageIds: [],
+    contentOnlyMessageIds: [oldUser.id, oldAssistant.id],
+    createdAtMessageId: state.Messages.at(-1)!.id,
+    reason: "prompt_budget",
+    createdAt: Date.now(),
+  });
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-snip-content-compact-")),
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    deepSeekClient: client,
+    MemoryConfig: createMemoryConfig(),
+  });
+
+  try {
+    process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS = "999999";
+    process.env.OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS = "10";
+
+    for await (const _event of query(runtime, state, { maxTurns: 1 })) {
+      // Drain the query stream.
+    }
+  } finally {
+    restoreEnv("OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS", originalAutoCompressTrigger);
+    restoreEnv(
+      "OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS",
+      originalSnippedContentTrigger,
+    );
+  }
+
+  assert.equal(state.autoCompress.summaries.length, 1);
+  assert.equal(
+    state.autoCompress.snippedContentCompactedThroughMessageId,
+    oldAssistant.id,
+  );
+  assert.equal(state.historySnips.length, 1);
+  assert.equal(streamRequests.length, 1);
+
+  const requestText = JSON.stringify(streamRequests[0]!.messages);
+  assert.match(requestText, /<session_memory>/);
+  assert.doesNotMatch(requestText, /OLD_CONTENT_ONLY_USER/);
+  assert.doesNotMatch(requestText, /OLD_CONTENT_ONLY_ASSISTANT/);
+});
+
+test("auto-compress skips snip compaction when session memory does not cover it", async () => {
+  const oldMessage = createMessage({
+    role: "user",
+    content: "covered by session memory",
+  });
+  const uncoveredMessage = createMessage({
+    role: "assistant",
+    content: "not yet covered by session memory",
+  });
+  const state = createState({
+    messages: [
+      oldMessage,
+      uncoveredMessage,
+    ],
+    sessionMemory: {
+      ...createReadySessionMemory("Only the first message has been summarized."),
+      lastSummarizedMessageId: oldMessage.id,
+    },
+  });
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-snip-content-uncovered-")),
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    deepSeekClient: {
+      async create() {
+        throw new Error("session memory should already be ready");
+      },
+      async *stream() {
+        throw new Error("stream should not be used");
+      },
+      async collectStream() {
+        throw new Error("collectStream is not used in this test");
+      },
+    },
+    MemoryConfig: createMemoryConfig(),
+    transcriptStore: false,
+  });
+
+  const result = await applyAutoCompression(runtime, state, {
+    snippedContentThroughMessageId: uncoveredMessage.id,
+  });
+
+  assert.equal(result.status, "skipped");
+  assert.equal(
+    result.status === "skipped" ? result.reason : "",
+    "session_memory_does_not_cover_snipped_content",
+  );
+  assert.equal(state.autoCompress.summaries.length, 0);
+  assert.equal(
+    state.autoCompress.snippedContentCompactedThroughMessageId,
+    undefined,
+  );
 });
 
 test("query flushes agent notifications after auto-compression", async () => {
@@ -481,4 +634,13 @@ function createMemoryConfig() {
       config: {},
     },
   };
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+
+  process.env[name] = value;
 }

@@ -94,6 +94,7 @@ export type EvaluationEvent = TelemetryAgentFields & (
   | {
     type: "auto_compress_started";
     messageCount: number;
+    reason?: "snipped_content";
   }
   | {
     type: "auto_compress_finished";
