@@ -27,6 +27,7 @@ export type EvaluationEvent = TelemetryAgentFields & (
     toolResultBudgetReplacementCount: number;
     bulkyToolCompactCount: number;
     historySnipCount: number;
+    hardHistorySnipApplied: boolean;
     toolResultCharsBeforeBudget: number;
     toolResultCharsAfterBudget: number;
     toolResultCharsAfterCompact: number;
@@ -63,6 +64,12 @@ export type EvaluationEvent = TelemetryAgentFields & (
     argsPreview: string;
   }
   | {
+    type: "tool_permission_requested";
+    toolCallId: string;
+    toolName: string;
+    mode: "plan";
+  }
+  | {
     type: "tool_call_finished";
     turn: number;
     toolCallId: string;
@@ -83,6 +90,18 @@ export type EvaluationEvent = TelemetryAgentFields & (
     durationMs: number;
   }
   | {
+    type: "session_memory_update_started";
+    messageCount: number;
+  }
+  | {
+    type: "session_memory_update_finished";
+    status: "updated" | "skipped";
+    messageCount: number;
+    reason?: string;
+    contentChars?: number;
+    lastSummarizedMessageId?: string;
+  }
+  | {
     type: "session_memory_update_failed";
     error: string;
   }
@@ -92,9 +111,22 @@ export type EvaluationEvent = TelemetryAgentFields & (
     error: string;
   }
   | {
+    type: "workspace_patch_snapshot_saved";
+    reason: "completed" | "max_turns" | "failed" | "manual" | "approved";
+    patchPath: string;
+    latestPath: string;
+    bytes: number;
+    sequence: number;
+  }
+  | {
+    type: "workspace_patch_snapshot_failed";
+    reason: "completed" | "max_turns" | "failed" | "manual" | "approved";
+    error: string;
+  }
+  | {
     type: "auto_compress_started";
     messageCount: number;
-    reason?: "snipped_content";
+    reason?: "context_size";
   }
   | {
     type: "auto_compress_finished";

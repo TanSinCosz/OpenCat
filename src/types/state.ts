@@ -14,6 +14,7 @@ import {
   createSessionMemoryState,
   type SessionMemoryState,
 } from "./session-memory.js";
+import type { TodoList } from "../Tools/TodoWrite/type.js";
 
 export interface InvokedSkill {
   name: string;
@@ -36,6 +37,7 @@ export interface State {
   agentTasks: AgentTasksState;
   agentNotifications: AgentNotification[];
   invokedSkills: InvokedSkill[];
+  todos: Record<string, TodoList>;
 }
 
 export interface CreateStateOptions {
@@ -49,6 +51,7 @@ export interface CreateStateOptions {
   agentTasks?: AgentTasksState;
   agentNotifications?: AgentNotification[];
   invokedSkills?: InvokedSkill[];
+  todos?: Record<string, TodoList>;
 }
 
 export function createState(options: CreateStateOptions = {}): State {
@@ -70,5 +73,6 @@ export function createState(options: CreateStateOptions = {}): State {
     agentNotifications: options.agentNotifications ??
       createAgentNotificationsState(),
     invokedSkills: options.invokedSkills ?? [],
+    todos: options.todos ?? {},
   };
 }

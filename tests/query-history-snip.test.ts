@@ -510,6 +510,82 @@ test("buildMessagesForQuery skips history snip when bulky compact reaches the ta
   }
 });
 
+test("buildMessagesForQuery rolls back new bulky compactions when snip still exceeds cancel threshold", async () => {
+  const originalHistoryTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
+  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
+  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalBulkyCompactTargetTokens =
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
+  const originalCancelTokens = process.env.OPENCAT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS;
+  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+
+  try {
+    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "80";
+    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "0";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "80";
+    process.env.OPENCAT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS = "1";
+    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
+
+    const state = createState({
+      messages: [
+        createMessage({ role: "user", content: "old user request" }),
+        createMessage({
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_large_read_rollback",
+              type: "function",
+              function: {
+                name: "Read",
+                arguments: "{\"file_path\":\"large.ts\"}",
+              },
+            },
+          ],
+        }),
+        createMessage({
+          role: "tool",
+          tool_call_id: "call_large_read_rollback",
+          content: "large-read-head\n" + "x".repeat(30_000) + "\nlarge-read-tail",
+        }),
+        createMessage({ role: "user", content: "recent user request" }),
+      ],
+    });
+    const runtime = createRuntime({
+      deepSeekRuntimeConfig: {
+        apiKey: "test-key",
+        model: "deepseek-v4-flash",
+        maxTokens: 1024,
+      },
+      MemoryConfig: createMemoryConfig(),
+      transcriptStore: false,
+      tools: [],
+    });
+
+    const result = await buildMessagesForQuery(runtime, state);
+    const hasCompactedToolResult = result.forkContextMessages.some((message) =>
+      message.role === "tool" && message.content.includes("<tool-result-compact>")
+    );
+
+    assert.equal(state.historySnips.length, 0);
+    assert.equal(result.stats.historySnipCount, 0);
+    assert.equal(state.toolResultBudgetState.seenIds.size, 0);
+    assert.equal(state.toolResultBudgetState.replacements.size, 0);
+    assert.equal(hasCompactedToolResult, false);
+  } finally {
+    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalHistoryTargetTokens);
+    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
+    restoreEnv(
+      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+      originalBulkyCompactTargetTokens,
+    );
+    restoreEnv("OPENCAT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS", originalCancelTokens);
+    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+  }
+});
+
 test("compactBulkyToolResults compacts older read-like outputs under context pressure", () => {
   const originalThreshold = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
   const originalCompactTarget =
@@ -791,6 +867,8 @@ test("compactBulkyToolResults defaults to recent-tail protection under context p
   const originalTailMax = process.env.OPENCAT_PROJECTION_RECENT_TAIL_MAX_TOKENS;
   const originalTailMinApi =
     process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES;
+  const originalTailMinUserContent =
+    process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_USER_CONTENT_MESSAGES;
   const originalTailMinText =
     process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES;
 
@@ -801,6 +879,7 @@ test("compactBulkyToolResults defaults to recent-tail protection under context p
     delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_TARGET_TOKENS;
     delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_MAX_TOKENS;
     delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES;
+    delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_USER_CONTENT_MESSAGES;
     delete process.env.OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES;
     const runtime = createRuntime({
       deepSeekRuntimeConfig: {
@@ -870,6 +949,10 @@ test("compactBulkyToolResults defaults to recent-tail protection under context p
     restoreEnv(
       "OPENCAT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES",
       originalTailMinApi,
+    );
+    restoreEnv(
+      "OPENCAT_PROJECTION_RECENT_TAIL_MIN_USER_CONTENT_MESSAGES",
+      originalTailMinUserContent,
     );
     restoreEnv(
       "OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES",

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -153,6 +153,48 @@ test("buildMessagesForQuery does not inject unmaterialized runtime context", asy
     ).length,
     0,
   );
+});
+
+test("buildMessagesForQuery prepends project instruction context", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-project-context-"));
+  await writeFile(
+    join(cwd, "CLAUDE.md"),
+    "Always prefer the project-specific testing command.",
+    "utf8",
+  );
+  const runtime = createRuntime({
+    cwd,
+    sessionId: "session_project_context",
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    deepSeekClient: createNoopClient(),
+    MemoryConfig: createMemoryConfig(),
+  });
+  const state = createState({
+    messages: [
+      createMessage({
+        role: "user",
+        content: "what should I do?",
+      }),
+    ],
+  });
+
+  const projection = await buildMessagesForQuery(runtime, state);
+
+  assert.equal(state.Messages.length, 1);
+  assert.equal(projection.messages[1]?.role, "user");
+  assert.match(
+    projection.messages[1]?.content ?? "",
+    /<system-reminder>/,
+  );
+  assert.match(
+    projection.messages[1]?.content ?? "",
+    /Always prefer the project-specific testing command/,
+  );
+  assert.equal(projection.messages.at(-1)?.content, "what should I do?");
 });
 
 test("query materializes runtime context into durable messages", async () => {

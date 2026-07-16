@@ -256,7 +256,7 @@ test("transcript restore keeps pending agent notifications from snapshots", asyn
   assert.equal(restored.agentNotifications[0]?.id, "agent_notification_restore");
 });
 
-test("transcript restore keeps runtime context separate from conversation messages", async () => {
+test("transcript snapshots omit volatile runtime context messages", async () => {
   const runtime = createRuntime({
     cwd: await mkdtemp(join(tmpdir(), "opencat-runtime-context-transcript-")),
     sessionId: "session_runtime_context_restore",
@@ -283,19 +283,13 @@ test("transcript restore keeps runtime context separate from conversation messag
   await recordTranscriptStateSnapshot(runtime, state, "runtime_context");
 
   const restored = await loadStateFromTranscript(runtime.transcriptStore!);
+  const raw = await readFile(runtime.transcriptStore!.path, "utf8");
 
   assert.ok(restored);
   assert.equal(restored.Messages.length, 1);
   assert.equal(restored.Messages[0]?.content, "real user prompt");
-  assert.equal(restored.runtimeContextMessages.length, 1);
-  assert.equal(
-    restored.runtimeContextMessages[0]?.source,
-    "agent_notification",
-  );
-  assert.match(
-    restored.runtimeContextMessages[0]?.content ?? "",
-    /runtime only/,
-  );
+  assert.equal(restored.runtimeContextMessages.length, 0);
+  assert.doesNotMatch(raw, /runtime only/);
 });
 
 test("transcript restore strips stale dynamic skill context blocks", async () => {
@@ -411,6 +405,49 @@ test("transcript restore keeps tool result projection replacement state", async 
     restored.toolResultBudgetState.replacements.get("bulky_tool_result:message_1"),
     "<tool-result-compact>preview</tool-result-compact>",
   );
+});
+
+test("transcript merges lean state snapshots without repeating projection state", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-lean-state-transcript-")),
+    sessionId: "session_lean_state_restore",
+    deepSeekRuntimeConfig: createRuntimeConfig(),
+    deepSeekClient: createNoopClient(),
+    MemoryConfig: createMemoryConfig(),
+  });
+  const state = createState();
+  const marker = "very-large-tool-budget-marker";
+
+  state.toolResultBudgetState.seenIds.add("tool_result:seen");
+  state.toolResultBudgetState.replacements.set(
+    "bulky_tool_result:message_1",
+    `<tool-result-compact>${marker}</tool-result-compact>`,
+  );
+
+  await recordTranscriptStateSnapshot(runtime, state, "projection");
+
+  state.agentNotifications.push({
+    id: "agent_notification_restore",
+    agentTaskId: "agent_1",
+    agentType: "worker",
+    status: "completed",
+    description: "Agent completed",
+    message: "runtime notification",
+    createdAt: 1,
+  });
+  await recordTranscriptStateSnapshot(runtime, state, "runtime_context");
+
+  const restored = await loadStateFromTranscript(runtime.transcriptStore!);
+  const raw = await readFile(runtime.transcriptStore!.path, "utf8");
+
+  assert.ok(restored);
+  assert.ok(restored.toolResultBudgetState.seenIds.has("tool_result:seen"));
+  assert.match(
+    restored.toolResultBudgetState.replacements.get("bulky_tool_result:message_1") ?? "",
+    new RegExp(marker),
+  );
+  assert.equal(restored.agentNotifications.length, 1);
+  assert.equal(raw.match(new RegExp(marker, "g"))?.length, 1);
 });
 
 test("transcript restore recovers reasoning-only assistant messages", async () => {

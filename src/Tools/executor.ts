@@ -3,19 +3,43 @@ import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
 import type { Tool, Tools } from "./types.js";
 
+export type ToolCallExecutionResult = {
+  message: DeepSeekMessage;
+  permissionDenied?: {
+    reason: string;
+  };
+};
+
+export type ToolCallExecutionOptions = {
+  bypassPlanModePermission?: boolean;
+};
+
 export async function executeToolCall(
   toolCall: DeepSeekToolCall,
   tools: Tools,
   runtime: Runtime,
   state: State,
 ): Promise<DeepSeekMessage> {
+  return (await executeToolCallWithMetadata(toolCall, tools, runtime, state))
+    .message;
+}
+
+export async function executeToolCallWithMetadata(
+  toolCall: DeepSeekToolCall,
+  tools: Tools,
+  runtime: Runtime,
+  state: State,
+  options: ToolCallExecutionOptions = {},
+): Promise<ToolCallExecutionResult> {
   const tool = findTool(tools, toolCall.function.name);
 
   if (!tool) {
-    return createToolResultMessage(
-      toolCall.id,
-      renderUnavailableToolMessage(toolCall.function.name, tools, runtime),
-    );
+    return {
+      message: createToolResultMessage(
+        toolCall.id,
+        renderUnavailableToolMessage(toolCall.function.name, tools, runtime),
+      ),
+    };
   }
 
   try {
@@ -23,7 +47,9 @@ export async function executeToolCall(
     const validation = validateToolInput(tool, parsedInput);
 
     if (validation.ok === false) {
-      return createToolResultMessage(toolCall.id, validation.error);
+      return {
+        message: createToolResultMessage(toolCall.id, validation.error),
+      };
     }
 
     const permittedInput = await applyToolPermission(
@@ -31,12 +57,18 @@ export async function executeToolCall(
       validation.input,
       runtime,
       state,
+      options,
     );
     if (permittedInput.ok === false) {
-      return createToolResultMessage(
-        toolCall.id,
-        `Permission denied for tool ${tool.name}: ${permittedInput.error}`,
-      );
+      return {
+        message: createToolResultMessage(
+          toolCall.id,
+          `Permission denied for tool ${tool.name}: ${permittedInput.error}`,
+        ),
+        permissionDenied: {
+          reason: permittedInput.error,
+        },
+      };
     }
 
     const output = await tool.call(
@@ -45,13 +77,32 @@ export async function executeToolCall(
       runtime,
       state,
     );
-    return createToolResultMessage(
-      toolCall.id,
-      formatToolResult(tool, output),
-    );
+    return {
+      message: createToolResultMessage(
+        toolCall.id,
+        formatToolResult(tool, output),
+      ),
+    };
   } catch (error) {
-    return createToolResultMessage(toolCall.id, stringifyError(error));
+    return {
+      message: createToolResultMessage(toolCall.id, stringifyError(error)),
+    };
   }
+}
+
+export function createPermissionDeniedToolCallResult(
+  toolCall: DeepSeekToolCall,
+  reason: string,
+): ToolCallExecutionResult {
+  return {
+    message: createToolResultMessage(
+      toolCall.id,
+      `Permission denied for tool ${toolCall.function.name}: ${reason}`,
+    ),
+    permissionDenied: {
+      reason,
+    },
+  };
 }
 
 async function applyToolPermission(
@@ -59,7 +110,15 @@ async function applyToolPermission(
   input: unknown,
   runtime: Runtime,
   state: State,
+  options: ToolCallExecutionOptions,
 ): Promise<{ ok: true; input: unknown } | { ok: false; error: string }> {
+  const planModeDenial = options.bypassPlanModePermission
+    ? null
+    : getPlanModeDenial(tool, state);
+  if (planModeDenial) {
+    return { ok: false, error: planModeDenial };
+  }
+
   const canUseTool = runtime.toolUseContext.canUseTool;
   if (!canUseTool) {
     return { ok: true, input };
@@ -81,6 +140,38 @@ async function applyToolPermission(
     ok: true,
     input: decision.updatedInput ?? input,
   };
+}
+
+const PLAN_MODE_BLOCKED_TOOLS = new Set([
+  "Agent",
+  "Bash",
+  "Edit",
+  "MemorySave",
+  "SendMessage",
+  "Write",
+]);
+
+export function isPlanModeBlockedToolName(
+  toolName: string,
+  state: State,
+): boolean {
+  return state.mode === "plan" && PLAN_MODE_BLOCKED_TOOLS.has(toolName);
+}
+
+function getPlanModeDenial(tool: Tool, state: State): string | null {
+  if (state.mode !== "plan" || !PLAN_MODE_BLOCKED_TOOLS.has(tool.name)) {
+    return null;
+  }
+
+  return getPlanModeToolDenialReason();
+}
+
+export function getPlanModeToolDenialReason(): string {
+  return [
+    "Current mode is plan. This mode is read-only and cannot use tools that modify files, run shell commands, launch or message agents, or persist long-term memory.",
+    "Use Read, Grep, Glob, ReadSkill, WebSearch/WebFetch, or TodoWrite to finish the plan.",
+    "When the plan is ready, call Plan with action: request_approval and include the plan. Approval will switch the agent back to default mode.",
+  ].join("\n");
 }
 
 function findTool(tools: Tools, name: string): Tool | undefined {

@@ -18,6 +18,8 @@ type RuntimeContextMessageOptions = {
     | "file_restore"
     | "long_term_memory"
     | "dynamic_skill"
+    | "todo_list"
+    | "plan_mode"
   >;
   content: string;
 };

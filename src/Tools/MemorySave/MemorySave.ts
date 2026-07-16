@@ -1,9 +1,6 @@
 import type { z } from "zod";
 
-import {
-  buildLongTermMemoryFilters,
-  getOrCreateLongTermMemory,
-} from "../../Memory/runtime.js";
+import { saveFileMemory } from "../../Memory/file-memory.js";
 import type { Runtime } from "../../types/runtime.js";
 import type { State } from "../../types/state.js";
 import type { Tool, ToolUseContext } from "../types.js";
@@ -59,29 +56,10 @@ export class MemorySave
     runtime: Runtime,
     _state: State,
   ): Promise<MemorySaveOutput> {
-    const memory = getOrCreateLongTermMemory(runtime);
-    if (!memory) {
-      return { results: [] };
-    }
-
-    // The tool is only the model-visible "add this memory" intent.
-    // Namespace, extraction strategy, dedupe, linking, and persistence stay in
-    // the Memory service so the model does not need to reason about internals.
-    const filters = buildLongTermMemoryFilters(
-      runtime.longTermMemoryConfig,
-      "user",
-    );
-
-    return memory.add(input.memory, {
-      filters,
-      metadata: {
-        source: "MemorySave",
-        ...(input.reason ? { reason: input.reason } : {}),
-      },
-      infer: true,
-      userId: filters.user_id,
-      agentId: filters.agent_id,
-      runId: filters.run_id,
+    return saveFileMemory(runtime, {
+      memory: input.memory,
+      reason: input.reason,
+      type: input.memoryType,
     });
   }
 }

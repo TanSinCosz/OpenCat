@@ -8,6 +8,17 @@ import type {
 import type { Message } from "../types/messages.js";
 import type { RuntimeUsageStats } from "../types/runtime.js";
 
+export type ToolPermissionDecision =
+  | { behavior: "allow" }
+  | { behavior: "deny"; reason?: string };
+
+export type ToolPermissionRequest = {
+  approvalId: string;
+  toolCall: DeepSeekToolCall;
+  mode: "plan";
+  reason: string;
+};
+
 export type QueryEvent =
   | {
     type: "context_ready";
@@ -36,6 +47,19 @@ export type QueryEvent =
     usage?: DeepSeekUsage;
   }
   | { type: "tool_use"; toolCall: DeepSeekToolCall }
+  | {
+    type: "tool_permission_request";
+    approvalId: string;
+    toolCall: DeepSeekToolCall;
+    mode: "plan";
+    reason: string;
+  }
+  | {
+    type: "tool_permission";
+    toolCall: DeepSeekToolCall;
+    behavior: "denied";
+    reason: string;
+  }
   | { type: "tool_result"; toolCall: DeepSeekToolCall; message: DeepSeekMessage }
   | { type: "turn_end"; turn: number; hasToolUse: boolean }
   | {
@@ -46,6 +70,9 @@ export type QueryEvent =
 
 export interface QueryOptions {
   maxTurns?: number;
+  requestToolPermission?: (
+    request: ToolPermissionRequest,
+  ) => Promise<ToolPermissionDecision>;
 }
 
 export interface MessagesForQuery {

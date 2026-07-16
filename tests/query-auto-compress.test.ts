@@ -9,21 +9,22 @@ import type {
   DeepSeekStreamEnvelope,
   DeepSeekStreamRequest,
 } from "../src/deepseek/types.js";
-import { applyAutoCompression } from "../src/auto-compress/index.js";
+import {
+  applyAutoCompression,
+  applyAutoCompressSummary,
+} from "../src/auto-compress/index.js";
 import { query } from "../src/query.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 import { createMessage } from "../src/types/messages.js";
 
-process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS = "100";
-
-test("query auto-compresses oversized projections with existing session memory before model request", async () => {
+test("query auto-compresses oversized projected context", async () => {
   const createRequests: DeepSeekCreateRequest[] = [];
   const streamRequests: DeepSeekStreamRequest[] = [];
   const client: DeepSeekClient = {
     async create(input) {
       createRequests.push(input);
-      throw new Error("create should not be used in this test");
+      throw new Error("create should not be used when session memory is ready");
     },
     async *stream(input) {
       streamRequests.push(input);
@@ -75,10 +76,9 @@ test("query auto-compresses oversized projections with existing session memory b
   }
 
   assert.equal(createRequests.length, 0);
-  assert.equal(streamRequests.length, 1);
+  assert.equal(streamRequests.length, 2);
   assert.equal(state.sessionMemory.status, "ready");
   assert.equal(state.autoCompress.summaries.length, 1);
-  assert.ok(state.autoCompress.summaries.at(-1));
   assert.equal(state.historySnips.length, 1);
   assert.equal(state.toolResultBudgetState.seenIds.size, 0);
   assert.equal(state.toolResultBudgetState.replacements.size, 0);
@@ -89,20 +89,14 @@ test("query auto-compresses oversized projections with existing session memory b
     transcriptEntries.some((entry) =>
       entry.type === "state_snapshot" && entry.reason === "session_memory"
     ),
-    false,
+    true,
   );
 
-  const requestMessages = streamRequests[0]!.messages;
-  const summaryMessage = requestMessages.find(
-    (message) =>
-      message.role === "user" &&
-      message.content.includes("<session_memory>"),
-  );
-
-  assert.ok(summaryMessage);
-  assert.ok(requestMessages.length < state.Messages.length);
-  assert.ok(
-    JSON.stringify(requestMessages).length < JSON.stringify(state.Messages).length,
+  assert.equal(
+    streamRequests[0]!.messages.some((message) =>
+      message.role === "user" && message.content.includes("<session_memory>")
+    ),
+    true,
   );
   assert.equal(events.at(-1)?.type, "done");
 });
@@ -212,8 +206,6 @@ test("auto-compress clears bulky compact state but preserves recent group budget
 test("query compacts visible snip content-only history after session memory covers it", async () => {
   const originalAutoCompressTrigger =
     process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS;
-  const originalSnippedContentTrigger =
-    process.env.OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS;
   const streamRequests: DeepSeekStreamRequest[] = [];
   const client: DeepSeekClient = {
     async create() {
@@ -277,17 +269,15 @@ test("query compacts visible snip content-only history after session memory cove
   });
 
   try {
-    process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS = "999999";
-    process.env.OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS = "10";
+    process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS = "10";
 
     for await (const _event of query(runtime, state, { maxTurns: 1 })) {
       // Drain the query stream.
     }
   } finally {
-    restoreEnv("OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS", originalAutoCompressTrigger);
     restoreEnv(
-      "OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS",
-      originalSnippedContentTrigger,
+      "OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS",
+      originalAutoCompressTrigger,
     );
   }
 
@@ -418,7 +408,7 @@ test("query flushes agent notifications after auto-compression", async () => {
   }
 
   assert.equal(createRequests.length, 0);
-  assert.equal(streamRequests.length, 1);
+  assert.equal(streamRequests.length, 2);
   assert.equal(state.agentNotifications.length, 0);
   assert.equal(state.runtimeContextMessages.length, 0);
 
@@ -477,9 +467,8 @@ test("session runtime does not trigger nested auto-compression", async () => {
   assert.notEqual(state.sessionMemory.status, "ready");
 });
 
-test("subagent auto-compresses with a local compact summary", async () => {
+test("subagent local auto-compression can create a compact summary", async () => {
   const createRequests: DeepSeekCreateRequest[] = [];
-  const streamRequests: DeepSeekStreamRequest[] = [];
   const client: DeepSeekClient = {
     async create(input) {
       createRequests.push(input);
@@ -507,13 +496,7 @@ test("subagent auto-compresses with a local compact summary", async () => {
       };
     },
     async *stream(input) {
-      streamRequests.push(input);
-      yield createAssistantChunk("subagent continued");
-      yield {
-        chunk: null,
-        raw: "[DONE]",
-        done: true,
-      };
+      throw new Error(`stream should not be used: ${JSON.stringify(input)}`);
     },
     async collectStream() {
       throw new Error("collectStream is not used in this test");
@@ -538,12 +521,10 @@ test("subagent auto-compresses with a local compact summary", async () => {
     MemoryConfig: createMemoryConfig(),
   });
 
-  for await (const _event of query(runtime, state, { maxTurns: 1 })) {
-    // Drain the query stream.
-  }
+  const result = await applyAutoCompression(runtime, state);
 
+  assert.equal(result.status, "compressed");
   assert.equal(createRequests.length, 1);
-  assert.equal(streamRequests.length, 1);
   assert.equal(state.autoCompress.summaries.length, 1);
   assert.notEqual(state.sessionMemory.status, "ready");
 
@@ -552,14 +533,14 @@ test("subagent auto-compresses with a local compact summary", async () => {
   assert.match(summary.content, /<local_compact_summary>/);
   assert.doesNotMatch(summary.content, /<session_memory>/);
 
-  const requestMessages = streamRequests[0]!.messages;
-  const summaryMessage = requestMessages.find(
-    (message) =>
+  const projectedMessages = applyAutoCompressSummary(state);
+  assert.ok(projectedMessages.length < state.Messages.length);
+  assert.ok(
+    projectedMessages.some((message) =>
       message.role === "user" &&
-      message.content.includes("<local_compact_summary>"),
+      message.content.includes("<local_compact_summary>")
+    ),
   );
-  assert.ok(summaryMessage);
-  assert.ok(requestMessages.length < state.Messages.length);
 
   const compactPrompt = JSON.stringify(createRequests[0]!.messages);
   assert.match(compactPrompt, /older_conversation_transcript/);

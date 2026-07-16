@@ -27,6 +27,8 @@ type SweBenchInstance = {
 };
 
 type EvalConfig = {
+  version?: string;
+  evalVersion?: string;
   runId?: string;
   datasetPath?: string;
   datasetSource?: string;
@@ -42,6 +44,7 @@ type EvalConfig = {
 };
 
 type EvalSummary = {
+  version: string;
   runId: string;
   startedAt: string;
   finishedAt: string;
@@ -108,6 +111,10 @@ const evalConfig = await loadEvalConfig(configPath);
 const runId = process.env.SWE_VERIFIED_RUN_ID?.trim() ||
   stringSetting(evalConfig.runId) ||
   `swe_verified_cache_${new Date().toISOString().replace(/[:.]/g, "-")}`;
+const evalVersion = process.env.SWE_VERIFIED_VERSION?.trim() ||
+  stringSetting(evalConfig.evalVersion) ||
+  stringSetting(evalConfig.version) ||
+  "v1";
 const outputRoot = path.resolve(
   process.env.SWE_VERIFIED_OUTPUT_DIR ??
     stringSetting(evalConfig.outputDir) ??
@@ -150,6 +157,7 @@ for (const instance of instances) {
 }
 
 const summary: EvalSummary = {
+  version: evalVersion,
   runId,
   startedAt: startedAt.toISOString(),
   finishedAt: new Date().toISOString(),

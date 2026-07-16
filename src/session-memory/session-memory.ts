@@ -113,10 +113,7 @@ export async function updateSessionMemoryForAutoCompress(
   const lastMessage = state.Messages.at(-1);
   if (lastMessage) {
     sessionMemory.lastUpdateMessageId = lastMessage.id;
-
-    if (!hasToolCallsInLastAssistantTurn(state.Messages)) {
-      sessionMemory.lastSummarizedMessageId = lastMessage.id;
-    }
+    sessionMemory.lastSummarizedMessageId = lastMessage.id;
   }
 
   await savePersistedSessionMemory(runtime, state);
@@ -197,9 +194,10 @@ function getSessionMemoryNotesPath(runtime: Runtime): string {
 /**
  * Decides whether the session memory should be refreshed on this turn.
  *
- * This mirrors the official shape: wait until the transcript is large enough,
- * require meaningful context growth since the last update, and prefer updating
- * at a safe boundary instead of in the middle of an assistant tool-call chain.
+ * This mirrors the official cadence: wait until the transcript is large
+ * enough, require meaningful context growth since the last update, and update
+ * tool-heavy turns only after enough tool calls have accumulated. The query
+ * loop is responsible for calling this only at complete request boundaries.
  */
 export function shouldUpdateSessionMemory(
   state: State,
@@ -239,9 +237,11 @@ export function shouldUpdateSessionMemory(
   );
   const hasToolCallThreshold =
     toolCallsSinceLastUpdate >= sessionMemory.config.toolCallsBetweenUpdates;
-  const isNaturalBreak = !hasToolCallsInLastAssistantTurn(state.Messages);
+  const latestAssistantToolCallCount = getLatestAssistantToolCallCount(
+    state.Messages,
+  );
 
-  if (!hasToolCallThreshold && !isNaturalBreak) {
+  if (latestAssistantToolCallCount > 0 && !hasToolCallThreshold) {
     return { update: false, reason: "waiting_for_safe_break" };
   }
 
@@ -402,19 +402,14 @@ function countToolCallsSince(
   return count;
 }
 
-/**
- * Detects whether the latest assistant turn is still a tool-use boundary.
- * Updating notes at that point is less safe because the matching tool results
- * may not have been appended yet.
- */
-function hasToolCallsInLastAssistantTurn(messages: Message[]): boolean {
+function getLatestAssistantToolCallCount(messages: Message[]): number {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!;
 
     if (message.role === "assistant") {
-      return (message.tool_calls?.length ?? 0) > 0;
+      return message.tool_calls?.length ?? 0;
     }
   }
 
-  return false;
+  return 0;
 }

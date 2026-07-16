@@ -30,7 +30,7 @@ import type { State } from "../types/state.js";
 
 const TARGET_RECENT_TAIL_TOKENS = 30_000;
 const MAX_RECENT_TAIL_TOKENS = 40_000;
-const MIN_RECENT_TEXT_MESSAGES = 5;
+const MIN_RECENT_USER_CONTENT_MESSAGES = 3;
 const MIN_RECENT_API_MESSAGES = 12;
 const LOCAL_COMPACT_MAX_TRANSCRIPT_CHARS = 120_000;
 
@@ -565,7 +565,7 @@ function createAutoCompressSummaryMessage(
 type RecentTailStats = {
   tokens: number;
   apiMessages: number;
-  textMessages: number;
+  userContentMessages: number;
 };
 
 function calculateRecentTailStart(
@@ -596,7 +596,7 @@ function calculateRecentTailStartFromEnd(messages: Message[]): number {
   const stats: RecentTailStats = {
     tokens: 0,
     apiMessages: 0,
-    textMessages: 0,
+    userContentMessages: 0,
   };
 
   while (start > 0) {
@@ -619,7 +619,7 @@ function isRecentTailLargeEnough(stats: RecentTailStats): boolean {
   return (
     stats.tokens >= TARGET_RECENT_TAIL_TOKENS &&
     stats.apiMessages >= MIN_RECENT_API_MESSAGES &&
-    stats.textMessages >= MIN_RECENT_TEXT_MESSAGES
+    stats.userContentMessages >= MIN_RECENT_USER_CONTENT_MESSAGES
   );
 }
 
@@ -630,7 +630,7 @@ function calculateRecentTailStats(
   const stats: RecentTailStats = {
     tokens: 0,
     apiMessages: 0,
-    textMessages: 0,
+    userContentMessages: 0,
   };
 
   for (let index = start; index < messages.length; index++) {
@@ -646,8 +646,8 @@ function addMessageToRecentTailStats(
 ): void {
   stats.tokens += estimateMessageTokens(message);
   stats.apiMessages++;
-  if (hasTextContent(message)) {
-    stats.textMessages++;
+  if (hasUserContent(message)) {
+    stats.userContentMessages++;
   }
 }
 
@@ -656,16 +656,11 @@ function estimateMessageTokens(message: Message): number {
     Math.ceil(JSON.stringify(toDeepSeekMessage(message)).length / 4);
 }
 
-function hasTextContent(message: Message): boolean {
-  if (message.role === "user") {
-    return message.content.trim().length > 0;
-  }
-
-  if (message.role === "assistant") {
-    return typeof message.content === "string" && message.content.trim().length > 0;
-  }
-
-  return false;
+function hasUserContent(message: Message): boolean {
+  return message.role === "user" &&
+    message.source === "user" &&
+    typeof message.content === "string" &&
+    message.content.trim().length > 0;
 }
 
 function moveToSafeRecentTailBoundary(

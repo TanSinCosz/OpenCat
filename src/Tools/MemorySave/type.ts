@@ -6,6 +6,10 @@ export const inputSchema = () =>
       .string()
       .min(1)
       .describe("The exact durable memory the user asked to add. Prefer one fact per call."),
+    memoryType: z
+      .enum(["user", "feedback", "project", "reference"])
+      .optional()
+      .describe("Optional memory category. Defaults to user."),
     reason: z
       .string()
       .optional()

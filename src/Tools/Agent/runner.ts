@@ -331,6 +331,11 @@ function createChildAgentState(
         options.parentRuntime.agentId,
         agentId,
       ),
+      todos: cloneTodosForFork(
+        options.parentState.todos,
+        options.parentRuntime.agentId,
+        agentId,
+      ),
       mode: options.parentState.mode,
       agentTasks: options.parentState.agentTasks,
     });
@@ -409,6 +414,25 @@ function cloneAutoCompressState(state: State["autoCompress"]): State["autoCompre
     ...state,
     summaries: state.summaries.map((summary) => ({ ...summary })),
   };
+}
+
+function cloneTodosForFork(
+  todos: State["todos"],
+  parentAgentId: string,
+  childAgentId: string,
+): State["todos"] {
+  const cloned = Object.fromEntries(
+    Object.entries(todos).map(([agentId, items]) => [
+      agentId,
+      items.map((item) => ({ ...item })),
+    ]),
+  );
+
+  if (todos[parentAgentId] && !cloned[childAgentId]) {
+    cloned[childAgentId] = todos[parentAgentId].map((item) => ({ ...item }));
+  }
+
+  return cloned;
 }
 
 function cloneSessionMemoryState(

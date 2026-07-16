@@ -8,8 +8,6 @@ if (!apiKey) {
   throw new Error("Missing DEEPSEEK_API_KEY environment variable.");
 }
 
-process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS ??= "100";
-
 const [{ query }, { createRuntime }, { createState }, { createMessage }] =
   await Promise.all([
     import("../src/query.js"),
@@ -63,7 +61,6 @@ const runtime = createRuntime({
       config: {},
     },
   },
-  messages: state.Messages,
 });
 
 let contextReadyCount = 0;
@@ -118,7 +115,8 @@ console.log(
       sessionMemoryFailureReason: state.sessionMemory.lastFailureReason,
       autoCompressSummaryCount: state.autoCompress.summaries.length,
       activeSummaryId: state.autoCompress.summaries.at(-1)?.id,
-      triggerTokens: process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS,
+      snippedContentTriggerTokens:
+        process.env.OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS,
     },
     null,
     2,

@@ -10,8 +10,10 @@ import { FileWrite } from "./FileWrite/FileWrite.js";
 import { Glob } from "./Glob/Glob.js";
 import { Grep } from "./Grep/Grep.js";
 import { MemorySave } from "./MemorySave/MemorySave.js";
+import { Plan } from "./Plan/Plan.js";
 import { ReadSkill } from "./ReadSkill/ReadSkill.js";
 import { SendMessage } from "./SendMessage/SendMessage.js";
+import { TodoWrite } from "./TodoWrite/TodoWrite.js";
 import { WebFetch } from "./WebFetch/WebFetch.js";
 import { WebSearch } from "./WebSearch/WebSearch.js";
 import type { Tools } from "./types.js";
@@ -38,6 +40,8 @@ export function createDefaultTools(
     new ReadSkill(),
     new MemorySave(),
     new SendMessage(),
+    new TodoWrite(),
+    new Plan(),
   ];
 }
 
@@ -50,8 +54,10 @@ export {
   Glob,
   Grep,
   MemorySave,
+  Plan,
   ReadSkill,
   SendMessage,
+  TodoWrite,
   WebFetch,
   WebSearch,
 };

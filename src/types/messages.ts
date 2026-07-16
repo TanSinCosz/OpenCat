@@ -23,7 +23,9 @@ export type MessageSource =
   | "auto_compress"
   | "file_restore"
   | "long_term_memory"
-  | "dynamic_skill";
+  | "dynamic_skill"
+  | "todo_list"
+  | "plan_mode";
 
 export type MessageSize = {
   /**

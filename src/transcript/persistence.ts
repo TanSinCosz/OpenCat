@@ -7,21 +7,30 @@ import type { Runtime } from "../types/runtime.js";
 import type { SessionMemoryState } from "../types/session-memory.js";
 import type {
   AgentNotification,
+  AgentTask,
   AgentTasksState,
 } from "../Tools/Agent/state.js";
 
 const TRANSCRIPT_STORE_VERSION = 1;
 const TRANSCRIPT_DIR = ".opencat/transcripts";
+const MAX_PERSISTED_AGENT_PROMPT_CHARS = 2_000;
+const MAX_PERSISTED_AGENT_RESULT_CHARS = 4_000;
+const MAX_PERSISTED_NOTIFICATION_MESSAGE_CHARS = 8_000;
+const MAX_PERSISTED_INVOKED_SKILLS = 5;
+const MAX_PERSISTED_INVOKED_SKILL_CHARS = 16_000;
+const MAX_PERSISTED_INVOKED_SKILLS_TOTAL_CHARS = 48_000;
 
 export type TranscriptSnapshotReason =
   | "agent_notification"
   | "auto_compress"
   | "history_snip"
   | "manual"
+  | "mode"
   | "projection"
   | "query"
   | "runtime_context"
-  | "session_memory";
+  | "session_memory"
+  | "todo";
 
 export type TranscriptEntry =
   | TranscriptMessageEntry
@@ -40,15 +49,20 @@ export type TranscriptStateSnapshotEntry = TranscriptBaseEntry & {
 };
 
 export type PersistedStateSnapshot = {
-  autoCompress: AutoCompressState;
-  historySnips: State["historySnips"];
+  autoCompress?: AutoCompressState;
+  historySnips?: State["historySnips"];
   toolResultBudgetState?: PersistedToolResultBudgetState;
-  sessionMemory: SessionMemoryState;
-  mode: State["mode"];
-  agentTasks: AgentTasksState;
-  agentNotifications: AgentNotification[];
-  runtimeContextMessages: Message[];
-  invokedSkills: State["invokedSkills"];
+  sessionMemory?: SessionMemoryState;
+  mode?: State["mode"];
+  agentTasks?: AgentTasksState;
+  agentNotifications?: AgentNotification[];
+  /**
+   * Deprecated. Runtime context is per-request projection data and should not
+   * be written into new snapshots. Kept optional so older transcripts hydrate.
+   */
+  runtimeContextMessages?: Message[];
+  invokedSkills?: State["invokedSkills"];
+  todos?: State["todos"];
   messageCount: number;
   latestMessageId?: MessageId;
 };
@@ -135,7 +149,7 @@ export function createTranscriptStore(
         ...createBaseEntry(),
         type: "state_snapshot",
         reason,
-        state: createPersistedStateSnapshot(state),
+        state: createPersistedStateSnapshot(state, reason),
       });
     },
     async load() {
@@ -195,11 +209,7 @@ export async function loadStateFromTranscript(
     return null;
   }
 
-  const latestSnapshot = entries
-    .filter((entry): entry is TranscriptStateSnapshotEntry =>
-      entry.type === "state_snapshot"
-    )
-    .at(-1)?.state;
+  const latestSnapshot = mergePersistedStateSnapshots(entries);
   const messageEntries = entries.filter(
     (entry): entry is TranscriptMessageEntry => entry.type === "message",
   );
@@ -224,6 +234,7 @@ export async function loadStateFromTranscript(
     agentTasks: latestSnapshot?.agentTasks,
     agentNotifications: latestSnapshot?.agentNotifications,
     invokedSkills: latestSnapshot?.invokedSkills,
+    todos: latestSnapshot?.todos,
   });
 }
 
@@ -243,22 +254,142 @@ export async function recordTranscriptStateSnapshot(
   await runtime.transcriptStore?.appendStateSnapshot(state, reason);
 }
 
-function createPersistedStateSnapshot(state: State): PersistedStateSnapshot {
-  return {
-    autoCompress: state.autoCompress,
-    historySnips: state.historySnips,
-    toolResultBudgetState: persistToolResultBudgetState(
-      state.toolResultBudgetState,
-    ),
-    sessionMemory: state.sessionMemory,
-    mode: state.mode,
-    agentTasks: state.agentTasks,
-    agentNotifications: state.agentNotifications,
-    runtimeContextMessages: state.runtimeContextMessages,
-    invokedSkills: state.invokedSkills,
+function createPersistedStateSnapshot(
+  state: State,
+  reason: TranscriptSnapshotReason,
+): PersistedStateSnapshot {
+  const snapshot: PersistedStateSnapshot = {
     messageCount: state.Messages.length,
     latestMessageId: state.Messages.at(-1)?.id,
   };
+
+  switch (reason) {
+    case "auto_compress":
+      snapshot.autoCompress = state.autoCompress;
+      snapshot.historySnips = state.historySnips;
+      snapshot.toolResultBudgetState = persistToolResultBudgetState(
+        state.toolResultBudgetState,
+      );
+      snapshot.sessionMemory = state.sessionMemory;
+      snapshot.invokedSkills = persistInvokedSkills(state.invokedSkills);
+      return snapshot;
+    case "history_snip":
+      snapshot.historySnips = state.historySnips;
+      return snapshot;
+    case "projection":
+      snapshot.toolResultBudgetState = persistToolResultBudgetState(
+        state.toolResultBudgetState,
+      );
+      return snapshot;
+    case "runtime_context":
+    case "agent_notification":
+      snapshot.agentNotifications = persistAgentNotifications(
+        state.agentNotifications,
+      );
+      return snapshot;
+    case "session_memory":
+      snapshot.sessionMemory = state.sessionMemory;
+      return snapshot;
+    case "mode":
+      snapshot.mode = state.mode;
+      return snapshot;
+    case "todo":
+      snapshot.todos = state.todos;
+      return snapshot;
+    case "manual":
+    case "query":
+      snapshot.autoCompress = state.autoCompress;
+      snapshot.historySnips = state.historySnips;
+      snapshot.toolResultBudgetState = persistToolResultBudgetState(
+        state.toolResultBudgetState,
+      );
+      snapshot.sessionMemory = state.sessionMemory;
+      snapshot.mode = state.mode;
+      snapshot.agentTasks = persistAgentTasks(state.agentTasks);
+      snapshot.agentNotifications = persistAgentNotifications(
+        state.agentNotifications,
+      );
+      snapshot.invokedSkills = persistInvokedSkills(state.invokedSkills);
+      snapshot.todos = state.todos;
+      return snapshot;
+  }
+}
+
+function persistAgentTasks(tasks: AgentTasksState): AgentTasksState {
+  const persisted: AgentTasksState = {};
+
+  for (const [id, task] of Object.entries(tasks)) {
+    persisted[id] = persistAgentTask(task);
+  }
+
+  return persisted;
+}
+
+function persistAgentTask(task: AgentTask): AgentTask {
+  return {
+    ...task,
+    description: limitString(task.description, MAX_PERSISTED_AGENT_PROMPT_CHARS),
+    prompt: limitString(task.prompt, MAX_PERSISTED_AGENT_PROMPT_CHARS),
+    result: task.result === undefined
+      ? undefined
+      : limitString(task.result, MAX_PERSISTED_AGENT_RESULT_CHARS),
+    error: task.error === undefined
+      ? undefined
+      : limitString(task.error, MAX_PERSISTED_AGENT_RESULT_CHARS),
+    pendingMessages: task.pendingMessages.map((message) =>
+      limitString(message, MAX_PERSISTED_NOTIFICATION_MESSAGE_CHARS)
+    ),
+  };
+}
+
+function persistAgentNotifications(
+  notifications: readonly AgentNotification[],
+): AgentNotification[] {
+  return notifications.map((notification) => ({
+    ...notification,
+    description: limitString(
+      notification.description,
+      MAX_PERSISTED_AGENT_PROMPT_CHARS,
+    ),
+    message: limitString(
+      notification.message,
+      MAX_PERSISTED_NOTIFICATION_MESSAGE_CHARS,
+    ),
+  }));
+}
+
+function persistInvokedSkills(
+  skills: readonly State["invokedSkills"][number][],
+): State["invokedSkills"] {
+  const persisted: State["invokedSkills"] = [];
+  let remaining = MAX_PERSISTED_INVOKED_SKILLS_TOTAL_CHARS;
+
+  for (const skill of [...skills].sort((left, right) =>
+    right.invokedAt - left.invokedAt
+  )) {
+    if (persisted.length >= MAX_PERSISTED_INVOKED_SKILLS || remaining <= 0) {
+      break;
+    }
+
+    const content = limitString(
+      skill.content,
+      Math.min(MAX_PERSISTED_INVOKED_SKILL_CHARS, remaining),
+    );
+    persisted.push({ ...skill, content });
+    remaining -= content.length;
+  }
+
+  return persisted;
+}
+
+function limitString(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  const suffix = "\n[Persisted state truncated]";
+  const contentLength = Math.max(0, maxChars - suffix.length);
+  return `${value.slice(0, contentLength)}${suffix}`;
 }
 
 function persistToolResultBudgetState(
@@ -281,6 +412,61 @@ function hydrateToolResultBudgetState(
     seenIds: new Set(state.seenIds),
     replacements: new Map(state.replacements),
   };
+}
+
+function mergePersistedStateSnapshots(
+  entries: readonly TranscriptEntry[],
+): PersistedStateSnapshot | undefined {
+  let merged: PersistedStateSnapshot | undefined;
+
+  for (const entry of entries) {
+    if (entry.type !== "state_snapshot") {
+      continue;
+    }
+
+    const snapshot = entry.state;
+    merged ??= {
+      messageCount: snapshot.messageCount,
+      latestMessageId: snapshot.latestMessageId,
+    };
+
+    // State snapshots are now reason-scoped patches. Keep the newest value for
+    // every durable field while allowing old full snapshots to hydrate normally.
+    merged.messageCount = snapshot.messageCount;
+    merged.latestMessageId = snapshot.latestMessageId;
+    if (snapshot.autoCompress !== undefined) {
+      merged.autoCompress = snapshot.autoCompress;
+    }
+    if (snapshot.historySnips !== undefined) {
+      merged.historySnips = snapshot.historySnips;
+    }
+    if (snapshot.toolResultBudgetState !== undefined) {
+      merged.toolResultBudgetState = snapshot.toolResultBudgetState;
+    }
+    if (snapshot.sessionMemory !== undefined) {
+      merged.sessionMemory = snapshot.sessionMemory;
+    }
+    if (snapshot.mode !== undefined) {
+      merged.mode = snapshot.mode;
+    }
+    if (snapshot.agentTasks !== undefined) {
+      merged.agentTasks = snapshot.agentTasks;
+    }
+    if (snapshot.agentNotifications !== undefined) {
+      merged.agentNotifications = snapshot.agentNotifications;
+    }
+    if (snapshot.runtimeContextMessages !== undefined) {
+      merged.runtimeContextMessages = snapshot.runtimeContextMessages;
+    }
+    if (snapshot.invokedSkills !== undefined) {
+      merged.invokedSkills = snapshot.invokedSkills;
+    }
+    if (snapshot.todos !== undefined) {
+      merged.todos = snapshot.todos;
+    }
+  }
+
+  return merged;
 }
 
 function hydrateMessagesFromTranscript(

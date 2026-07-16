@@ -1,7 +1,22 @@
-import { executeToolCall } from "./Tools/executor.js";
+import { randomUUID } from "node:crypto";
+import {
+  createPermissionDeniedToolCallResult,
+  executeToolCallWithMetadata,
+  getPlanModeToolDenialReason,
+  type ToolCallExecutionResult,
+} from "./Tools/executor.js";
+import { PLAN_TOOL_NAME } from "./Tools/Plan/prompt.js";
 import { drainAgentMessages } from "./Tools/Agent/state.js";
-import type { DeepSeekAssistantMessage } from "./deepseek/types.js";
-import { createMessage, toDeepSeekMessage, type ToolMessage } from "./types/messages.js";
+import type {
+  DeepSeekAssistantMessage,
+  DeepSeekToolCall,
+} from "./deepseek/types.js";
+import {
+  createMessage,
+  toDeepSeekMessage,
+  type Message,
+  type ToolMessage,
+} from "./types/messages.js";
 import type { Runtime } from "./types/runtime.js";
 import type { State } from "./types/state.js";
 import { streamAssistantWithReasoningContinuation } from "./query/reasoning-continuation.js";
@@ -11,13 +26,23 @@ import {
   type SnippedContentOnlyStats,
 } from "./query/messages.js";
 import { createStreamRequest } from "./query/request.js";
-import type { MessagesForQuery, QueryEvent, QueryOptions } from "./query/types.js";
+import type {
+  MessagesForQuery,
+  QueryEvent,
+  QueryOptions,
+  ToolPermissionDecision,
+} from "./query/types.js";
 import { snapshotRuntimeUsage } from "./query/usage.js";
 import {
   createLongTermMemoryContextMessage,
   extractLongTermMemoryForCompletedQuery,
   type LongTermMemoryExtractionResult,
 } from "./query/long-term-memory.js";
+import {
+  shouldUpdateSessionMemory,
+  updateSessionMemoryForAutoCompress,
+  type SessionMemoryUpdateResult,
+} from "./session-memory/index.js";
 import {
   clearRuntimeContextAfterModelRequest,
   createProjectionContextStateMessage,
@@ -26,7 +51,6 @@ import {
 } from "./query/runtime-context.js";
 import {
   applyAutoCompression,
-  applyAutoCompressSummary,
 } from "./auto-compress/index.js";
 import {
   recordTranscriptMessage,
@@ -36,6 +60,10 @@ import {
   emitRunEvent,
   stringifyTelemetryError,
 } from "./telemetry/observer.js";
+import {
+  saveWorkspacePatchSnapshot,
+  type WorkspacePatchSnapshotReason,
+} from "./workspace/patch-snapshot.js";
 
 export type {
   MessagesForQuery,
@@ -52,7 +80,7 @@ export {
   loadRuntimeContextForQuery,
 } from "./query/runtime-context.js";
 
-const DEFAULT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS = 40_000;
+const DEFAULT_AUTO_COMPRESS_TRIGGER_TOKENS = 180_000;
 
 export async function* query(
   runtime: Runtime,
@@ -95,6 +123,7 @@ export async function* _query(
       const autoCompressRequest = getAutoCompressionRequest(
         runtime,
         state,
+        messagesForQuery,
       );
       if (autoCompressRequest) {
         const autoCompressResult = await applyAutoCompressionWithTelemetry(
@@ -108,9 +137,17 @@ export async function* _query(
         }
       }
 
+      if (autoCompressRequest) {
+        messagesForQuery = await buildMessagesForQuery(runtime, state);
+      }
+
       // Phase C: append volatile/generated context after auto-compress so it is
       // visible to the model but not swallowed by the compaction prompt.
-      await materializeRequestContext(runtime, state);
+      await materializeRequestContext(
+        runtime,
+        state,
+        messagesForQuery.forkContextMessages,
+      );
       const historySnipCountBeforeFinalBuild = state.historySnips.length;
       messagesForQuery = await buildMessagesForQuery(runtime, state);
       await recordHistorySnipSnapshotIfNeeded(
@@ -136,6 +173,7 @@ export async function* _query(
           messagesForQuery.stats.toolResultBudgetReplacementCount,
         bulkyToolCompactCount: messagesForQuery.stats.bulkyToolCompactCount,
         historySnipCount: messagesForQuery.stats.historySnipCount,
+        hardHistorySnipApplied: messagesForQuery.stats.historySnipCount > 0,
         toolResultCharsBeforeBudget:
           messagesForQuery.stats.toolResultCharsBeforeBudget,
         toolResultCharsAfterBudget:
@@ -189,11 +227,20 @@ export async function* _query(
           hasToolUse: false,
         });
         yield { type: "turn_end", turn, hasToolUse: false };
+        await updateSessionMemoryAtSafeBoundary(
+          runtime,
+          state,
+          [
+            ...messagesForQuery.forkContextMessages,
+            persistedAssistantMessage,
+          ],
+        );
         const extraction = await extractLongTermMemoryForCompletedQuery(runtime, state, {
           turnStartMessageId,
           turnStartedAt,
         });
         await emitLongTermMemoryExtractionEvent(runtime, extraction);
+        await recordWorkspacePatchSnapshot(runtime, "completed");
         await emitRunEvent(runtime, {
           type: "query_finished",
           reason: "completed",
@@ -207,6 +254,7 @@ export async function* _query(
         return;
       }
 
+      const persistedToolResultMessages: ToolMessage[] = [];
       for (const toolCall of toolCalls) {
         throwIfQueryAborted(runtime);
         yield { type: "tool_use", toolCall };
@@ -219,12 +267,40 @@ export async function* _query(
           argsChars: toolCall.function.arguments.length,
           argsPreview: preview(toolCall.function.arguments, 500),
         });
-        const toolResultMessage = await executeToolCall(
-          toolCall,
-          runtime.tools,
+        const permissionApproval = await requestToolApprovalIfNeeded(
           runtime,
           state,
+          options,
+          toolCall,
         );
+        if (permissionApproval?.requested) {
+          yield {
+            type: "tool_permission_request",
+            approvalId: permissionApproval.approvalId,
+            toolCall,
+            mode: "plan",
+            reason: permissionApproval.reason,
+          };
+        }
+
+        const permissionDecision = permissionApproval?.decision
+          ? await permissionApproval.decision
+          : null;
+        const toolExecution = await executeToolAfterPermissionDecision(
+          runtime,
+          state,
+          toolCall,
+          permissionDecision,
+        );
+        const toolResultMessage = toolExecution.message;
+        if (toolExecution.permissionDenied) {
+          yield {
+            type: "tool_permission",
+            toolCall,
+            behavior: "denied",
+            reason: toolExecution.permissionDenied.reason,
+          };
+        }
         const stateToolResultMessage = {
           ...(createMessage(toolResultMessage) as ToolMessage),
           toolName: toolCall.function.name,
@@ -241,6 +317,7 @@ export async function* _query(
         });
         throwIfQueryAborted(runtime);
         state.Messages.push(stateToolResultMessage);
+        persistedToolResultMessages.push(stateToolResultMessage);
         await recordTranscriptMessage(runtime, stateToolResultMessage);
         yield {
           type: "tool_result",
@@ -255,8 +332,18 @@ export async function* _query(
         hasToolUse: true,
       });
       yield { type: "turn_end", turn, hasToolUse: true };
+      await updateSessionMemoryAtSafeBoundary(
+        runtime,
+        state,
+        [
+          ...messagesForQuery.forkContextMessages,
+          persistedAssistantMessage,
+          ...persistedToolResultMessages,
+        ],
+      );
     }
 
+    await recordWorkspacePatchSnapshot(runtime, "max_turns");
     await emitRunEvent(runtime, {
       type: "query_finished",
       reason: "max_turns",
@@ -268,6 +355,7 @@ export async function* _query(
       sessionUsage: snapshotRuntimeUsage(runtime),
     };
   } catch (error) {
+    await recordWorkspacePatchSnapshot(runtime, "failed");
     await emitRunEvent(runtime, {
       type: "query_failed",
       durationMs: Date.now() - turnStartedAt,
@@ -277,13 +365,95 @@ export async function* _query(
   }
 }
 
+async function updateSessionMemoryAtSafeBoundary(
+  runtime: Runtime,
+  state: State,
+  forkContextMessages: readonly Message[],
+): Promise<SessionMemoryUpdateResult> {
+  if (!canRuntimeUpdateSessionMemory(runtime)) {
+    return { status: "skipped", reason: "unsupported_runtime" };
+  }
+
+  const decision = shouldUpdateSessionMemory(state);
+  if (decision.update === false) {
+    await emitRunEvent(runtime, {
+      type: "session_memory_update_finished",
+      status: "skipped",
+      reason: decision.reason,
+      messageCount: state.Messages.length,
+    });
+    return { status: "skipped", reason: decision.reason };
+  }
+
+  await emitRunEvent(runtime, {
+    type: "session_memory_update_started",
+    messageCount: state.Messages.length,
+  });
+  const result = await updateSessionMemoryForAutoCompress(runtime, state, {
+    forkContextMessages,
+  });
+
+  await emitRunEvent(runtime, {
+    type: "session_memory_update_finished",
+    status: result.status,
+    reason: result.status === "skipped" ? result.reason : undefined,
+    messageCount: state.Messages.length,
+    contentChars: result.status === "updated" ? result.content.length : undefined,
+    lastSummarizedMessageId: state.sessionMemory.lastSummarizedMessageId,
+  });
+
+  if (result.status === "skipped" && result.reason === "model_request_failed") {
+    await emitRunEvent(runtime, {
+      type: "session_memory_update_failed",
+      error: state.sessionMemory.lastFailureReason ?? result.reason,
+    });
+  }
+
+  return result;
+}
+
+function canRuntimeUpdateSessionMemory(runtime: Runtime): boolean {
+  return runtime.agentRole === "main" && runtime.agentType !== "session_memory";
+}
+
+async function recordWorkspacePatchSnapshot(
+  runtime: Runtime,
+  reason: WorkspacePatchSnapshotReason,
+): Promise<void> {
+  if (runtime.agentRole === "session" || runtime.agentType === "session_memory") {
+    return;
+  }
+
+  const result = await saveWorkspacePatchSnapshot(runtime, reason);
+  if (result.status === "failed") {
+    await emitRunEvent(runtime, {
+      type: "workspace_patch_snapshot_failed",
+      reason,
+      error: result.error,
+    });
+    return;
+  }
+
+  if (result.status === "saved") {
+    await emitRunEvent(runtime, {
+      type: "workspace_patch_snapshot_saved",
+      reason,
+      patchPath: result.patchPath,
+      latestPath: result.latestPath,
+      bytes: result.bytes,
+      sequence: result.sequence,
+    });
+  }
+}
+
 async function materializeRequestContext(
   runtime: Runtime,
   state: State,
+  visibleMessages: readonly Message[],
 ): Promise<void> {
   await loadRuntimeContextForQuery(runtime, state);
   await loadDynamicSkillContextForQuery(runtime, state);
-  await materializeContextForQuery(runtime, state);
+  await materializeContextForQuery(runtime, state, visibleMessages);
 }
 
 async function recordHistorySnipSnapshotIfNeeded(
@@ -362,18 +532,145 @@ function renderPendingAgentMessages(messages: readonly string[]): string {
   ].join("\n");
 }
 
+type PendingToolApproval = {
+  requested: true;
+  approvalId: string;
+  reason: string;
+  decision: Promise<ToolPermissionDecision>;
+};
+
+async function requestToolApprovalIfNeeded(
+  runtime: Runtime,
+  state: State,
+  options: QueryOptions,
+  toolCall: DeepSeekToolCall,
+): Promise<PendingToolApproval | null> {
+  if (
+    !isPlanApprovalToolCall(toolCall, state)
+  ) {
+    return null;
+  }
+
+  const approvalId = `tool_permission_${randomUUID()}`;
+  const reason = getPlanApprovalRequestReason(toolCall);
+  const decision = options.requestToolPermission
+    ? options.requestToolPermission({
+      approvalId,
+      toolCall,
+      mode: "plan",
+      reason,
+    }).catch((error): ToolPermissionDecision => ({
+      behavior: "deny",
+      reason: `Permission request failed: ${stringifyError(error)}`,
+    }))
+    : Promise.resolve({
+      behavior: "deny",
+      reason: "No interactive permission handler is available.",
+    } satisfies ToolPermissionDecision);
+
+  await emitRunEvent(runtime, {
+    type: "tool_permission_requested",
+    toolCallId: toolCall.id,
+    toolName: toolCall.function.name,
+    mode: "plan",
+  });
+
+  return {
+    requested: true,
+    approvalId,
+    reason,
+    decision,
+  };
+}
+
+function isPlanApprovalToolCall(
+  toolCall: DeepSeekToolCall,
+  state: State,
+): boolean {
+  if (state.mode !== "plan" || toolCall.function.name !== PLAN_TOOL_NAME) {
+    return false;
+  }
+
+  return parsePlanToolAction(toolCall) === "request_approval";
+}
+
+function parsePlanToolAction(toolCall: DeepSeekToolCall): string | null {
+  try {
+    const input = JSON.parse(toolCall.function.arguments || "{}") as {
+      action?: unknown;
+    };
+    return typeof input.action === "string" ? input.action : null;
+  } catch {
+    return null;
+  }
+}
+
+function getPlanApprovalRequestReason(toolCall: DeepSeekToolCall): string {
+  const fallback = "The agent has submitted a plan and is requesting approval to proceed.";
+
+  try {
+    const input = JSON.parse(toolCall.function.arguments || "{}") as {
+      plan?: unknown;
+    };
+    const plan = typeof input.plan === "string" ? input.plan.trim() : "";
+    if (!plan) {
+      return fallback;
+    }
+
+    return [
+      "The agent submitted the following plan and is requesting approval to proceed:",
+      "",
+      plan,
+    ].join("\n");
+  } catch {
+    return fallback;
+  }
+}
+
+async function executeToolAfterPermissionDecision(
+  runtime: Runtime,
+  state: State,
+  toolCall: DeepSeekToolCall,
+  decision: ToolPermissionDecision | null,
+): Promise<ToolCallExecutionResult> {
+  if (decision?.behavior === "allow") {
+    return executeToolCallWithMetadata(
+      toolCall,
+      runtime.tools,
+      runtime,
+      state,
+      { bypassPlanModePermission: true },
+    );
+  }
+
+  if (decision?.behavior === "deny") {
+    return createPermissionDeniedToolCallResult(
+      toolCall,
+      decision.reason ?? getPlanModeToolDenialReason(),
+    );
+  }
+
+  return executeToolCallWithMetadata(
+    toolCall,
+    runtime.tools,
+    runtime,
+    state,
+  );
+}
+
 async function materializeContextForQuery(
   runtime: Runtime,
   state: State,
+  visibleMessages: readonly Message[],
 ): Promise<number> {
-  // TODO: this couples attachment logic to the auto-compress summary view.
-  // Should use raw state.Messages (or a non-auto-compress request view)
-  // for the long-term-memory recall query instead.
-  const visibleMessages = applyAutoCompressSummary(state);
+  removePreviousVolatileContextBlocks(state);
+
   const longTermMemoryMessage = shouldAttachLongTermMemory(state)
     ? await createLongTermMemoryContextMessage(runtime, visibleMessages)
     : null;
   const contextMessage = createProjectionContextStateMessage([
+    ...createPlanModeContextBlocks(state),
+    ...createTodoListContextBlocks(runtime, state),
     ...(longTermMemoryMessage
       ? [{
         source: "long_term_memory" as const,
@@ -392,7 +689,6 @@ async function materializeContextForQuery(
     return 0;
   }
 
-  removePreviousDynamicSkillContext(state);
   state.Messages.push(contextMessage);
   state.runtimeContextMessages = [];
   await recordTranscriptMessage(runtime, contextMessage);
@@ -400,7 +696,50 @@ async function materializeContextForQuery(
   return 1;
 }
 
-function removePreviousDynamicSkillContext(state: State): number {
+function createPlanModeContextBlocks(
+  state: State,
+): Array<{ source: "plan_mode"; content: string }> {
+  if (state.mode !== "plan") {
+    return [];
+  }
+
+  return [{
+    source: "plan_mode",
+    content: [
+      "<plan_mode>",
+      "The current agent is in plan mode. Inspect, reason, and update TodoWrite if useful, but do not modify files or run environment-changing tools until plan mode is exited.",
+      "</plan_mode>",
+    ].join("\n"),
+  }];
+}
+
+function createTodoListContextBlocks(
+  runtime: Runtime,
+  state: State,
+): Array<{ source: "todo_list"; content: string }> {
+  const todos = state.todos[runtime.agentId] ?? [];
+  if (todos.length === 0) {
+    return [];
+  }
+
+  return [{
+    source: "todo_list",
+    content: renderTodoListContext(todos),
+  }];
+}
+
+function renderTodoListContext(todos: State["todos"][string]): string {
+  return [
+    "<todo_list>",
+    "Current task list for this agent. Use it as progress context; update it with TodoWrite when the plan changes.",
+    ...todos.map((todo, index) =>
+      `${index + 1}. [${todo.status}] ${todo.content} (${todo.activeForm})`
+    ),
+    "</todo_list>",
+  ].join("\n");
+}
+
+function removePreviousVolatileContextBlocks(state: State): number {
   let changed = 0;
   state.Messages = state.Messages.flatMap((message) => {
     if (
@@ -411,7 +750,7 @@ function removePreviousDynamicSkillContext(state: State): number {
       return [message];
     }
 
-    const content = stripDynamicSkillContextBlocks(message.content);
+    const content = stripVolatileContextBlocks(message.content);
     if (content === message.content) {
       return [message];
     }
@@ -426,10 +765,18 @@ function removePreviousDynamicSkillContext(state: State): number {
   return changed;
 }
 
-function stripDynamicSkillContextBlocks(content: string): string {
+function stripVolatileContextBlocks(content: string): string {
   return content
     .replace(
       /(?:\r?\n)?<context_block source="dynamic_skill">[\s\S]*?<\/context_block>(?:\r?\n)?/g,
+      "\n",
+    )
+    .replace(
+      /(?:\r?\n)?<context_block source="todo_list">[\s\S]*?<\/context_block>(?:\r?\n)?/g,
+      "\n",
+    )
+    .replace(
+      /(?:\r?\n)?<context_block source="plan_mode">[\s\S]*?<\/context_block>(?:\r?\n)?/g,
       "\n",
     )
     .replace(/\n{3,}/g, "\n\n")
@@ -442,7 +789,7 @@ function shouldAttachLongTermMemory(state: State): boolean {
 }
 
 type AutoCompressionRequest = {
-  reason: "snipped_content";
+  reason: "context_size";
   snippedContentThroughMessageId?: SnippedContentOnlyStats["lastMessageId"];
 };
 
@@ -481,23 +828,21 @@ async function applyAutoCompressionWithTelemetry(
 function getAutoCompressionRequest(
   runtime: Runtime,
   state: State,
+  messagesForQuery: MessagesForQuery,
 ): AutoCompressionRequest | null {
   if (!canRuntimeAutoCompress(runtime)) {
     return null;
   }
 
-  const snippedContent = getVisibleSnippedContentOnlyStats(state);
-  if (
-    snippedContent.lastMessageId &&
-    snippedContent.tokens >= getSnippedContentAutoCompressTriggerTokens()
-  ) {
-    return {
-      reason: "snipped_content",
-      snippedContentThroughMessageId: snippedContent.lastMessageId,
-    };
+  if (estimateMessagesForQueryTokens(messagesForQuery) < getAutoCompressTriggerTokens()) {
+    return null;
   }
 
-  return null;
+  const snippedContent = getVisibleSnippedContentOnlyStats(state);
+  return {
+    reason: "context_size",
+    snippedContentThroughMessageId: snippedContent.lastMessageId,
+  };
 }
 
 function canRuntimeAutoCompress(runtime: Runtime): boolean {
@@ -508,16 +853,16 @@ function estimateMessagesForQueryTokens(messagesForQuery: MessagesForQuery): num
   return Math.ceil(JSON.stringify(messagesForQuery.messages).length / 4);
 }
 
-function getSnippedContentAutoCompressTriggerTokens(): number {
+function getAutoCompressTriggerTokens(): number {
   const configured = Number(
-    process.env.OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS,
+    process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS,
   );
 
   if (Number.isFinite(configured) && configured > 0) {
     return configured;
   }
 
-  return DEFAULT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS;
+  return DEFAULT_AUTO_COMPRESS_TRIGGER_TOKENS;
 }
 
 function throwIfQueryAborted(runtime: Runtime): void {
@@ -568,4 +913,12 @@ function preview(value: string, maxChars: number): string {
   }
 
   return `${value.slice(0, maxChars)}...`;
+}
+
+function stringifyError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
 }

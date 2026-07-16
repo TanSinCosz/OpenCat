@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { MemoryTool } from "../src/Memory/Memory.js";
+import {
+  listRecentMemoryDreamTranscripts,
+  runMemoryDream,
+} from "../src/Memory/auto-dream.js";
+import {
+  getFileMemoryDir,
+  getFileMemoryLogsDir,
+  scanFileMemoryHeaders,
+} from "../src/Memory/file-memory.js";
 import {
   createLongTermMemoryContextMessage,
   extractLongTermMemoryForCompletedQuery,
@@ -15,15 +23,13 @@ import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 
 test("only MemorySave is exposed as a long-term memory tool", async () => {
-  const fakeMemory = createFakeMemory();
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-file-memory-save-"));
   const state = createState();
   const runtime = createRuntime({
+    cwd,
     deepSeekRuntimeConfig: createDeepSeekConfig(),
     MemoryConfig: createMemoryConfig(),
-    longTermMemory: fakeMemory as unknown as MemoryTool,
-    longTermMemoryConfig: {
-      userId: "user-1",
-    },
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd),
   });
 
   const searchTool = runtime.tools.find((tool) => tool.name === "MemorySearch");
@@ -32,20 +38,27 @@ test("only MemorySave is exposed as a long-term memory tool", async () => {
   assert.ok(saveTool);
 
   const saveOutput = await saveTool.call(
-    { memory: "User prefers compact architecture notes." },
+    {
+      memory: "User prefers compact architecture notes.",
+      memoryType: "feedback",
+    },
     runtime.toolUseContext,
     runtime,
     state,
-  ) as { results: Array<{ memory: string }> };
+  ) as { results: Array<{ memory: string; metadata?: { path?: string } }> };
 
   assert.equal(saveOutput.results[0]?.memory, "User prefers compact architecture notes.");
-  assert.equal(fakeMemory.searchCalls.length, 0);
-  assert.equal(fakeMemory.addCalls[0]?.config.filters?.user_id, "user-1");
-  assert.equal(fakeMemory.addCalls[0]?.config.infer, true);
+  const path = saveOutput.results[0]?.metadata?.path;
+  assert.ok(path);
+  assert.match(await readFile(path, "utf8"), /type: feedback/);
+  assert.match(
+    await readFile(join(cwd, ".opencat", "memory", "MEMORY.md"), "utf8"),
+    /compact architecture notes/,
+  );
 });
 
 test("long-term memory context can be materialized before request build", async () => {
-  const fakeMemory = createFakeMemory();
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-file-memory-context-"));
   const state = createState({
     messages: [
       createMessage({
@@ -55,14 +68,24 @@ test("long-term memory context can be materialized before request build", async 
     ],
   });
   const runtime = createRuntime({
+    cwd,
     deepSeekRuntimeConfig: createDeepSeekConfig(),
+    deepSeekClient: createMemorySelectorClient([
+      "user-prefers-repo-grounded-implementation-notes",
+    ]),
     MemoryConfig: createMemoryConfig(),
-    longTermMemory: fakeMemory as unknown as MemoryTool,
-    longTermMemoryConfig: {
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd, {
       autoInject: true,
-      userId: "user-1",
-    },
+    }),
   });
+  const saveTool = runtime.tools.find((tool) => tool.name === "MemorySave");
+  assert.ok(saveTool);
+  await saveTool.call(
+    { memory: "User prefers repo-grounded implementation notes." },
+    runtime.toolUseContext,
+    runtime,
+    state,
+  );
 
   const contextMessage = await createLongTermMemoryContextMessage(
     runtime,
@@ -77,20 +100,13 @@ test("long-term memory context can be materialized before request build", async 
     contextMessage.content ?? "",
     /repo-grounded implementation notes/,
   );
+  assert.match(contextMessage.content ?? "", /<memory_file path=/);
 });
 
 test("long-term memory recall query ignores synthetic projection messages", async () => {
-  const fakeMemory = createFakeMemory();
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-file-memory-synthetic-"));
   const state = createState({
     messages: [
-      createMessage({
-        role: "user",
-        content: "Please remember that I prefer concise Chinese explanations.",
-      }),
-      createMessage({
-        role: "assistant",
-        content: "Understood, I will keep explanations concise.",
-      }),
       createMessage({
         role: "user",
         content: "synthetic long memory should not become recall query",
@@ -118,30 +134,185 @@ test("long-term memory recall query ignores synthetic projection messages", asyn
     ],
   });
   const runtime = createRuntime({
+    cwd,
     deepSeekRuntimeConfig: createDeepSeekConfig(),
     MemoryConfig: createMemoryConfig(),
-    longTermMemory: fakeMemory as unknown as MemoryTool,
-    longTermMemoryConfig: {
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd, {
       autoInject: true,
+    }),
+  });
+  const saveTool = runtime.tools.find((tool) => tool.name === "MemorySave");
+  assert.ok(saveTool);
+  await saveTool.call(
+    { memory: "User prefers concise Chinese explanations." },
+    runtime.toolUseContext,
+    runtime,
+    state,
+  );
+
+  assert.equal(await createLongTermMemoryContextMessage(runtime, state.Messages), null);
+});
+
+test("long-term memory recall skips files already visible in projected context", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-file-memory-surfaced-"));
+  const state = createState({
+    messages: [
+      createMessage({
+        role: "user",
+        content: "What conventions should I follow in this repo?",
+      }),
+    ],
+  });
+  const runtime = createRuntime({
+    cwd,
+    deepSeekRuntimeConfig: createDeepSeekConfig(),
+    deepSeekClient: createMemorySelectorClient([
+      "user-prefers-repo-grounded-implementation-notes",
+    ]),
+    MemoryConfig: createMemoryConfig(),
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd, {
+      autoInject: true,
+    }),
+  });
+  const saveTool = runtime.tools.find((tool) => tool.name === "MemorySave");
+  assert.ok(saveTool);
+  await saveTool.call(
+    { memory: "User prefers repo-grounded implementation notes." },
+    runtime.toolUseContext,
+    runtime,
+    state,
+  );
+  const [header] = await scanFileMemoryHeaders(runtime);
+  assert.ok(header);
+  const surfacedMemory = createMessage({
+    role: "user",
+    content: [
+      "<long_term_memory>",
+      "<memory_files>",
+      `<memory_file path="${header.filename}">`,
+      "User prefers repo-grounded implementation notes.",
+      "</memory_file>",
+      "</memory_files>",
+      "</long_term_memory>",
+    ].join("\n"),
+  }, { source: "long_term_memory" });
+
+  const contextMessage = await createLongTermMemoryContextMessage(
+    runtime,
+    [surfacedMemory, ...state.Messages],
+  );
+
+  assert.ok(contextMessage);
+  assert.doesNotMatch(contextMessage.content ?? "", /<memory_files>/);
+});
+
+test("file memory scan excludes daily logs from ordinary recall", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-file-memory-logs-"));
+  const runtime = createRuntime({
+    cwd,
+    deepSeekRuntimeConfig: createDeepSeekConfig(),
+    MemoryConfig: createMemoryConfig(),
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd),
+  });
+  const saveTool = runtime.tools.find((tool) => tool.name === "MemorySave");
+  assert.ok(saveTool);
+  await saveTool.call(
+    { memory: "User prefers durable topic memory files." },
+    runtime.toolUseContext,
+    runtime,
+    createState(),
+  );
+
+  const logsDir = join(getFileMemoryLogsDir(runtime), "2026", "07");
+  await mkdir(logsDir, { recursive: true });
+  await writeFile(
+    join(logsDir, "2026-07-13.md"),
+    "- 09:00 Raw daily log signal that is not formal memory yet.\n",
+    "utf8",
+  );
+
+  const headers = await scanFileMemoryHeaders(runtime);
+
+  assert.ok(headers.some((header) =>
+    header.filename.includes("durable-topic-memory-files")
+  ));
+  assert.equal(headers.some((header) => header.filename.startsWith("logs/")), false);
+});
+
+test("manual memory dream skips when another dream lock exists", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-memory-dream-lock-"));
+  const runtime = createRuntime({
+    cwd,
+    deepSeekRuntimeConfig: createDeepSeekConfig(),
+    MemoryConfig: createMemoryConfig(),
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd),
+  });
+  const memoryDir = getFileMemoryDir(runtime);
+  await mkdir(memoryDir, { recursive: true });
+  await writeFile(join(memoryDir, ".dream.lock"), "locked", "utf8");
+
+  assert.deepEqual(await runMemoryDream(runtime, createState()), {
+    status: "skipped",
+    reason: "locked",
+  });
+});
+
+test("manual memory dream lists recent session transcripts for cross-session consolidation", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-memory-dream-sessions-"));
+  const runtime = createRuntime({
+    cwd,
+    deepSeekRuntimeConfig: createDeepSeekConfig(),
+    MemoryConfig: createMemoryConfig(),
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd),
+  });
+  const transcriptDir = join(cwd, ".opencat", "transcripts");
+  await mkdir(transcriptDir, { recursive: true });
+  const oldTranscript = join(transcriptDir, "session_old.jsonl");
+  const newTranscript = join(transcriptDir, "session_new.jsonl");
+  await writeFile(oldTranscript, "{\"type\":\"message\"}\n", "utf8");
+  await writeFile(newTranscript, "{\"type\":\"message\"}\n", "utf8");
+  await mkdir(join(transcriptDir, "session_new"), { recursive: true });
+  await writeFile(
+    join(transcriptDir, "session_new", "agent.jsonl"),
+    "{\"type\":\"message\"}\n",
+    "utf8",
+  );
+  await utimes(
+    oldTranscript,
+    new Date("2026-07-10T00:00:00.000Z"),
+    new Date("2026-07-10T00:00:00.000Z"),
+  );
+  await utimes(
+    newTranscript,
+    new Date("2026-07-11T00:00:00.000Z"),
+    new Date("2026-07-11T00:00:00.000Z"),
+  );
+
+  const transcripts = await listRecentMemoryDreamTranscripts(runtime, 1);
+
+  assert.equal(transcripts.length, 1);
+  assert.equal(transcripts[0]?.filename, "session_new.jsonl");
+});
+
+test("file memory defaults to a user-level project directory", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-file-memory-default-"));
+  const runtime = createRuntime({
+    cwd,
+    deepSeekRuntimeConfig: createDeepSeekConfig(),
+    MemoryConfig: createMemoryConfig(),
+    longTermMemoryConfig: {
       userId: "user-1",
     },
   });
 
-  await createLongTermMemoryContextMessage(runtime, state.Messages);
-
-  const query = fakeMemory.searchCalls[0]?.query ?? "";
-  assert.match(query, /prefer concise Chinese explanations/);
-  assert.match(query, /keep explanations concise/);
-  assert.doesNotMatch(query, /synthetic long memory/);
-  assert.doesNotMatch(query, /auto compress summary/);
-  assert.doesNotMatch(query, /runtime notification/);
-  assert.doesNotMatch(query, /agent notification/);
-  assert.doesNotMatch(query, /file restore attachment/);
-  assert.doesNotMatch(query, /dynamic skill attachment/);
+  assert.match(
+    getFileMemoryDir(runtime),
+    /[\\\/]\.opencat[\\\/]memory[\\\/]projects[\\\/]/,
+  );
 });
 
-test("completed query long-term memory extraction uses explicit turn messages", async () => {
-  const fakeMemory = createFakeMemory();
+test("completed query long-term memory extraction is deferred for file memory", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-file-memory-extract-"));
   const previousUser = createMessage({ role: "user", content: "Earlier context" });
   const currentUser = createMessage({
     role: "user",
@@ -155,13 +326,13 @@ test("completed query long-term memory extraction uses explicit turn messages", 
     messages: [previousUser, currentUser, assistant],
   });
   const runtime = createRuntime({
+    cwd,
     deepSeekRuntimeConfig: createDeepSeekConfig(),
+    deepSeekClient: createBackgroundMemoryClient(),
     MemoryConfig: createMemoryConfig(),
-    longTermMemory: fakeMemory as unknown as MemoryTool,
-    longTermMemoryConfig: {
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd, {
       autoExtract: true,
-      userId: "user-1",
-    },
+    }),
   });
 
   const result = await extractLongTermMemoryForCompletedQuery(runtime, state, {
@@ -170,32 +341,22 @@ test("completed query long-term memory extraction uses explicit turn messages", 
   });
 
   assert.deepEqual(result, {
-    status: "extracted",
-    count: 1,
-    source: "state",
+    status: "skipped",
+    reason: "file_memory_extract_launched",
   });
-  assert.equal(fakeMemory.addCalls.length, 1);
-  assert.deepEqual(fakeMemory.addCalls[0]?.messages, [
-    { role: "user", content: currentUser.content },
-    { role: "assistant", content: assistant.content },
-  ]);
-  assert.deepEqual(fakeMemory.addCalls[0]?.config.contextMessages, [
-    { role: "user", content: previousUser.content },
-  ]);
 });
 
-test("completed query long-term memory extraction falls back to full transcript", async () => {
-  const fakeMemory = createFakeMemory();
+test("completed query long-term memory extraction does not hydrate transcript in first file-memory version", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-long-memory-transcript-"));
   const runtime = createRuntime({
-    cwd: await mkdtemp(join(tmpdir(), "opencat-long-memory-transcript-")),
+    cwd,
     sessionId: "long_memory_transcript_fallback",
     deepSeekRuntimeConfig: createDeepSeekConfig(),
+    deepSeekClient: createBackgroundMemoryClient(),
     MemoryConfig: createMemoryConfig(),
-    longTermMemory: fakeMemory as unknown as MemoryTool,
-    longTermMemoryConfig: {
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd, {
       autoExtract: true,
-      userId: "user-1",
-    },
+    }),
   });
   const previous = createMessage({ role: "user", content: "之前我们在设计长期记忆。" });
   const current = createMessage({
@@ -220,51 +381,52 @@ test("completed query long-term memory extraction falls back to full transcript"
   });
 
   assert.deepEqual(result, {
-    status: "extracted",
-    count: 1,
-    source: "transcript",
+    status: "skipped",
+    reason: "no_extractable_messages",
   });
-  assert.deepEqual(fakeMemory.addCalls[0]?.messages, [
-    { role: "user", content: current.content },
-    { role: "assistant", content: assistant.content },
-  ]);
-  assert.deepEqual(fakeMemory.addCalls[0]?.config.contextMessages, [
-    { role: "user", content: previous.content },
-  ]);
 });
 
-function createFakeMemory() {
-  const fakeMemory = {
-    searchCalls: [] as Array<{ query: string; config: any }>,
-    addCalls: [] as Array<{ messages: unknown; config: any }>,
-    async search(query: string, config: any) {
-      this.searchCalls.push({ query, config });
-      return {
-        results: [
-          {
-            id: "mem_1",
-            memory: "User prefers repo-grounded implementation notes.",
-            score: 0.9,
-          },
-        ],
-      };
-    },
-    async add(messages: unknown, config: any) {
-      this.addCalls.push({ messages, config });
-      return {
-        results: [
-          {
-            id: "mem_saved",
-            memory: String(messages),
-            metadata: { event: "ADD" },
-          },
-        ],
-      };
-    },
-  };
+test("completed query long-term memory extraction skips when main agent saved memory", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencat-file-memory-main-save-"));
+  const user = createMessage({ role: "user", content: "Please remember my preference." });
+  const assistant = createMessage({
+    role: "assistant",
+    content: "",
+    tool_calls: [{
+      id: "call_memory",
+      type: "function",
+      function: {
+        name: "MemorySave",
+        arguments: JSON.stringify({ memory: "User prefers terse replies." }),
+      },
+    }],
+  });
+  const finalAssistant = createMessage({
+    role: "assistant",
+    content: "Remembered.",
+  });
+  const state = createState({
+    messages: [user, assistant, finalAssistant],
+  });
+  const runtime = createRuntime({
+    cwd,
+    deepSeekRuntimeConfig: createDeepSeekConfig(),
+    deepSeekClient: createBackgroundMemoryClient(),
+    MemoryConfig: createMemoryConfig(),
+    longTermMemoryConfig: createLongTermMemoryConfig(cwd, {
+      autoExtract: true,
+    }),
+  });
 
-  return fakeMemory;
-}
+  const result = await extractLongTermMemoryForCompletedQuery(runtime, state, {
+    turnStartMessageId: user.id,
+  });
+
+  assert.deepEqual(result, {
+    status: "skipped",
+    reason: "memory_saved_by_main_agent",
+  });
+});
 
 function createDeepSeekConfig() {
   return {
@@ -272,6 +434,110 @@ function createDeepSeekConfig() {
     model: "deepseek-v4-flash",
     maxTokens: 1024,
   } as const;
+}
+
+function createLongTermMemoryConfig(
+  cwd: string,
+  options: Record<string, unknown> = {},
+) {
+  return {
+    userId: "user-1",
+    fileMemoryDirectory: join(cwd, ".opencat", "memory"),
+    ...options,
+  };
+}
+
+function createMemorySelectorClient(selectedPrefixes: string[]) {
+  return {
+    async create(input: any) {
+      const userContent = input.messages?.find((message: any) =>
+        message.role === "user"
+      )?.content ?? "";
+      const selectedFiles = selectMemoryFilenamesFromManifest(
+        String(userContent),
+        selectedPrefixes,
+      );
+      return {
+        id: "memory_selector",
+        object: "chat.completion",
+        created: 0,
+        model: "deepseek-v4-pro",
+        choices: [{
+          index: 0,
+          finish_reason: "stop",
+          logprobs: null,
+          message: {
+            role: "assistant",
+            content: JSON.stringify({
+              selected_files: selectedFiles,
+            }),
+          },
+        }],
+      };
+    },
+    async *stream() {
+      throw new Error("stream not used");
+    },
+    async collectStream() {
+      throw new Error("collectStream not used");
+    },
+  } as any;
+}
+
+function createBackgroundMemoryClient() {
+  return {
+    async create() {
+      throw new Error("create not used");
+    },
+    async *stream() {
+      yield {
+        done: false,
+        raw: "{}",
+        chunk: {
+          id: "background_memory",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "deepseek-v4-pro",
+          choices: [{
+            index: 0,
+            delta: {
+              role: "assistant",
+              content: "No durable memory was needed.",
+            },
+            finish_reason: "stop",
+          }],
+        },
+      };
+      yield {
+        done: true,
+        raw: "[DONE]",
+        chunk: null,
+      };
+    },
+    async collectStream() {
+      throw new Error("collectStream not used");
+    },
+  } as any;
+}
+
+function selectMemoryFilenamesFromManifest(
+  manifestPrompt: string,
+  prefixes: readonly string[],
+): string[] {
+  const selected: string[] = [];
+  for (const line of manifestPrompt.split(/\r?\n/)) {
+    const match = /^- (?:\[[^\]]+\] )?([^:]+):/.exec(line.trim());
+    if (!match) {
+      continue;
+    }
+
+    const filename = match[1];
+    if (prefixes.some((prefix) => filename.startsWith(prefix))) {
+      selected.push(filename);
+    }
+  }
+
+  return selected;
 }
 
 function createMemoryConfig() {

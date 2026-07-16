@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readdir, stat } from "node:fs/promises";
-import { join, parse } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { isAbsolute, join, parse } from "node:path";
+import { promisify } from "node:util";
 
 import { loadConfig } from "./config/load-config.js";
 import { createMemoryConfig } from "./Memory/config.js";
@@ -9,23 +11,49 @@ import { closeMcpConnections } from "./mcp/index.js";
 import { createToolsWithConfiguredMcp } from "./mcp/config.js";
 import { query } from "./query.js";
 import {
+  createTranscriptStore,
   loadStateFromTranscript,
   recordTranscriptMessage,
 } from "./transcript/persistence.js";
 import { createMessage, type Message } from "./types/messages.js";
 import { createRuntime, type Runtime } from "./types/runtime.js";
 import { createState, type State } from "./types/state.js";
-import type { QueryEvent } from "./query/types.js";
+import type {
+  QueryEvent,
+  ToolPermissionDecision,
+  ToolPermissionRequest,
+} from "./query/types.js";
 import type { DeepSeekAssistantMessage } from "./deepseek/types.js";
 import { formatErrorForUser } from "./deepseek/errors.js";
+import {
+  createSweBenchSessionId,
+  getSweWorkspaceStatus,
+  parseSweBenchSessionId,
+  type SweWorkspaceStatusValue,
+} from "./swe/workspace.js";
 import { createSessionId } from "./utils/session.js";
+import {
+  applyWorkspacePatchSnapshot,
+  approveWorkspacePatchSnapshot,
+  captureWorkspacePatchBaseline,
+  getWorkspacePatchDiff,
+  getWorkspacePatchDeltaDiff,
+  getWorkspacePatchDeltaSummary,
+  getWorkspacePatchSummary,
+  revertWorkspacePatch,
+  saveWorkspacePatchSnapshot,
+  type WorkspacePatchBaseline,
+} from "./workspace/patch-snapshot.js";
 
 const DEFAULT_PORT = 5177;
 const MAX_BODY_BYTES = 256 * 1024;
 const TRANSCRIPT_DIR = ".opencat/transcripts";
+const SWE_EVAL_DIR = ".opencat/evals/swe-verified-cache";
 const MAX_SESSION_HISTORY_MESSAGES = 200;
 const MAX_HISTORY_TOOL_CHARS = 2_000;
 const MAX_HISTORY_REASONING_CHARS = 4_000;
+const MAX_PATCH_BYTES = 50 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
 
 type TranscriptHydrationMode = "auto" | "full";
 
@@ -33,7 +61,16 @@ interface WebCliSession {
   runtime: Runtime;
   state: State;
   busy: boolean;
+  clientAttached: boolean;
+  activeQueryAbortController?: AbortController;
   loadInfo: WebCliSessionLoadInfo;
+  pendingToolApprovals: Map<string, PendingToolApproval>;
+  patchBaseline?: WorkspacePatchBaseline;
+}
+
+interface PendingToolApproval {
+  resolve: (decision: ToolPermissionDecision) => void;
+  timeout: NodeJS.Timeout;
 }
 
 interface WebCliSessionLoadInfo {
@@ -50,6 +87,27 @@ interface WebCliTranscriptSummary {
   size: number;
 }
 
+interface SweBenchItem {
+  instanceId: string;
+  repo: string;
+  baseCommit: string;
+  problemPreview: string;
+  sessionId: string;
+  hasSession: boolean;
+  workspaceStatus: SweWorkspaceStatusValue;
+}
+
+interface SweBenchInstance {
+  instance_id: string;
+  repo: string;
+  base_commit: string;
+  problem_statement: string;
+  hints_text?: string;
+  test_patch?: string;
+}
+
+type SweDraftKind = "investigate" | "fix" | "standard";
+
 let session = await createWebCliSession({
   sessionId: await resolveInitialSessionId(process.cwd()),
   resume: true,
@@ -58,21 +116,34 @@ let session = await createWebCliSession({
 interface CreateWebCliSessionOptions {
   sessionId?: string;
   resume: boolean;
+  cwd?: string;
 }
 
 async function createWebCliSession(
   options: CreateWebCliSessionOptions,
 ): Promise<WebCliSession> {
-  const { tools, mcpConnections } = await createToolsWithConfiguredMcp(process.cwd());
+  const sessionId = options.sessionId ?? createSessionId();
+  const runtimeCwd = options.cwd ??
+    await resolveSessionRuntimeCwd(sessionId) ??
+    process.cwd();
+  const { tools, mcpConnections } = await createToolsWithConfiguredMcp(runtimeCwd);
+  const transcriptStore = createTranscriptStore({
+    cwd: runtimeCwd,
+    sessionId,
+    agentId: "main",
+    agentRole: "main",
+    directory: join(process.cwd(), TRANSCRIPT_DIR),
+  });
   const runtime = createRuntime({
-    cwd: process.cwd(),
-    sessionId: options.sessionId,
+    cwd: runtimeCwd,
+    sessionId,
     deepSeekRuntimeConfig: loadConfig(),
-    MemoryConfig: createMemoryConfig({ cwd: process.cwd() }),
+    MemoryConfig: createMemoryConfig({ cwd: runtimeCwd }),
     longTermMemoryConfig: {
       autoInject: true,
       autoExtract: true,
     },
+    transcriptStore,
     tools,
     mcpConnections,
   });
@@ -87,6 +158,8 @@ async function createWebCliSession(
     runtime,
     state,
     busy: false,
+    clientAttached: false,
+    pendingToolApprovals: new Map(),
     loadInfo: {
       restored: Boolean(restored),
       requestedSessionId: options.sessionId,
@@ -95,6 +168,25 @@ async function createWebCliSession(
       messageCount: state.Messages.length,
     },
   };
+}
+
+async function resolveSessionRuntimeCwd(
+  sessionId: string,
+): Promise<string | undefined> {
+  const instanceId = parseSweBenchSessionId(sessionId);
+  if (!instanceId) {
+    return undefined;
+  }
+
+  const instance = await findSweBenchInstance(process.cwd(), instanceId);
+  if (!instance) {
+    return undefined;
+  }
+
+  const workspace = await getSweWorkspaceStatus(instance);
+  return isUsableSweWorkspaceStatus(workspace.status)
+    ? workspace.path
+    : undefined;
 }
 
 async function resolveInitialSessionId(cwd: string): Promise<string | undefined> {
@@ -114,7 +206,9 @@ async function resolveInitialSessionId(cwd: string): Promise<string | undefined>
 async function findLatestMainTranscriptSessionId(
   cwd: string,
 ): Promise<string | undefined> {
-  return (await listMainTranscriptSessions(cwd)).at(0)?.sessionId;
+  return (await listMainTranscriptSessions(cwd))
+    .find((item) => !parseSweBenchSessionId(item.sessionId))
+    ?.sessionId;
 }
 
 async function listMainTranscriptSessions(
@@ -144,6 +238,271 @@ async function listMainTranscriptSessions(
   }
 }
 
+async function hasMainTranscriptSession(
+  cwd: string,
+  sessionId: string,
+): Promise<boolean> {
+  return (await listMainTranscriptSessions(cwd))
+    .some((item) => item.sessionId === sessionId);
+}
+
+async function listSweBenchItems(cwd: string): Promise<SweBenchItem[]> {
+  const instances = await loadSweBenchInstances(cwd);
+  const sessions = new Set(
+    (await listMainTranscriptSessions(cwd)).map((item) => item.sessionId),
+  );
+
+  return await Promise.all(instances.map(async (instance) => {
+    const sessionId = createSweBenchSessionId(instance.instance_id);
+    const workspace = await getSweWorkspaceStatus(instance);
+    return {
+      instanceId: instance.instance_id,
+      repo: instance.repo,
+      baseCommit: instance.base_commit,
+      problemPreview: firstLine(instance.problem_statement),
+      sessionId,
+      hasSession: sessions.has(sessionId),
+      workspaceStatus: workspace.status,
+    };
+  }));
+}
+
+async function findSweBenchInstance(
+  cwd: string,
+  instanceId: string,
+): Promise<SweBenchInstance | undefined> {
+  return (await loadSweBenchInstances(cwd))
+    .find((instance) => instance.instance_id === instanceId);
+}
+
+async function loadSweBenchInstances(cwd: string): Promise<SweBenchInstance[]> {
+  const config = await readJsonFile<Record<string, unknown>>(
+    join(cwd, SWE_EVAL_DIR, "config.json"),
+  );
+  const configuredDatasetPath = typeof config?.datasetPath === "string"
+    ? config.datasetPath
+    : "";
+  const datasetPath = configuredDatasetPath
+    ? (isAbsolute(configuredDatasetPath)
+      ? configuredDatasetPath
+      : join(cwd, configuredDatasetPath))
+    : join(cwd, SWE_EVAL_DIR, "dataset.jsonl");
+  const records = await readJsonlOrArray<SweBenchInstance>(datasetPath);
+
+  return records
+    .filter(isSweBenchInstance);
+}
+
+async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
+  try {
+    return JSON.parse(await readFile(filePath, "utf8")) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readJsonlOrArray<T>(filePath: string): Promise<T[]> {
+  const raw = await readFile(filePath, "utf8").catch(() => "");
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  if (trimmed.startsWith("[")) {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  }
+
+  return trimmed.split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as T);
+}
+
+function isSweBenchInstance(value: unknown): value is SweBenchInstance {
+  const record = value as Partial<SweBenchInstance>;
+  return typeof record.instance_id === "string" &&
+    typeof record.repo === "string" &&
+    typeof record.base_commit === "string" &&
+    typeof record.problem_statement === "string";
+}
+
+function isUsableSweWorkspaceStatus(status: SweWorkspaceStatusValue): boolean {
+  return status === "ready" || status === "dirty" || status === "wrong-head";
+}
+
+async function getCurrentSweSessionInfo(): Promise<{
+  instanceId: string;
+  workspaceReady: boolean;
+  workspaceStatus: SweWorkspaceStatusValue;
+  workspacePath?: string;
+} | null> {
+  const instanceId = parseSweBenchSessionId(session.runtime.sessionId);
+  if (!instanceId) {
+    return null;
+  }
+
+  const instance = await findSweBenchInstance(process.cwd(), instanceId);
+  if (!instance) {
+    return {
+      instanceId,
+      workspaceReady: false,
+      workspaceStatus: "missing",
+    };
+  }
+
+  const workspace = await getSweWorkspaceStatus(instance);
+  return {
+    instanceId,
+    workspaceReady: isUsableSweWorkspaceStatus(workspace.status),
+    workspaceStatus: workspace.status,
+    workspacePath: workspace.path,
+  };
+}
+
+async function exportCurrentSwePatch(): Promise<{
+  ok: true;
+  instanceId: string;
+  fileName: string;
+  patch: string;
+  empty: boolean;
+  savedPath?: string;
+  workspacePath: string;
+} | {
+  ok: false;
+  error: string;
+}> {
+  const swe = await getCurrentSweSessionInfo();
+  if (!swe) {
+    return { ok: false, error: "Current session is not a SWE session." };
+  }
+
+  if (!swe.workspaceReady || !swe.workspacePath) {
+    return {
+      ok: false,
+      error: `SWE workspace is not ready: ${swe.workspaceStatus}.`,
+    };
+  }
+
+  const { stdout } = await execFileAsync("git", [
+    "-c",
+    "safe.directory=*",
+    "diff",
+    "--binary",
+  ], {
+    cwd: swe.workspacePath,
+    maxBuffer: MAX_PATCH_BYTES,
+    windowsHide: true,
+  });
+  const patch = String(stdout);
+  const savedPath = patch.trim().length === 0
+    ? undefined
+    : await saveSwePatchFile(swe.instanceId, patch);
+
+  return {
+    ok: true,
+    instanceId: swe.instanceId,
+    fileName: `${swe.instanceId}.patch`,
+    patch,
+    empty: patch.trim().length === 0,
+    savedPath,
+    workspacePath: swe.workspacePath,
+  };
+}
+
+async function saveSwePatchFile(
+  instanceId: string,
+  patch: string,
+): Promise<string> {
+  const directory = resolveSwePatchDirectory();
+  await mkdir(directory, { recursive: true });
+  const filePath = join(directory, `${sanitizePatchFileName(instanceId)}.patch`);
+  await writeFile(filePath, patch, "utf8");
+  return filePath;
+}
+
+function resolveSwePatchDirectory(): string {
+  const configured = process.env.OPENCAT_SWE_PATCH_DIR?.trim();
+  if (!configured) {
+    return join(process.cwd(), SWE_EVAL_DIR, "patches");
+  }
+
+  return isAbsolute(configured) ? configured : join(process.cwd(), configured);
+}
+
+function sanitizePatchFileName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
+
+function parseSweDraftKind(value: string | null): SweDraftKind {
+  return value === "fix" || value === "standard" ? value : "investigate";
+}
+
+function buildSweDraftPrompt(
+  instance: SweBenchInstance,
+  kind: SweDraftKind,
+): string {
+  if (kind === "investigate") {
+    return buildSweInvestigatePrompt(instance);
+  }
+
+  if (kind === "fix") {
+    return [
+      "Based on the investigation from the previous turn, implement the smallest correct fix now.",
+      "Modify only the checked-out SWE workspace for this item. Re-read any file you edit before changing it.",
+      "After editing, run the most relevant tests you can. If tests cannot run, explain exactly why and what you verified instead.",
+      "Finish with a concise summary of changed files, the behavior fixed, and verification results.",
+      "",
+      "<swe_task_followup>",
+      `<instance_id>${instance.instance_id}</instance_id>`,
+      "</swe_task_followup>",
+    ].join("\n");
+  }
+
+  return [
+    "You are working on a SWE-bench Verified issue in OpenCat.",
+    "Modify the checked-out repository to fix the issue. Prefer minimal, well-tested changes.",
+    "Use the available tools to inspect, edit, and verify the code.",
+    "Do not fetch unrelated web content unless the repository itself requires it.",
+    "Before editing, inspect the relevant files in the workspace. After editing, run the most relevant tests you can.",
+    "",
+    "<swe_task>",
+    `<instance_id>${instance.instance_id}</instance_id>`,
+    `<repo>${instance.repo}</repo>`,
+    "",
+    "<problem_statement>",
+    instance.problem_statement,
+    "</problem_statement>",
+    instance.hints_text ? `\n<hints_text>\n${instance.hints_text}\n</hints_text>` : "",
+    "</swe_task>",
+  ].filter((line) => line !== "").join("\n");
+}
+
+function buildSweInvestigatePrompt(instance: SweBenchInstance): string {
+  return [
+    "You are working on a SWE-bench Verified issue in OpenCat.",
+    "First investigate only. Do not modify files yet. Do not call Edit or Write.",
+    "Read the issue, inspect the checked-out repository, identify the likely root cause, and explain the smallest code change you would make next.",
+    "Use tools to inspect relevant files. Do not fetch unrelated web content unless the repository itself requires it.",
+    "End with a concise investigation summary: root cause, relevant files/functions, proposed fix, and tests to run.",
+    "",
+    "<swe_task>",
+    `<instance_id>${instance.instance_id}</instance_id>`,
+    `<repo>${instance.repo}</repo>`,
+    "",
+    "<problem_statement>",
+    instance.problem_statement,
+    "</problem_statement>",
+    instance.hints_text ? `\n<hints_text>\n${instance.hints_text}\n</hints_text>` : "",
+    "</swe_task>",
+  ].filter((line) => line !== "").join("\n");
+}
+
+function firstLine(value: string): string {
+  return value.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? "";
+}
+
 function getTranscriptHydrationMode(): TranscriptHydrationMode {
   return process.env.OPENCAT_TRANSCRIPT_HYDRATE === "full" ? "full" : "auto";
 }
@@ -158,6 +517,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && url.pathname === "/api/session") {
+      const sweSessionInfo = await getCurrentSweSessionInfo();
       sendJson(response, {
         sessionId: session.runtime.sessionId,
         model: session.runtime.deepSeekRuntimeConfig.model,
@@ -168,6 +528,8 @@ const server = createServer(async (request, response) => {
         restored: session.loadInfo.restored,
         hydrate: session.loadInfo.hydrate,
         transcriptPath: session.loadInfo.transcriptPath,
+        cwd: session.runtime.cwd,
+        swe: sweSessionInfo,
       });
       return;
     }
@@ -175,6 +537,64 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/api/sessions") {
       sendJson(response, {
         sessions: await listMainTranscriptSessions(process.cwd()),
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/swe/items") {
+      sendJson(response, {
+        items: await listSweBenchItems(process.cwd()),
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/swe/prompt") {
+      const instanceId = url.searchParams.get("instanceId")?.trim() ?? "";
+      const kind = parseSweDraftKind(url.searchParams.get("kind"));
+      const instance = await findSweBenchInstance(process.cwd(), instanceId);
+      if (!instance) {
+        sendJson(response, { error: "SWE item not found." }, 404);
+        return;
+      }
+
+      sendJson(response, {
+        instanceId,
+        kind,
+        prompt: buildSweDraftPrompt(instance, kind),
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/swe/session") {
+      const body = await readJsonBody<{ instanceId?: unknown }>(request);
+      const instanceId = typeof body.instanceId === "string"
+        ? body.instanceId.trim()
+        : "";
+      const instance = await findSweBenchInstance(process.cwd(), instanceId);
+      if (!instance) {
+        sendJson(response, { error: "SWE item not found." }, 404);
+        return;
+      }
+
+      const sessionId = createSweBenchSessionId(instance.instance_id);
+      const workspace = await getSweWorkspaceStatus(instance);
+      const workspacePath = isUsableSweWorkspaceStatus(workspace.status)
+        ? workspace.path
+        : undefined;
+
+      const existed = await hasMainTranscriptSession(process.cwd(), sessionId);
+      await replaceSession({
+        sessionId,
+        resume: existed,
+        cwd: workspacePath ?? process.cwd(),
+      });
+
+      sendJson(response, {
+        ok: true,
+        sessionId: session.runtime.sessionId,
+        existed,
+        workspaceReady: Boolean(workspacePath),
+        messageCount: session.state.Messages.length,
       });
       return;
     }
@@ -196,12 +616,71 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.method === "POST" && url.pathname === "/api/session/load") {
-      if (session.busy) {
-        sendJson(response, { error: "A query is already running." }, 409);
-        return;
-      }
+    if (request.method === "POST" && url.pathname === "/api/query/stop") {
+      stopActiveQuery("Stopped from the web UI.");
+      sendJson(response, { ok: true });
+      return;
+    }
 
+    if (request.method === "POST" && url.pathname === "/api/tool-permission") {
+      await handleToolPermissionResponse(request, response);
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/swe/patch") {
+      sendJson(response, await exportCurrentSwePatch());
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/patch/current") {
+      sendJson(response, await getWorkspacePatchDiff(session.runtime));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/patch/summary") {
+      sendJson(response, await getWorkspacePatchSummary(session.runtime));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/patch/turn/current") {
+      sendJson(
+        response,
+        await getWorkspacePatchDeltaDiff(session.runtime, session.patchBaseline),
+      );
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/patch/turn/summary") {
+      sendJson(
+        response,
+        await getWorkspacePatchDeltaSummary(session.runtime, session.patchBaseline),
+      );
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/patch/snapshot") {
+      sendJson(response, await saveWorkspacePatchSnapshot(session.runtime, "manual"));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/patch/approve") {
+      sendJson(response, await approveWorkspacePatchSnapshot(session.runtime));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/patch/apply") {
+      const body = await readJsonBody<{ source?: unknown }>(request);
+      const source = body.source === "approved" ? "approved" : "latest";
+      sendJson(response, await applyWorkspacePatchSnapshot(session.runtime, source));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/patch/revert") {
+      sendJson(response, await revertWorkspacePatch(session.runtime));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/session/load") {
       const body = await readJsonBody<{ sessionId?: unknown }>(request);
       const sessionId = typeof body.sessionId === "string"
         ? body.sessionId.trim()
@@ -213,10 +692,17 @@ const server = createServer(async (request, response) => {
         return;
       }
 
-      await replaceSession({ sessionId, resume: true });
+      const runtimeCwd = await resolveSessionRuntimeCwd(sessionId);
+
+      await replaceSession({
+        sessionId,
+        resume: true,
+        cwd: runtimeCwd ?? process.cwd(),
+      });
       sendJson(response, {
         ok: true,
         sessionId: session.runtime.sessionId,
+        workspaceReady: Boolean(runtimeCwd),
         messageCount: session.state.Messages.length,
       });
       return;
@@ -252,7 +738,8 @@ async function handleQuery(
   request: IncomingMessage,
   response: ServerResponse,
 ): Promise<void> {
-  if (session.busy) {
+  const activeSession = session;
+  if (activeSession.busy) {
     sendJson(response, { error: "A query is already running." }, 409);
     return;
   }
@@ -265,18 +752,14 @@ async function handleQuery(
     return;
   }
 
-  session.busy = true;
-  const previousAbortController = session.runtime.toolUseContext.abortController;
+  activeSession.busy = true;
+  activeSession.clientAttached = true;
+  activeSession.patchBaseline =
+    await captureWorkspacePatchBaseline(activeSession.runtime);
+  const previousAbortController = activeSession.runtime.toolUseContext.abortController;
   const queryAbortController = new AbortController();
-  session.runtime.toolUseContext.abortController = queryAbortController;
-  let responseCompleted = false;
-  const abortQuery = () => {
-    if (!responseCompleted && !queryAbortController.signal.aborted) {
-      queryAbortController.abort(new Error("Web client disconnected."));
-    }
-  };
-  request.once("aborted", abortQuery);
-  response.once("close", abortQuery);
+  activeSession.activeQueryAbortController = queryAbortController;
+  activeSession.runtime.toolUseContext.abortController = queryAbortController;
 
   response.writeHead(200, {
     "Content-Type": "application/x-ndjson; charset=utf-8",
@@ -284,21 +767,38 @@ async function handleQuery(
     Connection: "keep-alive",
   });
 
+  const markClientDetached = () => {
+    if (!activeSession.clientAttached) {
+      return;
+    }
+
+    activeSession.clientAttached = false;
+    denyAllPendingToolApprovalsForSession(
+      activeSession,
+      "Tool permission request was cancelled because the web client detached.",
+    );
+  };
+  request.once("aborted", markClientDetached);
+  response.once("close", markClientDetached);
+
   try {
     const userMessage = createMessage({
       role: "user",
       content: prompt,
     });
-    session.state.Messages.push(userMessage);
-    await recordTranscriptMessage(session.runtime, userMessage);
+    activeSession.state.Messages.push(userMessage);
+    await recordTranscriptMessage(activeSession.runtime, userMessage);
 
     writeEvent(response, {
       type: "user_message",
       id: userMessage.id,
-      messageCount: session.state.Messages.length,
+      messageCount: activeSession.state.Messages.length,
     });
 
-    for await (const event of query(session.runtime, session.state)) {
+    for await (const event of query(activeSession.runtime, activeSession.state, {
+      requestToolPermission: (toolRequest) =>
+        createToolPermissionRequestForSession(activeSession, toolRequest),
+    })) {
       const normalizedEvent = normalizeQueryEvent(
         event,
         Boolean(body.includeRawEvents),
@@ -316,14 +816,119 @@ async function handleQuery(
       });
     }
   } finally {
-    session.busy = false;
-    session.runtime.toolUseContext.abortController = previousAbortController;
-    request.off("aborted", abortQuery);
-    response.off("close", abortQuery);
-    responseCompleted = true;
+    request.off("aborted", markClientDetached);
+    response.off("close", markClientDetached);
+    denyAllPendingToolApprovalsForSession(
+      activeSession,
+      "Query ended before the tool permission request was answered.",
+    );
+    activeSession.busy = false;
+    activeSession.clientAttached = false;
+    if (activeSession.activeQueryAbortController === queryAbortController) {
+      activeSession.activeQueryAbortController = undefined;
+    }
+    activeSession.runtime.toolUseContext.abortController = previousAbortController;
+    if (session !== activeSession) {
+      closeMcpConnections(activeSession.runtime.mcpConnections);
+    }
     if (!response.destroyed && !response.writableEnded) {
       response.end();
     }
+  }
+}
+
+function stopActiveQuery(reason: string): void {
+  const controller = session.activeQueryAbortController ??
+    session.runtime.toolUseContext.abortController;
+  if (!session.busy || controller.signal.aborted) {
+    return;
+  }
+
+  controller.abort(new Error(reason));
+  denyAllPendingToolApprovalsForSession(session, reason);
+}
+
+async function handleToolPermissionResponse(
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const body = await readJsonBody<{
+    approvalId?: unknown;
+    decision?: unknown;
+  }>(request);
+  const approvalId = typeof body.approvalId === "string"
+    ? body.approvalId.trim()
+    : "";
+  const decision = body.decision === "allow" || body.decision === "deny"
+    ? body.decision
+    : "";
+
+  if (!approvalId || !decision) {
+    sendJson(response, { error: "Invalid tool permission response." }, 400);
+    return;
+  }
+
+  const pending = session.pendingToolApprovals.get(approvalId);
+  if (!pending) {
+    sendJson(response, { error: "Tool permission request not found." }, 404);
+    return;
+  }
+
+  clearTimeout(pending.timeout);
+  session.pendingToolApprovals.delete(approvalId);
+  pending.resolve(
+    decision === "allow"
+      ? { behavior: "allow" }
+      : { behavior: "deny", reason: "Denied by user from the web UI." },
+  );
+  sendJson(response, { ok: true });
+}
+
+function createToolPermissionRequestForSession(
+  targetSession: WebCliSession,
+  request: ToolPermissionRequest,
+): Promise<ToolPermissionDecision> {
+  if (!targetSession.clientAttached) {
+    return Promise.resolve({
+      behavior: "deny",
+      reason: "Tool permission request cannot be approved because the web client is detached.",
+    });
+  }
+
+  const existing = targetSession.pendingToolApprovals.get(request.approvalId);
+  if (existing) {
+    clearTimeout(existing.timeout);
+    targetSession.pendingToolApprovals.delete(request.approvalId);
+    existing.resolve({
+      behavior: "deny",
+      reason: "Superseded by a newer tool permission request.",
+    });
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      targetSession.pendingToolApprovals.delete(request.approvalId);
+      resolve({
+        behavior: "deny",
+        reason: "Tool permission request timed out.",
+      });
+    }, 5 * 60 * 1000);
+
+    targetSession.pendingToolApprovals.set(request.approvalId, {
+      resolve,
+      timeout,
+    });
+  });
+}
+
+function denyAllPendingToolApprovalsForSession(
+  targetSession: WebCliSession,
+  reason: string,
+): void {
+  for (const [approvalId, pending] of targetSession.pendingToolApprovals) {
+    clearTimeout(pending.timeout);
+    pending.resolve({ behavior: "deny", reason });
+    targetSession.pendingToolApprovals.delete(approvalId);
   }
 }
 
@@ -374,6 +979,25 @@ function normalizeQueryEvent(
         message: normalizeAssistantMessageForWeb(event.message),
         usage: event.usage,
       };
+    case "tool_permission":
+      return {
+        type: event.type,
+        toolCallId: event.toolCall.id,
+        toolName: event.toolCall.function.name,
+        behavior: event.behavior,
+        reason: event.reason,
+        reasonPreview: previewText(event.reason),
+      };
+    case "tool_permission_request":
+      return {
+        type: event.type,
+        approvalId: event.approvalId,
+        toolCallId: event.toolCall.id,
+        toolName: event.toolCall.function.name,
+        mode: event.mode,
+        reason: event.reason,
+        reasonPreview: previewText(event.reason),
+      };
     case "tool_result":
       {
         const content = typeof event.message.content === "string"
@@ -423,7 +1047,9 @@ async function resetSession(): Promise<void> {
 }
 
 async function replaceSession(options: CreateWebCliSessionOptions): Promise<void> {
-  closeMcpConnections(session.runtime.mcpConnections);
+  if (!session.busy) {
+    closeMcpConnections(session.runtime.mcpConnections);
+  }
   session = await createWebCliSession(options);
 }
 
@@ -497,7 +1123,12 @@ function writeEvent(response: ServerResponse, event: unknown): void {
     return;
   }
 
-  response.write(`${JSON.stringify(event)}\n`);
+  try {
+    response.write(`${JSON.stringify(event)}\n`);
+  } catch {
+    // The browser may have navigated away. Keep the query running; the
+    // transcript remains the source of truth when the session is reopened.
+  }
 }
 
 function sendHtml(response: ServerResponse): void {
@@ -556,6 +1187,7 @@ function renderHtml(): string {
       --text-muted: #6e7681;
       --accent-blue: #58a6ff;
       --accent-green: #3fb950;
+      --accent-yellow: #f0b429;
       --accent-orange: #d29922;
       --accent-red: #f85149;
       --accent-purple: #a371f7;
@@ -721,9 +1353,31 @@ function renderHtml(): string {
       border-bottom: 1px solid var(--border-muted);
     }
     #session-list {
-      flex: 1;
+      flex: 1 1 45%;
+      min-height: 140px;
       overflow-y: auto;
       padding: 6px;
+    }
+    #swe-list {
+      flex: 1 1 45%;
+      min-height: 160px;
+      overflow-y: auto;
+      padding: 6px;
+      border-top: 1px solid var(--border-muted);
+    }
+    .sidebar-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .6px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-muted);
+      border-bottom: 1px solid var(--border-muted);
+      flex-shrink: 0;
     }
     .session-item {
       display: flex;
@@ -979,6 +1633,7 @@ function renderHtml(): string {
       flex-shrink: 0;
     }
     .tool-card .tool-indicator.done { background: var(--accent-green); }
+    .tool-card .tool-indicator.blocked { background: var(--accent-yellow); }
     .tool-card .tool-name {
       font-weight: 600;
       color: var(--accent-orange);
@@ -991,6 +1646,7 @@ function renderHtml(): string {
       color: var(--text-muted);
     }
     .tool-card .tool-status.done { color: var(--accent-green); }
+    .tool-card .tool-status.blocked { color: var(--accent-yellow); }
     .tool-card .tool-input,
     .tool-card .tool-result {
       padding: 8px 12px 8px 28px;
@@ -1005,6 +1661,96 @@ function renderHtml(): string {
       line-height: 1.45;
     }
     .tool-card .tool-result { color: var(--text-primary); }
+    .tool-permission-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .tool-permission-actions button {
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    .tool-permission-actions button:hover { border-color: var(--accent-blue); }
+    .tool-permission-actions button.deny:hover { border-color: var(--accent-red); }
+    #change-review-card {
+      position: fixed;
+      top: 54px;
+      right: 18px;
+      width: min(520px, calc(100vw - 36px));
+      z-index: 70;
+      display: none;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      box-shadow: 0 12px 36px rgba(0,0,0,.32);
+      overflow: hidden;
+    }
+    #change-review-card.open { display: block; }
+    #change-review-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-muted);
+    }
+    #change-review-icon {
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--border-muted);
+      border-radius: var(--radius-sm);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      flex-shrink: 0;
+      font-family: var(--font-mono);
+    }
+    #change-review-title {
+      flex: 1;
+      min-width: 0;
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    #change-review-totals {
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .diff-add { color: var(--accent-green); }
+    .diff-del { color: var(--accent-red); }
+    #change-review-actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    #change-review-files {
+      padding: 8px 12px 10px 12px;
+      display: grid;
+      gap: 8px;
+      max-height: 220px;
+      overflow: auto;
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .change-review-file {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: baseline;
+      color: var(--text-secondary);
+    }
+    .change-review-path {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .projection-note {
       display: inline-flex;
       align-items: center;
@@ -1149,6 +1895,93 @@ function renderHtml(): string {
     }
     #toast.show { opacity: 1; }
 
+    /* ===== Patch Diff Modal ===== */
+    #patch-modal {
+      position: fixed;
+      inset: 52px 24px 24px 24px;
+      z-index: 80;
+      display: none;
+      flex-direction: column;
+      min-height: 0;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      box-shadow: 0 16px 50px rgba(0,0,0,.45);
+    }
+    #patch-modal.open { display: flex; }
+    #patch-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-muted);
+    }
+    #patch-modal-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    #patch-modal-actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    #patch-diff {
+      flex: 1;
+      margin: 0;
+      padding: 12px;
+      overflow: auto;
+      white-space: pre;
+      tab-size: 2;
+      color: var(--text-primary);
+      background: var(--bg-primary);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .patch-line {
+      display: block;
+      min-height: 1.45em;
+      padding: 0 8px;
+      margin: 0 -4px;
+      border-left: 2px solid transparent;
+    }
+    .patch-line.add {
+      color: #8ee89f;
+      background: rgba(34, 197, 94, .10);
+      border-left-color: rgba(34, 197, 94, .85);
+    }
+    .patch-line.del {
+      color: #ff9a9a;
+      background: rgba(239, 68, 68, .12);
+      border-left-color: rgba(239, 68, 68, .85);
+    }
+    .patch-line.hunk {
+      color: #7dd3fc;
+      background: rgba(56, 189, 248, .10);
+      border-left-color: rgba(56, 189, 248, .75);
+    }
+    .patch-line.file {
+      color: #facc15;
+      background: rgba(250, 204, 21, .08);
+      border-left-color: rgba(250, 204, 21, .75);
+    }
+    #patch-modal-footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 12px;
+      border-top: 1px solid var(--border-muted);
+      color: var(--text-muted);
+      font-size: 11px;
+      font-family: var(--font-mono);
+    }
+
     /* ===== Responsive ===== */
     @media (max-width: 900px) {
       #sidebar { display: none; }
@@ -1177,6 +2010,8 @@ function renderHtml(): string {
     <div id="usage-badge" title="Session token usage and prompt cache hit rate">usage --</div>
     <div id="projection-badge" class="clean" title="Context projection compression status">projection clean</div>
     <div id="topbar-actions">
+      <button id="patch-diff-btn" class="btn" type="button" title="Show current workspace git diff">Diff</button>
+      <button id="export-patch-btn" class="btn" type="button" title="Export current SWE worktree diff" disabled>Export Patch</button>
       <button id="events-toggle" class="btn" title="Toggle events panel">Events</button>
       <label class="btn" title="Show raw stream events" style="cursor:pointer">
         <input id="raw" type="checkbox" style="margin:0"> raw
@@ -1197,6 +2032,11 @@ function renderHtml(): string {
       <div style="padding:8px;border-top:1px solid var(--border-muted);font-size:10px;color:var(--text-muted);text-align:center">
         &darr; Click a session to load &darr;
       </div>
+      <div class="sidebar-section-header">
+        <span>SWE Items</span>
+        <button id="refresh-swe" class="btn" style="height:22px;padding:0 6px;font-size:10px">&#8635;</button>
+      </div>
+      <div id="swe-list"></div>
     </aside>
 
     <!-- Main Chat -->
@@ -1238,6 +2078,42 @@ function renderHtml(): string {
   <!-- Toast -->
   <div id="toast"></div>
 
+  <!-- Change Review Card -->
+  <div id="change-review-card" aria-hidden="true">
+    <div id="change-review-header">
+      <div id="change-review-icon">+/-</div>
+      <div>
+        <div id="change-review-title">Edited files</div>
+        <div id="change-review-totals"></div>
+      </div>
+      <div id="change-review-actions">
+        <button id="change-review-dismiss" class="btn" type="button" title="Hide this review card">Dismiss</button>
+        <button id="change-review-open" class="btn" type="button" title="Open full diff review">Review</button>
+      </div>
+    </div>
+    <div id="change-review-files"></div>
+  </div>
+
+  <!-- Patch Diff Modal -->
+  <div id="patch-modal" aria-hidden="true">
+    <div id="patch-modal-header">
+      <div id="patch-modal-title">Workspace Diff</div>
+      <div id="patch-modal-actions">
+        <button id="patch-refresh-btn" class="btn" type="button">Refresh</button>
+        <button id="patch-save-btn" class="btn" type="button">Save Snapshot</button>
+        <button id="patch-apply-btn" class="btn" type="button">Apply Latest</button>
+        <button id="patch-revert-btn" class="btn btn-danger" type="button">Revert Current</button>
+        <button id="patch-approve-btn" class="btn btn-primary" type="button">Mark Approved</button>
+        <button id="patch-close-btn" class="btn" type="button">Close</button>
+      </div>
+    </div>
+    <pre id="patch-diff">Loading...</pre>
+    <div id="patch-modal-footer">
+      <span id="patch-status">-</span>
+      <span id="patch-path">-</span>
+    </div>
+  </div>
+
   <script nonce="${nonce}">
     (function() {
       // --- Elements ---
@@ -1251,6 +2127,7 @@ function renderHtml(): string {
       const rawInput = document.querySelector("#raw");
       const resetButton = document.querySelector("#reset-btn");
       const sessionList = document.querySelector("#session-list");
+      const sweList = document.querySelector("#swe-list");
       const clearEventsButton = document.querySelector("#clear-events");
       const sidebarToggle = document.querySelector("#sidebar-toggle");
       const eventsToggle = document.querySelector("#events-toggle");
@@ -1263,8 +2140,28 @@ function renderHtml(): string {
       const projectionBadge = document.querySelector("#projection-badge");
       const charCount = document.querySelector("#char-count");
       const modelBadge = document.querySelector("#model-badge");
+      const patchDiffButton = document.querySelector("#patch-diff-btn");
+      const exportPatchButton = document.querySelector("#export-patch-btn");
+      const patchModal = document.querySelector("#patch-modal");
+      const patchModalTitle = document.querySelector("#patch-modal-title");
+      const patchDiff = document.querySelector("#patch-diff");
+      const patchStatus = document.querySelector("#patch-status");
+      const patchPath = document.querySelector("#patch-path");
+      const patchRefreshButton = document.querySelector("#patch-refresh-btn");
+      const patchSaveButton = document.querySelector("#patch-save-btn");
+      const patchApplyButton = document.querySelector("#patch-apply-btn");
+      const patchRevertButton = document.querySelector("#patch-revert-btn");
+      const patchApproveButton = document.querySelector("#patch-approve-btn");
+      const patchCloseButton = document.querySelector("#patch-close-btn");
+      const changeReviewCard = document.querySelector("#change-review-card");
+      const changeReviewTitle = document.querySelector("#change-review-title");
+      const changeReviewTotals = document.querySelector("#change-review-totals");
+      const changeReviewFiles = document.querySelector("#change-review-files");
+      const changeReviewDismiss = document.querySelector("#change-review-dismiss");
+      const changeReviewOpen = document.querySelector("#change-review-open");
       const toast = document.querySelector("#toast");
       const refreshSessionsBtn = document.querySelector("#refresh-sessions");
+      const refreshSweBtn = document.querySelector("#refresh-swe");
 
       const MAX_EVENT_NODES = 160;
       const MAX_EVENT_TEXT_CHARS = 12000;
@@ -1279,9 +2176,11 @@ function renderHtml(): string {
       let assistantTextBuffer = "";
       let assistantRenderFrame = 0;
       let currentSessionId = "";
+      let currentSweSession = null;
       let isBusy = false;
       let isSessionLoading = false;
       let abortController = null;
+      let activeClientRequestId = 0;
       let latestUsage = null;
       let currentQueryUsage = null;
       let currentQueryRequestCount = 0;
@@ -1296,11 +2195,30 @@ function renderHtml(): string {
       async function init() {
         try {
           await refreshSession(true);
+          await populateSweItems();
+          await openInitialSweSessionFromUrl();
         } finally {
           setBusy(false);
           updateCharCount();
           promptInput.focus();
         }
+      }
+
+      async function openInitialSweSessionFromUrl() {
+        var params = new URLSearchParams(window.location.search);
+        var instanceId = params.get("swe");
+        if (!instanceId) return;
+        var draftKind = params.get("draft") || "";
+
+        var payload = await openSweSession(instanceId);
+        if (draftKind && payload && Number(payload.messageCount || 0) === 0) {
+          await fillSweDraftPrompt(instanceId, draftKind);
+        }
+        params.delete("swe");
+        params.delete("draft");
+        var nextSearch = params.toString();
+        var nextUrl = window.location.pathname + (nextSearch ? "?" + nextSearch : "") + window.location.hash;
+        window.history.replaceState(null, "", nextUrl);
       }
 
       // --- Toast ---
@@ -1344,6 +2262,24 @@ function renderHtml(): string {
         showToast("Sessions refreshed");
       });
 
+      refreshSweBtn.addEventListener("click", async function() {
+        await populateSweItems();
+        showToast("SWE items refreshed");
+      });
+
+      patchDiffButton.addEventListener("click", openPatchModal);
+      patchRefreshButton.addEventListener("click", function() {
+        refreshPatchDiff("workspace");
+      });
+      patchSaveButton.addEventListener("click", savePatchSnapshot);
+      patchApplyButton.addEventListener("click", applyLatestPatchSnapshot);
+      patchRevertButton.addEventListener("click", revertCurrentPatch);
+      patchApproveButton.addEventListener("click", approvePatchSnapshot);
+      patchCloseButton.addEventListener("click", closePatchModal);
+      changeReviewDismiss.addEventListener("click", hideChangeReviewCard);
+      changeReviewOpen.addEventListener("click", openTurnPatchModal);
+      exportPatchButton.addEventListener("click", exportSwePatch);
+
       // --- Form submit ---
       form.addEventListener("submit", async function(event) {
         event.preventDefault();
@@ -1352,6 +2288,7 @@ function renderHtml(): string {
         if (!prompt) return;
 
         hideWelcome();
+        hideChangeReviewCard();
         chatAutoScroll = true;
         appendMessage("user", prompt);
         promptInput.value = "";
@@ -1362,6 +2299,7 @@ function renderHtml(): string {
         reasoningTextBuffer = "";
         resetCurrentQueryUsage(currentAssistant);
         setBusy(true);
+        var clientRequestId = ++activeClientRequestId;
 
         try {
           abortController = new AbortController();
@@ -1389,10 +2327,12 @@ function renderHtml(): string {
           safeFlushAssistantText();
           safeFlushReasoningText();
           closeReasoningBlock();
-          setBusy(false);
-          abortController = null;
-          promptInput.focus();
-          try { await refreshSession(); } catch (e) { /* ignore */ }
+          if (clientRequestId === activeClientRequestId) {
+            setBusy(false);
+            abortController = null;
+            promptInput.focus();
+            try { await refreshSession(); } catch (e) { /* ignore */ }
+          }
         }
       });
 
@@ -1411,6 +2351,7 @@ function renderHtml(): string {
       // --- Stop button ---
       stopButton.addEventListener("click", function() {
         if (abortController) {
+          fetch("/api/query/stop", { method: "POST" }).catch(function() { /* ignore */ });
           abortController.abort();
           showToast("Stopped");
         }
@@ -1418,7 +2359,8 @@ function renderHtml(): string {
 
       // --- Reset ---
       resetButton.addEventListener("click", async function() {
-        if (isBusy || isSessionLoading) return;
+        if (isSessionLoading) return;
+        detachCurrentStream();
         setSessionLoading(true);
         try {
           var response = await fetch("/api/reset", { method: "POST" });
@@ -1459,6 +2401,7 @@ function renderHtml(): string {
           var session = await response.json();
           var previousSessionId = currentSessionId;
           currentSessionId = session.sessionId;
+          currentSweSession = session.swe || null;
           modelBadge.textContent = session.model || "";
           if (currentSessionId !== previousSessionId) {
             loadPersistedEvents();
@@ -1474,6 +2417,7 @@ function renderHtml(): string {
             session.restored ? "restored" : "new",
           ].filter(Boolean).join(" \u00b7 ");
           updateUsageBadge(session.usage);
+          updateExportPatchButton();
 
           await populateSessionList(session.sessionId);
 
@@ -1516,7 +2460,8 @@ function renderHtml(): string {
       }
 
       async function loadSession(sessionId) {
-        if (!sessionId || sessionId === currentSessionId || isBusy || isSessionLoading) return;
+        if (!sessionId || sessionId === currentSessionId || isSessionLoading) return;
+        detachCurrentStream();
         setSessionLoading(true);
         try {
           var response = await fetch("/api/session/load", {
@@ -1542,6 +2487,479 @@ function renderHtml(): string {
           setSessionLoading(false);
           restoreInputReadyState();
         }
+      }
+
+      async function populateSweItems() {
+        try {
+          var response = await fetch("/api/swe/items");
+          if (!response.ok) return;
+          var payload = await response.json();
+          var items = payload.items || [];
+          sweList.textContent = "";
+
+          if (items.length === 0) {
+            var empty = document.createElement("div");
+            empty.className = "session-item";
+            empty.innerHTML = '<div class="id">No SWE dataset</div><div class="date">Prepare dataset first</div>';
+            sweList.append(empty);
+            return;
+          }
+
+          for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var div = document.createElement("div");
+            div.className = "session-item" + (item.sessionId === currentSessionId ? " active" : "");
+            div.innerHTML =
+              '<div class="id">' + escapeHtml(item.instanceId) + '</div>' +
+              '<div class="date">' + escapeHtml(item.problemPreview || item.repo || "") + '</div>' +
+              '<div class="meta"><span>' + escapeHtml(item.repo || "") + '</span><span>' +
+              escapeHtml(item.workspaceStatus || "missing") + '</span><span>' +
+              (item.hasSession ? "session" : "new") + '</span></div>';
+            div.addEventListener("click", function(instanceId) {
+              return function() { openSweSession(instanceId); };
+            }(item.instanceId));
+            sweList.append(div);
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      async function openSweSession(instanceId) {
+        if (!instanceId || isSessionLoading) return null;
+        detachCurrentStream();
+        setSessionLoading(true);
+        try {
+          var response = await fetch("/api/swe/session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ instanceId: instanceId }),
+          });
+          if (!response.ok) {
+            var errorPayload = await response.json().catch(function() { return {}; });
+            showToast(errorPayload.error || "Failed to open SWE item", 3200);
+            return null;
+          }
+          chat.textContent = "";
+          toolMessages.clear();
+          currentAssistant = null;
+          currentReasoning = null;
+          resetCurrentQueryUsage(null);
+          var payload = await response.json();
+          await refreshSession(true);
+          await populateSweItems();
+          showToast(payload.workspaceReady
+            ? "SWE session opened"
+            : "SWE session opened; repo not prepared yet", 2600);
+          return payload;
+        } catch (e) {
+          showToast("Failed to open SWE item");
+          return null;
+        } finally {
+          setSessionLoading(false);
+          restoreInputReadyState();
+        }
+      }
+
+      async function fillSweDraftPrompt(instanceId, kind) {
+        if (promptInput.value.trim()) return;
+        try {
+          var response = await fetch(
+            "/api/swe/prompt?instanceId=" + encodeURIComponent(instanceId) +
+              "&kind=" + encodeURIComponent(kind || "investigate"),
+          );
+          if (!response.ok) return;
+          var payload = await response.json();
+          if (!payload.prompt) return;
+          promptInput.value = payload.prompt;
+          promptInput.style.height = "auto";
+          promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + "px";
+          updateCharCount();
+          promptInput.focus();
+        } catch (e) {
+          // Leave the editor empty if the draft cannot be generated.
+        }
+      }
+
+      async function openPatchModal() {
+        patchModal.classList.add("open");
+        patchModal.setAttribute("aria-hidden", "false");
+        await refreshPatchDiff("workspace");
+      }
+
+      async function openTurnPatchModal() {
+        patchModal.classList.add("open");
+        patchModal.setAttribute("aria-hidden", "false");
+        await refreshPatchDiff("turn");
+      }
+
+      function closePatchModal() {
+        patchModal.classList.remove("open");
+        patchModal.setAttribute("aria-hidden", "true");
+      }
+
+      async function refreshPatchDiff(mode) {
+        var diffMode = mode || "workspace";
+        setPatchBusy(true);
+        patchStatus.textContent = diffMode === "turn"
+          ? "Loading this turn's git diff..."
+          : "Loading current git diff...";
+        patchPath.textContent = "";
+        try {
+          var response = await fetch(
+            diffMode === "turn" ? "/api/patch/turn/current" : "/api/patch/current",
+          );
+          var payload = await response.json();
+          if (!response.ok || payload.status === "failed") {
+            renderPlainPatchText(payload.error || "Failed to load patch.");
+            patchStatus.textContent = "failed";
+            return;
+          }
+          if (payload.status === "not_git") {
+            renderPlainPatchText("Current workspace is not a git worktree.");
+            patchStatus.textContent = "not git";
+            patchModalTitle.textContent = "Workspace Diff";
+            return;
+          }
+          if (payload.status === "missing_baseline") {
+            renderPlainPatchText("No query baseline is available for this turn.");
+            patchStatus.textContent = "missing baseline";
+            patchModalTitle.textContent = "Turn Diff";
+            patchPath.textContent = payload.cwd || "";
+            return;
+          }
+          if (payload.status === "empty") {
+            patchModalTitle.textContent = diffMode === "turn"
+              ? "Turn Diff"
+              : "Workspace Diff";
+            renderPlainPatchText("No changes.");
+            patchStatus.textContent = "empty";
+            patchPath.textContent = payload.cwd || "";
+            return;
+          }
+
+          patchModalTitle.textContent = diffMode === "turn"
+            ? "Turn Diff"
+            : "Workspace Diff";
+          if (payload.empty) {
+            renderPlainPatchText("No changes.");
+          } else {
+            renderPatchDiff(payload.patch || "");
+          }
+          patchStatus.textContent = payload.empty
+            ? "empty"
+            : formatBytes(payload.bytes || 0) + (diffMode === "turn" ? " turn diff" : " diff");
+          patchPath.textContent = payload.cwd || "";
+        } catch (error) {
+          renderPlainPatchText(String(error));
+          patchStatus.textContent = "failed";
+        } finally {
+          setPatchBusy(false);
+        }
+      }
+
+      function renderPlainPatchText(text) {
+        patchDiff.textContent = text || "";
+      }
+
+      function renderPatchDiff(text) {
+        patchDiff.textContent = "";
+        var lines = String(text || "").split("\\n");
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i];
+          var span = document.createElement("span");
+          span.className = "patch-line " + getPatchLineClass(line);
+          span.textContent = line || " ";
+          patchDiff.append(span);
+        }
+      }
+
+      function getPatchLineClass(line) {
+        if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff --git") || line.startsWith("index ")) {
+          return "file";
+        }
+        if (line.startsWith("@@")) {
+          return "hunk";
+        }
+        if (line.startsWith("+")) {
+          return "add";
+        }
+        if (line.startsWith("-")) {
+          return "del";
+        }
+        return "ctx";
+      }
+
+      async function savePatchSnapshot() {
+        setPatchBusy(true);
+        patchStatus.textContent = "Saving snapshot...";
+        try {
+          var response = await fetch("/api/patch/snapshot", { method: "POST" });
+          var payload = await response.json();
+          if (!response.ok || payload.status === "failed") {
+            showToast(payload.error || "Failed to save patch", 3200);
+            patchStatus.textContent = "save failed";
+            return;
+          }
+          if (payload.status === "empty") {
+            showToast("No changes to save");
+            patchStatus.textContent = "empty";
+            return;
+          }
+          if (payload.status === "not_git") {
+            showToast("Current workspace is not git");
+            patchStatus.textContent = "not git";
+            return;
+          }
+
+          patchStatus.textContent = "saved #" + payload.sequence + " · " + formatBytes(payload.bytes || 0);
+          patchPath.textContent = payload.patchPath || "";
+          showToast("Patch snapshot saved", 2600);
+        } catch (error) {
+          showToast("Failed to save patch");
+          patchStatus.textContent = "save failed";
+        } finally {
+          setPatchBusy(false);
+        }
+      }
+
+      async function approvePatchSnapshot() {
+        setPatchBusy(true);
+        patchStatus.textContent = "Marking approved...";
+        try {
+          var response = await fetch("/api/patch/approve", { method: "POST" });
+          var payload = await response.json();
+          if (!response.ok || payload.status === "failed") {
+            showToast(payload.error || "Failed to approve patch", 3200);
+            patchStatus.textContent = "approve failed";
+            return;
+          }
+          if (payload.status === "empty") {
+            showToast("No changes to approve");
+            patchStatus.textContent = "empty";
+            return;
+          }
+          if (payload.status === "not_git") {
+            showToast("Current workspace is not git");
+            patchStatus.textContent = "not git";
+            return;
+          }
+
+          patchStatus.textContent = "approved #" + payload.sequence + " · " + formatBytes(payload.bytes || 0);
+          patchPath.textContent = payload.approvedPath || "";
+          showToast("Patch marked approved", 2600);
+        } catch (error) {
+          showToast("Failed to approve patch");
+          patchStatus.textContent = "approve failed";
+        } finally {
+          setPatchBusy(false);
+        }
+      }
+
+      async function applyLatestPatchSnapshot() {
+        if (!window.confirm("Apply the latest saved patch snapshot to the current workspace?")) {
+          return;
+        }
+
+        setPatchBusy(true);
+        patchStatus.textContent = "Applying latest patch...";
+        try {
+          var response = await fetch("/api/patch/apply", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ source: "latest" }),
+          });
+          var payload = await response.json();
+          if (!response.ok || payload.status === "failed") {
+            showToast(payload.error || "Failed to apply patch", 3200);
+            patchStatus.textContent = "apply failed";
+            return;
+          }
+          if (payload.status === "dirty") {
+            showToast("Workspace has changes. Revert or save them before applying.", 3600);
+            patchStatus.textContent = "dirty";
+            return;
+          }
+          if (payload.status === "missing") {
+            showToast("No saved latest patch for this session", 3200);
+            patchStatus.textContent = "missing";
+            return;
+          }
+          if (payload.status === "not_git") {
+            showToast("Current workspace is not git");
+            patchStatus.textContent = "not git";
+            return;
+          }
+
+          patchStatus.textContent = "applied latest · " + formatBytes(payload.bytes || 0);
+          patchPath.textContent = payload.patchPath || "";
+          showToast("Patch applied", 2600);
+          await refreshPatchDiff();
+          await refreshChangeReviewCard();
+        } catch (error) {
+          showToast("Failed to apply patch");
+          patchStatus.textContent = "apply failed";
+        } finally {
+          setPatchBusy(false);
+        }
+      }
+
+      async function revertCurrentPatch() {
+        if (!window.confirm("Revert the current tracked git changes in this workspace?")) {
+          return;
+        }
+
+        setPatchBusy(true);
+        patchStatus.textContent = "Reverting current changes...";
+        try {
+          var response = await fetch("/api/patch/revert", { method: "POST" });
+          var payload = await response.json();
+          if (!response.ok || payload.status === "failed") {
+            showToast(payload.error || "Failed to revert patch", 3200);
+            patchStatus.textContent = "revert failed";
+            return;
+          }
+          if (payload.status === "empty") {
+            showToast("No changes to revert");
+            patchStatus.textContent = "empty";
+            return;
+          }
+          if (payload.status === "not_git") {
+            showToast("Current workspace is not git");
+            patchStatus.textContent = "not git";
+            return;
+          }
+
+          patchStatus.textContent = "reverted · " + formatBytes(payload.bytes || 0);
+          patchPath.textContent = payload.cwd || "";
+          hideChangeReviewCard();
+          showToast("Current changes reverted", 2600);
+          await refreshPatchDiff();
+        } catch (error) {
+          showToast("Failed to revert patch");
+          patchStatus.textContent = "revert failed";
+        } finally {
+          setPatchBusy(false);
+        }
+      }
+
+      function setPatchBusy(value) {
+        patchRefreshButton.disabled = value;
+        patchSaveButton.disabled = value || isBusy || isSessionLoading;
+        patchApplyButton.disabled = value || isBusy || isSessionLoading;
+        patchRevertButton.disabled = value || isBusy || isSessionLoading;
+        patchApproveButton.disabled = value || isBusy || isSessionLoading;
+        patchDiffButton.disabled = isSessionLoading;
+      }
+
+      async function refreshChangeReviewCard() {
+        try {
+          var response = await fetch("/api/patch/turn/summary");
+          var payload = await response.json();
+          if (!response.ok || payload.status !== "ok") {
+            if (payload.status === "empty") hideChangeReviewCard();
+            return;
+          }
+
+          renderChangeReviewCard(payload);
+        } catch (error) {
+          // Keep the editing flow quiet; the full Diff button can still be used.
+        }
+      }
+
+      function renderChangeReviewCard(summary) {
+        changeReviewCard.classList.add("open");
+        changeReviewCard.setAttribute("aria-hidden", "false");
+        changeReviewTitle.textContent = "Edited this turn: " + summary.fileCount + " file" + (summary.fileCount === 1 ? "" : "s");
+        changeReviewTotals.innerHTML =
+          '<span class="diff-add">+' + escapeHtml(String(summary.additions || 0)) + '</span>' +
+          ' ' +
+          '<span class="diff-del">-' + escapeHtml(String(summary.deletions || 0)) + '</span>';
+        changeReviewFiles.textContent = "";
+
+        var files = summary.files || [];
+        for (var i = 0; i < files.length; i++) {
+          var file = files[i];
+          var row = document.createElement("div");
+          row.className = "change-review-file";
+          var path = document.createElement("div");
+          path.className = "change-review-path";
+          path.title = file.path || "";
+          path.textContent = file.path || "";
+          var stat = document.createElement("div");
+          stat.innerHTML = file.binary
+            ? '<span>binary</span>'
+            : '<span class="diff-add">+' + escapeHtml(String(file.additions || 0)) + '</span>' +
+              ' ' +
+              '<span class="diff-del">-' + escapeHtml(String(file.deletions || 0)) + '</span>';
+          row.append(path, stat);
+          changeReviewFiles.append(row);
+        }
+      }
+
+      function hideChangeReviewCard() {
+        changeReviewCard.classList.remove("open");
+        changeReviewCard.setAttribute("aria-hidden", "true");
+      }
+
+      function shouldShowChangeReviewForTool(event) {
+        var name = event.toolName || "";
+        return name === "Edit" || name === "Write" || name === "FileWrite";
+      }
+
+      async function exportSwePatch() {
+        if (!currentSweSession || !currentSweSession.workspaceReady) {
+          showToast("No prepared SWE workspace");
+          return;
+        }
+
+        exportPatchButton.disabled = true;
+        var previousText = exportPatchButton.textContent;
+        exportPatchButton.textContent = "Exporting";
+        try {
+          var response = await fetch("/api/swe/patch");
+          var payload = await response.json();
+          if (!response.ok || !payload.ok) {
+            showToast(payload.error || "Failed to export patch", 3200);
+            return;
+          }
+          if (payload.empty) {
+            showToast("No changes to export");
+            return;
+          }
+
+          showToast(payload.savedPath ? "Patch saved: " + payload.savedPath : "Patch exported", 5000);
+        } catch (e) {
+          showToast("Failed to export patch");
+        } finally {
+          exportPatchButton.textContent = previousText || "Export Patch";
+          updateExportPatchButton();
+        }
+      }
+
+      function updateExportPatchButton() {
+        if (!exportPatchButton) return;
+        var enabled = Boolean(currentSweSession && currentSweSession.workspaceReady && !isBusy && !isSessionLoading);
+        exportPatchButton.disabled = !enabled;
+        if (patchDiffButton) patchDiffButton.disabled = isSessionLoading;
+        if (patchSaveButton) patchSaveButton.disabled = isBusy || isSessionLoading;
+        if (patchApplyButton) patchApplyButton.disabled = isBusy || isSessionLoading;
+        if (patchRevertButton) patchRevertButton.disabled = isBusy || isSessionLoading;
+        if (patchApproveButton) patchApproveButton.disabled = isBusy || isSessionLoading;
+        exportPatchButton.title = currentSweSession
+          ? (currentSweSession.workspaceReady
+            ? "Export git diff --binary from the current SWE worktree"
+            : "Prepare this SWE workspace before exporting a patch")
+          : "Open a SWE item session before exporting a patch";
+      }
+
+      function detachCurrentStream() {
+        if (!abortController) return;
+        var controller = abortController;
+        abortController = null;
+        activeClientRequestId++;
+        controller.abort();
+        setBusy(false);
       }
 
       // --- History rendering ---
@@ -1674,8 +3092,17 @@ function renderHtml(): string {
           case "tool_use":
             appendToolUse(event.toolCall);
             break;
+          case "tool_permission_request":
+            renderToolPermissionRequest(event);
+            break;
+          case "tool_permission":
+            markToolPermission(event);
+            break;
           case "tool_result":
             completeToolUse(event);
+            if (shouldShowChangeReviewForTool(event)) {
+              refreshChangeReviewCard();
+            }
             break;
           case "model_usage":
             updateUsageBadgeFromEvent(event);
@@ -1957,11 +3384,92 @@ function renderHtml(): string {
 
         var content = event.contentPreview || (event.message && event.message.content) || "";
         renderToolResultContent(entry.result, content);
-        entry.indicator.classList.add("done");
-        entry.status.classList.add("done");
-        entry.status.textContent = "done";
-        entry.details.open = false;
+        if (!entry.indicator.classList.contains("blocked")) {
+          entry.indicator.classList.add("done");
+          entry.status.classList.add("done");
+          entry.status.textContent = "done";
+          entry.details.open = false;
+        }
         scrollToBottom(chat);
+      }
+
+      function markToolPermission(event) {
+        var toolCallId = event.toolCallId || (event.toolCall && event.toolCall.id);
+        var entry = toolCallId
+          ? (toolMessages.get(toolCallId) || appendToolUse({ id: toolCallId, function: { name: event.toolName || (event.toolCall && event.toolCall.function && event.toolCall.function.name) } }))
+          : appendToolUse({ function: { name: event.toolName || "tool" } });
+
+        renderToolResultContent(
+          entry.result,
+          "Permission denied: " + (event.reasonPreview || event.reason || "Tool execution was blocked."),
+        );
+        entry.indicator.classList.add("blocked");
+        entry.status.classList.add("blocked");
+        entry.status.textContent = "blocked";
+        entry.details.open = true;
+        scrollToBottom(chat);
+      }
+
+      function renderToolPermissionRequest(event) {
+        var toolCallId = event.toolCallId || (event.toolCall && event.toolCall.id);
+        var entry = toolCallId
+          ? (toolMessages.get(toolCallId) || appendToolUse({ id: toolCallId, function: { name: event.toolName || (event.toolCall && event.toolCall.function && event.toolCall.function.name) } }))
+          : appendToolUse({ function: { name: event.toolName || "tool" } });
+
+        entry.result.textContent = "";
+        var pre = document.createElement("pre");
+        pre.className = "projection-pre";
+        pre.textContent = "Permission required (" + (event.mode || "plan") + " mode):\\n" + (event.reasonPreview || event.reason || "");
+        var actions = document.createElement("div");
+        actions.className = "tool-permission-actions";
+        var allow = document.createElement("button");
+        allow.type = "button";
+        allow.textContent = "Allow once";
+        var deny = document.createElement("button");
+        deny.type = "button";
+        deny.className = "deny";
+        deny.textContent = "Deny";
+        actions.append(allow, deny);
+        entry.result.append(pre, actions);
+        entry.status.textContent = "approval needed";
+        entry.details.open = true;
+
+        allow.addEventListener("click", function() {
+          respondToolPermission(event.approvalId, "allow", actions, entry);
+        });
+        deny.addEventListener("click", function() {
+          respondToolPermission(event.approvalId, "deny", actions, entry);
+        });
+        scrollToBottom(chat);
+      }
+
+      async function respondToolPermission(approvalId, decision, actions, entry) {
+        if (!approvalId) return;
+        setPermissionButtonsDisabled(actions, true);
+        entry.status.textContent = decision === "allow" ? "approved" : "denied";
+        try {
+          var response = await fetch("/api/tool-permission", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ approvalId: approvalId, decision: decision }),
+          });
+          if (!response.ok) {
+            setPermissionButtonsDisabled(actions, false);
+            entry.status.textContent = "approval failed";
+            showToast("Failed to send permission response");
+          }
+        } catch (error) {
+          setPermissionButtonsDisabled(actions, false);
+          entry.status.textContent = "approval failed";
+          showToast("Failed to send permission response");
+        }
+      }
+
+      function setPermissionButtonsDisabled(actions, disabled) {
+        var buttons = actions ? actions.querySelectorAll("button") : [];
+        for (var i = 0; i < buttons.length; i++) {
+          buttons[i].disabled = disabled;
+        }
       }
 
       function renderToolResultContent(container, content) {
@@ -2089,7 +3597,8 @@ function renderHtml(): string {
         promptInput.disabled = value;
         sendButton.disabled = value;
         stopButton.classList.toggle("visible", value);
-        resetButton.disabled = value;
+        resetButton.disabled = isSessionLoading;
+        updateExportPatchButton();
         if (value) {
           statusDot.classList.add("busy");
           statusText.textContent = "streaming";
@@ -2104,7 +3613,9 @@ function renderHtml(): string {
         isSessionLoading = value;
         sessionList.classList.toggle("loading", value);
         refreshSessionsBtn.disabled = value;
+        resetButton.disabled = value;
         statusText.textContent = value ? "loading session" : (isBusy ? "streaming" : "ready");
+        updateExportPatchButton();
       }
 
       function restoreInputReadyState() {
@@ -2115,6 +3626,7 @@ function renderHtml(): string {
         stopButton.classList.remove("visible");
         statusDot.classList.remove("busy");
         statusText.textContent = "ready";
+        updateExportPatchButton();
         promptInput.focus();
       }
 

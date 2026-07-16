@@ -23,6 +23,7 @@ test("system prompt documents projected context tags", async () => {
   assert.match(prompt, /Main agents and subagents use this same tag/);
   assert.match(prompt, /<tool-result-budget>/);
   assert.match(prompt, /<tool-result-compact>/);
+  assert.match(prompt, /write down any important information you might need later/);
   assert.match(prompt, /\[History snipped: \.\.\.\]/);
   assert.match(prompt, /<opencat_context>/);
 });

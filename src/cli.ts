@@ -31,7 +31,7 @@ export async function runCli(args: string[]): Promise<void> {
   const firstPrompt = args.join(" ").trim();
 
   console.log(`Session: ${runtime.sessionId}`);
-  console.log(`Model: ${runtime.deepSeekRuntimeConfig.model}`);
+  console.log(`Model: ${runtime.deepSeekRuntimeConfig.model ?? "default"}`);
   console.log(`Tools: ${runtime.tools.map((tool) => tool.name).join(", ")}`);
   console.log("Type /exit to quit.");
 

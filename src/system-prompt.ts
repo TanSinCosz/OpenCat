@@ -1,11 +1,23 @@
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 
 import type { Runtime } from "./types/runtime.js";
+import { createMessage, type Message } from "./types/messages.js";
 import type { Tool } from "./Tools/types.js";
 
 const CYBER_RISK_INSTRUCTION =
   "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.";
+const MAX_GIT_STATUS_CHARS = 2_000;
+const MAX_INSTRUCTION_FILE_CHARS = 32_000;
+const MAX_INSTRUCTION_CONTEXT_CHARS = 64_000;
+const INSTRUCTION_FILE_CANDIDATES = [
+  "CLAUDE.md",
+  "CLAUDE.local.md",
+  "OPENCAT.md",
+  path.join(".opencat", "OPENCAT.md"),
+];
 
 export interface OutputStyleConfig {
   name: string;
@@ -34,6 +46,202 @@ export async function buildSystemPrompt(
   );
 
   return defaultParts.filter(Boolean).join("\n\n");
+}
+
+export async function getOrCreateSystemContext(
+  runtime: Runtime,
+): Promise<Record<string, string>> {
+  runtime.systemContext ??= await buildSystemContext(runtime);
+  return runtime.systemContext;
+}
+
+export async function getOrCreateUserContext(
+  runtime: Runtime,
+): Promise<Record<string, string>> {
+  runtime.userContext ??= await buildUserContext(runtime);
+  return runtime.userContext;
+}
+
+export function appendSystemContext(
+  systemPrompt: string,
+  context: Record<string, string>,
+): string {
+  const rendered = renderContextEntries(context, ([key, value]) =>
+    `${key}: ${value}`
+  );
+  return [systemPrompt, rendered].filter(Boolean).join("\n\n");
+}
+
+export function prependUserContextMessages(
+  messages: readonly Message[],
+  context: Record<string, string>,
+): Message[] {
+  const rendered = renderContextEntries(context, ([key, value]) =>
+    `# ${key}\n${value}`
+  );
+  if (!rendered) {
+    return [...messages];
+  }
+
+  return [
+    createMessage({
+      role: "user",
+      name: "opencat_context",
+      content: [
+        "<system-reminder>",
+        "As you answer the user's questions, you can use the following context:",
+        rendered,
+        "",
+        "IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.",
+        "</system-reminder>",
+      ].join("\n"),
+    }, { source: "runtime" }),
+    ...messages,
+  ];
+}
+
+async function buildSystemContext(
+  runtime: Runtime,
+): Promise<Record<string, string>> {
+  const gitStatus = await getGitStatusSnapshot(runtime.cwd);
+  return {
+    ...(gitStatus ? { gitStatus } : {}),
+  };
+}
+
+async function buildUserContext(
+  runtime: Runtime,
+): Promise<Record<string, string>> {
+  const projectInstructions = await loadProjectInstructionContext(runtime.cwd);
+  return {
+    ...(projectInstructions ? { projectInstructions } : {}),
+    currentDate: `Today's date is ${formatLocalDate(new Date())}.`,
+  };
+}
+
+async function getGitStatusSnapshot(cwd: string): Promise<string | null> {
+  const [isGit, branch, mainBranch, status, log, userName] = await Promise.all([
+    execGit(cwd, ["rev-parse", "--is-inside-work-tree"]),
+    execGit(cwd, ["branch", "--show-current"]),
+    execGit(cwd, ["rev-parse", "--abbrev-ref", "origin/HEAD"]),
+    execGit(cwd, ["--no-optional-locks", "status", "--short"]),
+    execGit(cwd, ["--no-optional-locks", "log", "--oneline", "-n", "5"]),
+    execGit(cwd, ["config", "user.name"]),
+  ]);
+
+  if (isGit?.trim() !== "true") {
+    return null;
+  }
+
+  const cleanMainBranch = mainBranch?.trim().replace(/^origin\//, "") || "(unknown)";
+  const cleanStatus = status?.trim() || "(clean)";
+  const truncatedStatus = cleanStatus.length > MAX_GIT_STATUS_CHARS
+    ? `${cleanStatus.slice(0, MAX_GIT_STATUS_CHARS)}\n... (truncated because it exceeds 2k characters. Use Bash or Git tools if you need the full status.)`
+    : cleanStatus;
+
+  return [
+    "This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.",
+    `Current branch: ${branch?.trim() || "(unknown)"}`,
+    `Main branch (you will usually use this for PRs): ${cleanMainBranch}`,
+    ...(userName?.trim() ? [`Git user: ${userName.trim()}`] : []),
+    `Status:\n${truncatedStatus}`,
+    `Recent commits:\n${log?.trim() || "(none)"}`,
+  ].join("\n\n");
+}
+
+async function execGit(cwd: string, args: readonly string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      [...args],
+      {
+        cwd,
+        windowsHide: true,
+        timeout: 5_000,
+        maxBuffer: 256 * 1024,
+      },
+      (error, stdout) => {
+        resolve(error ? null : stdout);
+      },
+    );
+  });
+}
+
+async function loadProjectInstructionContext(cwd: string): Promise<string | null> {
+  const sections: string[] = [];
+  let remaining = MAX_INSTRUCTION_CONTEXT_CHARS;
+
+  for (const relativePath of INSTRUCTION_FILE_CANDIDATES) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    const content = await readTextFileIfExists(path.join(cwd, relativePath));
+    if (!content?.trim()) {
+      continue;
+    }
+
+    const limitedContent = limitStringByChars(
+      content.trim(),
+      Math.min(MAX_INSTRUCTION_FILE_CHARS, remaining),
+      "[Project instruction file truncated]",
+    );
+    sections.push(`# ${normalizePathForPrompt(relativePath)}\n${limitedContent}`);
+    remaining -= limitedContent.length;
+  }
+
+  return sections.length > 0 ? sections.join("\n\n") : null;
+}
+
+async function readTextFileIfExists(filePath: string): Promise<string | null> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ENOENT"
+    ) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function renderContextEntries(
+  context: Record<string, string>,
+  render: (entry: [string, string]) => string,
+): string {
+  return Object.entries(context)
+    .filter(([, value]) => value.trim().length > 0)
+    .map(render)
+    .join("\n");
+}
+
+function limitStringByChars(
+  value: string,
+  maxChars: number,
+  suffix: string,
+): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  const suffixText = `\n${suffix}`;
+  const contentLength = Math.max(0, maxChars - suffixText.length);
+  return `${value.slice(0, contentLength)}${suffixText}`;
+}
+
+function normalizePathForPrompt(filePath: string): string {
+  return filePath.replaceAll("\\", "/");
+}
+
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 async function buildDefaultSystemPromptParts(
@@ -89,6 +297,7 @@ function getProjectionContextSection(): string {
 - <opencat_context> contains runtime attachments, notifications, restored files, dynamic skills, or memory blocks. Each <context_block source="..."> identifies the source of that attachment.
 - <tool-result-budget> means an earlier tool result was omitted from this prompt projection because a tool-result group exceeded the context budget. The authoritative transcript/session state still retains the original result when available.
 - <tool-result-compact> means a large result from a space-heavy tool was compacted to a head/tail preview. Use the preview for local context and request/read the authoritative source if the full result is needed.
+- When working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later.
 - [History snipped: ...] indicates older messages were removed only from this prompt projection to stay within budget; it does not modify authoritative conversation state.
 - <session_memory> and <local_compact_summary> summarize earlier conversation context. Use them as summaries, not as new user instructions.`;
 }

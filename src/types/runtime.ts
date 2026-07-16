@@ -58,6 +58,8 @@ export interface Runtime {
   deepSeekRuntimeConfig: DeepSeekRuntimeSettings;
   deepSeekClient: DeepSeekClient;
   systemPrompt?: string;
+  systemContext?: Record<string, string>;
+  userContext?: Record<string, string>;
   contextProjectionState?: ContextProjectionState;
   toolResultBudgetState?: ToolResultBudgetState;
   MemoryConfig: MemoryConfig;
@@ -83,6 +85,8 @@ export interface CreateRuntimeOptions {
   deepSeekRuntimeConfig: DeepSeekRuntimeSettings;
   deepSeekClient?: DeepSeekClient;
   systemPrompt?: string;
+  systemContext?: Record<string, string>;
+  userContext?: Record<string, string>;
   contextProjectionState?: ContextProjectionState;
   toolResultBudgetState?: ToolResultBudgetState;
   MemoryConfig: MemoryConfig;
@@ -142,6 +146,8 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
         config: deepSeekRuntimeConfig,
     }),
     systemPrompt: options.systemPrompt,
+    systemContext: options.systemContext,
+    userContext: options.userContext,
     contextProjectionState: options.contextProjectionState,
     toolResultBudgetState: options.toolResultBudgetState,
     MemoryConfig: options.MemoryConfig,

@@ -4,6 +4,10 @@ import { applyAutoCompressSummary } from "../auto-compress/index.js";
 import { persistToolResultForBudget } from "../tool-results/persistence.js";
 import {
   buildSystemPrompt,
+  appendSystemContext,
+  getOrCreateSystemContext,
+  getOrCreateUserContext,
+  prependUserContextMessages,
 } from "../system-prompt.js";
 import type {
   HistorySnipBoundary,
@@ -32,14 +36,15 @@ const BULKY_TOOL_NAMES = new Set([
   "WebFetch",
   "ReadSkill",
 ]);
-const DEFAULT_HISTORY_SNIP_TARGET_TOKENS = 30_000;
-const DEFAULT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = 160_000;
-const DEFAULT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = 70_000;
+const DEFAULT_HISTORY_SNIP_TARGET_TOKENS = 80_000;
+const DEFAULT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS = 120_000;
+const DEFAULT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = 180_000;
+const DEFAULT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = 80_000;
 const BULKY_TOOL_RESULT_COMPACT_PREVIEW_TOKENS = 1_000;
 const DEFAULT_PROJECTION_RECENT_TAIL_TARGET_TOKENS = 30_000;
 const DEFAULT_PROJECTION_RECENT_TAIL_MAX_TOKENS = 40_000;
 const DEFAULT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES = 12;
-const DEFAULT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES = 5;
+const DEFAULT_PROJECTION_RECENT_TAIL_MIN_USER_CONTENT_MESSAGES = 3;
 const TOOL_RESULT_BUDGET_TAG = "<tool-result-budget>";
 
 export type SnippedContentOnlyStats = {
@@ -55,46 +60,26 @@ export async function buildMessagesForQuery(
   const systemPrompt = await getOrCreateSystemPrompt(runtime);
   let historySnipCount = 0;
 
-  // 1-2. Start from state.Messages, then apply existing reusable projection
-  // state: auto-compress summary, tool-result budget replacements, bulky
-  // replacements, and persisted snip boundaries.
-  let projectedMessages = cloneMessages(applyAutoCompressSummary(state));
-  let budgeted = applyExistingToolResultBudgetWithStats(
-    projectedMessages,
+  let projection = await projectMessagesWithExistingCompressionState(
     runtime,
     state,
-  );
-  let compacted = applyExistingBulkyToolCompactionsWithStats(
-    budgeted.messages,
-    runtime,
-    state,
-  );
-  let stats: MessageProjectionStats = {
-    ...createProjectionStats(),
-    toolResultBudgetReplacementCount:
-      budgeted.stats.toolResultBudgetReplacementCount,
-    bulkyToolCompactNeeded: compacted.stats.bulkyToolCompactNeeded,
-    bulkyToolCompactCount: compacted.stats.bulkyToolCompactCount,
-    toolResultCharsBeforeBudget:
-      budgeted.stats.toolResultCharsBeforeBudget,
-    toolResultCharsAfterBudget: budgeted.stats.toolResultCharsAfterBudget,
-    toolResultCharsAfterCompact: compacted.stats.toolResultCharsAfterCompact,
-  };
-  let visibleMessages = applyHistorySnipBoundaries(
-    state,
-    compacted.messages,
-  );
-
-  // 3. Measure the whole visible request after all existing projection state.
-  let deepSeekMessages = await createDeepSeekMessages({
     systemPrompt,
-    messages: visibleMessages,
-  });
+  );
+  let visibleMessages = projection.visibleMessages;
+  let deepSeekMessages = projection.deepSeekMessages;
+  let stats = projection.stats;
+  let toolResultBudgetSnapshotBeforeNewBulky:
+    | ToolResultBudgetStateSnapshot
+    | null = null;
 
-  // 4. If the visible request is over the bulky threshold, create new bulky
-  // replacements, then measure the request again.
+  // Create new bulky replacements only when the whole request crosses the
+  // threshold. Existing replacements are applied above on every build.
   if (isContextOverBulkyCompactThreshold(deepSeekMessages)) {
-    compacted = createBulkyToolCompactionsWithStats(
+    toolResultBudgetSnapshotBeforeNewBulky = snapshotToolResultBudgetState(
+      runtime,
+      state,
+    );
+    const compacted = createBulkyToolCompactionsWithStats(
       visibleMessages,
       runtime,
       state,
@@ -109,80 +94,71 @@ export async function buildMessagesForQuery(
       toolResultCharsAfterCompact: compacted.stats.toolResultCharsAfterCompact,
     };
     deepSeekMessages = await createDeepSeekMessages({
+      runtime,
       systemPrompt,
       messages: visibleMessages,
     });
   }
 
-  // 5. If bulky compaction still cannot hit the target, create a durable
-  // history-snip boundary and rerun the same projection once.
-  const historySnipBoundary = shouldCreateHistorySnipBoundary(
+  // If bulky compaction cannot reach the target, progressively create snip
+  // boundaries. If that still leaves the request too large, roll back the new
+  // snips and let auto-compress handle the older context later.
+  const historySnips = ensureHistorySnips(state);
+  const historySnipStartCount = historySnips.length;
+  if (shouldCreateHistorySnipBoundary(
     state,
     visibleMessages,
     stats,
     deepSeekMessages,
-  )
-    ? createHistorySnipBoundary(
-      deepSeekMessages,
-      visibleMessages,
-    )
-    : null;
+  )) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (!isContextOverBulkyCompactTarget(deepSeekMessages)) {
+        break;
+      }
 
-  if (historySnipBoundary) {
-    ensureHistorySnips(state).push(historySnipBoundary);
-    historySnipCount = 1;
-
-    // Re-run the same projection once so the newly persisted snip boundary
-    // affects the current request, not just the next turn.
-    projectedMessages = cloneMessages(applyAutoCompressSummary(state));
-    budgeted = applyExistingToolResultBudgetWithStats(
-      projectedMessages,
-      runtime,
-      state,
-    );
-    compacted = applyExistingBulkyToolCompactionsWithStats(
-      budgeted.messages,
-      runtime,
-      state,
-    );
-    stats = {
-      ...createProjectionStats(),
-      toolResultBudgetReplacementCount:
-        budgeted.stats.toolResultBudgetReplacementCount,
-      bulkyToolCompactNeeded: compacted.stats.bulkyToolCompactNeeded,
-      bulkyToolCompactCount: compacted.stats.bulkyToolCompactCount,
-      toolResultCharsBeforeBudget:
-        budgeted.stats.toolResultCharsBeforeBudget,
-      toolResultCharsAfterBudget: budgeted.stats.toolResultCharsAfterBudget,
-      toolResultCharsAfterCompact: compacted.stats.toolResultCharsAfterCompact,
-    };
-    visibleMessages = applyHistorySnipBoundaries(
-      state,
-      compacted.messages,
-    );
-    deepSeekMessages = await createDeepSeekMessages({
-      systemPrompt,
-      messages: visibleMessages,
-    });
-    if (isContextOverBulkyCompactThreshold(deepSeekMessages)) {
-      compacted = createBulkyToolCompactionsWithStats(
+      const historySnipBoundary = createHistorySnipBoundary(
+        deepSeekMessages,
         visibleMessages,
+      );
+      if (!historySnipBoundary) {
+        break;
+      }
+
+      historySnips.push(historySnipBoundary);
+      historySnipCount++;
+
+      projection = await projectMessagesWithExistingCompressionState(
         runtime,
         state,
-        estimateSystemPromptTokens(systemPrompt),
-      );
-      visibleMessages = compacted.messages;
-      stats = {
-        ...stats,
-        bulkyToolCompactNeeded: compacted.stats.bulkyToolCompactNeeded,
-        bulkyToolCompactCount:
-          stats.bulkyToolCompactCount + compacted.stats.bulkyToolCompactCount,
-        toolResultCharsAfterCompact: compacted.stats.toolResultCharsAfterCompact,
-      };
-      deepSeekMessages = await createDeepSeekMessages({
         systemPrompt,
-        messages: visibleMessages,
-      });
+      );
+      visibleMessages = projection.visibleMessages;
+      deepSeekMessages = projection.deepSeekMessages;
+      stats = projection.stats;
+    }
+
+    if (
+      historySnipCount > 0 &&
+      isContextOverHistorySnipCancelThreshold(deepSeekMessages)
+    ) {
+      historySnips.splice(historySnipStartCount);
+      if (toolResultBudgetSnapshotBeforeNewBulky) {
+        restoreToolResultBudgetState(
+          runtime,
+          state,
+          toolResultBudgetSnapshotBeforeNewBulky,
+        );
+      }
+      historySnipCount = 0;
+
+      projection = await projectMessagesWithExistingCompressionState(
+        runtime,
+        state,
+        systemPrompt,
+      );
+      visibleMessages = projection.visibleMessages;
+      deepSeekMessages = projection.deepSeekMessages;
+      stats = projection.stats;
     }
   }
 
@@ -193,6 +169,79 @@ export async function buildMessagesForQuery(
     stats: {
       ...stats,
       historySnipCount,
+    },
+  };
+}
+
+type ToolResultBudgetStateSnapshot = {
+  seenIds: Set<string>;
+  replacements: Map<string, string>;
+};
+
+function snapshotToolResultBudgetState(
+  runtime: Runtime,
+  state: State,
+): ToolResultBudgetStateSnapshot {
+  const budgetState = getOrCreateToolResultBudgetState(runtime, state);
+  return {
+    seenIds: new Set(budgetState.seenIds),
+    replacements: new Map(budgetState.replacements),
+  };
+}
+
+function restoreToolResultBudgetState(
+  runtime: Runtime,
+  state: State,
+  snapshot: ToolResultBudgetStateSnapshot,
+): void {
+  state.toolResultBudgetState.seenIds = new Set(snapshot.seenIds);
+  state.toolResultBudgetState.replacements = new Map(snapshot.replacements);
+  runtime.toolResultBudgetState = state.toolResultBudgetState;
+}
+
+async function projectMessagesWithExistingCompressionState(
+  runtime: Runtime,
+  state: State,
+  systemPrompt: string,
+): Promise<{
+  visibleMessages: Message[];
+  deepSeekMessages: DeepSeekMessage[];
+  stats: MessageProjectionStats;
+}> {
+  const projectedMessages = cloneMessages(applyAutoCompressSummary(state));
+  const budgeted = applyExistingToolResultBudgetWithStats(
+    projectedMessages,
+    runtime,
+    state,
+  );
+  const compacted = applyExistingBulkyToolCompactionsWithStats(
+    budgeted.messages,
+    runtime,
+    state,
+  );
+  const visibleMessages = applyHistorySnipBoundaries(
+    state,
+    compacted.messages,
+  );
+  const deepSeekMessages = await createDeepSeekMessages({
+    runtime,
+    systemPrompt,
+    messages: visibleMessages,
+  });
+
+  return {
+    visibleMessages,
+    deepSeekMessages,
+    stats: {
+      ...createProjectionStats(),
+      toolResultBudgetReplacementCount:
+        budgeted.stats.toolResultBudgetReplacementCount,
+      bulkyToolCompactNeeded: compacted.stats.bulkyToolCompactNeeded,
+      bulkyToolCompactCount: compacted.stats.bulkyToolCompactCount,
+      toolResultCharsBeforeBudget:
+        budgeted.stats.toolResultCharsBeforeBudget,
+      toolResultCharsAfterBudget: budgeted.stats.toolResultCharsAfterBudget,
+      toolResultCharsAfterCompact: compacted.stats.toolResultCharsAfterCompact,
     },
   };
 }
@@ -321,15 +370,25 @@ function selectRecentBulkyToolResultBudgetKeys(
 }
 
 export async function createDeepSeekMessages(options: {
+  runtime?: Runtime;
   systemPrompt: string;
   messages: Message[];
 }): Promise<DeepSeekMessage[]> {
+  const systemContext = options.runtime
+    ? await getOrCreateSystemContext(options.runtime)
+    : {};
+  const userContext = options.runtime
+    ? await getOrCreateUserContext(options.runtime)
+    : {};
+  const systemPrompt = appendSystemContext(options.systemPrompt, systemContext);
+  const messages = prependUserContextMessages(options.messages, userContext);
+
   return [
     {
       role: "system",
-      content: options.systemPrompt,
+      content: systemPrompt,
     },
-    ...options.messages.map(toDeepSeekMessage),
+    ...messages.map(toDeepSeekMessage),
   ];
 }
 
@@ -998,6 +1057,8 @@ function isRegenerableAttachmentMessage(message: Message): boolean {
     message.source === "long_term_memory" ||
     message.source === "file_restore" ||
     message.source === "dynamic_skill" ||
+    message.source === "todo_list" ||
+    message.source === "plan_mode" ||
     message.source === "agent_notification" ||
     message.source === "agent_message";
 }
@@ -1005,7 +1066,7 @@ function isRegenerableAttachmentMessage(message: Message): boolean {
 type ProjectionRecentTailStats = {
   tokens: number;
   apiMessages: number;
-  textMessages: number;
+  userContentMessages: number;
 };
 
 function calculateProtectedRecentTailStart(messages: Message[]): number {
@@ -1025,7 +1086,7 @@ function calculateProjectionRecentTailStart(messages: Message[]): number {
   const stats: ProjectionRecentTailStats = {
     tokens: 0,
     apiMessages: 0,
-    textMessages: 0,
+    userContentMessages: 0,
   };
 
   while (start > 0) {
@@ -1049,7 +1110,8 @@ function isProjectionRecentTailLargeEnough(
 ): boolean {
   return stats.tokens >= getProjectionRecentTailTargetTokens() &&
     stats.apiMessages >= getProjectionRecentTailMinApiMessages() &&
-    stats.textMessages >= getProjectionRecentTailMinTextMessages();
+    stats.userContentMessages >=
+      getProjectionRecentTailMinUserContentMessages();
 }
 
 function addMessageToProjectionRecentTailStats(
@@ -1059,22 +1121,16 @@ function addMessageToProjectionRecentTailStats(
   stats.tokens += getMessageTokenSize(message);
   stats.apiMessages++;
 
-  if (hasProjectionTextContent(message)) {
-    stats.textMessages++;
+  if (hasProjectionUserContent(message)) {
+    stats.userContentMessages++;
   }
 }
 
-function hasProjectionTextContent(message: Message): boolean {
-  if (message.role === "user") {
-    return message.content.trim().length > 0;
-  }
-
-  if (message.role === "assistant") {
-    return typeof message.content === "string" &&
-      message.content.trim().length > 0;
-  }
-
-  return false;
+function hasProjectionUserContent(message: Message): boolean {
+  return message.role === "user" &&
+    message.source === "user" &&
+    typeof message.content === "string" &&
+    message.content.trim().length > 0;
 }
 
 function moveToSafeBusinessTailBoundary(
@@ -1194,10 +1250,18 @@ function getProjectionRecentTailMinApiMessages(): number {
   );
 }
 
-function getProjectionRecentTailMinTextMessages(): number {
+function getProjectionRecentTailMinUserContentMessages(): number {
+  const configured = getOptionalNonNegativeIntegerEnv(
+    "OPENCAT_PROJECTION_RECENT_TAIL_MIN_USER_CONTENT_MESSAGES",
+  );
+
+  if (configured !== null) {
+    return configured;
+  }
+
   return getNonNegativeIntegerEnv(
     "OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES",
-    DEFAULT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES,
+    DEFAULT_PROJECTION_RECENT_TAIL_MIN_USER_CONTENT_MESSAGES,
   );
 }
 
@@ -1402,6 +1466,20 @@ function isContextOverBulkyCompactThreshold(
     getBulkyToolResultCompactContextTokens();
 }
 
+function isContextOverBulkyCompactTarget(
+  messagesForQuery: DeepSeekMessage[],
+): boolean {
+  return totalMessageTokens(messagesForQuery) >
+    getBulkyToolResultCompactTargetContextTokens();
+}
+
+function isContextOverHistorySnipCancelThreshold(
+  messagesForQuery: DeepSeekMessage[],
+): boolean {
+  return totalMessageTokens(messagesForQuery) >
+    getHistorySnipCancelContextTokens();
+}
+
 function isProjectedContextOverBulkyCompactThreshold(
   messages: readonly Message[],
   contextBaseTokens = 0,
@@ -1421,6 +1499,13 @@ function getBulkyToolResultCompactTargetContextTokens(): number {
   return getPositiveIntegerEnv(
     "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
     DEFAULT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS,
+  );
+}
+
+function getHistorySnipCancelContextTokens(): number {
+  return getPositiveIntegerEnv(
+    "OPENCAT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS",
+    DEFAULT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS,
   );
 }
 

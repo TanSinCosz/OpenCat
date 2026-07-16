@@ -15,6 +15,7 @@ export interface LongTermMemoryRuntimeConfig {
   autoInjectTopK: number;
   searchThreshold: number;
   maxInjectedChars: number;
+  fileMemoryDirectory?: string;
   userId: string;
   agentId: string;
   runId: string;
@@ -40,6 +41,8 @@ export function createLongTermMemoryRuntimeConfig(
     autoInjectTopK: options?.autoInjectTopK ?? 6,
     searchThreshold: options?.searchThreshold ?? 0.1,
     maxInjectedChars: options?.maxInjectedChars ?? 8_000,
+    fileMemoryDirectory: options?.fileMemoryDirectory ??
+      process.env.OPENCAT_FILE_MEMORY_DIR,
     userId: options?.userId ?? process.env.OPENCAT_MEMORY_USER_ID ?? "default-user",
     agentId: options?.agentId ?? identity.agentId,
     runId: options?.runId ?? identity.sessionId,

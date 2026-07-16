@@ -4,7 +4,7 @@ import {
   estimateMessageTokens,
   shouldUpdateSessionMemory,
 } from "../src/session-memory/session-memory.js";
-import { createMessage, toDeepSeekMessage } from "../src/types/messages.js";
+import { createMessage } from "../src/types/messages.js";
 import {
   DEFAULT_SESSION_MEMORY_CONFIG,
 } from "../src/types/session-memory.js";
@@ -28,9 +28,7 @@ test("session-memory token estimate anchors on the latest API context usage", ()
     content: "new context after the previous API response",
   });
 
-  const expected = 10_400 + Math.ceil(
-    JSON.stringify(toDeepSeekMessage(newestUserMessage)).length / 4,
-  );
+  const expected = 10_400 + newestUserMessage.size!.estimatedTokens;
 
   assert.equal(
     estimateMessageTokens([assistant, newestUserMessage]),
@@ -53,9 +51,7 @@ test("session-memory token estimate prefers a continuation context snapshot", ()
     content: "tool result appended after the request",
   });
 
-  const expected = 12_000 + Math.ceil(
-    JSON.stringify(toDeepSeekMessage(tool)).length / 4,
-  );
+  const expected = 12_000 + tool.size!.estimatedTokens;
 
   assert.equal(estimateMessageTokens([assistant, tool]), expected);
 });
@@ -105,5 +101,56 @@ test("session memory defaults and thresholds match the official update cadence",
       { usage: createUsage(15_000) },
     ),
   ];
+  assert.deepEqual(shouldUpdateSessionMemory(state), { update: true });
+});
+
+test("session memory can update after enough tool calls accumulate", () => {
+  const assistant = createMessage(
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "Read", arguments: "{}" },
+        },
+        {
+          id: "call_2",
+          type: "function",
+          function: { name: "Grep", arguments: "{}" },
+        },
+        {
+          id: "call_3",
+          type: "function",
+          function: { name: "Bash", arguments: "{}" },
+        },
+      ],
+    },
+    { usage: createUsage(15_000) },
+  );
+  const state = createState({
+    messages: [
+      assistant,
+      createMessage({
+        role: "tool",
+        tool_call_id: "call_1",
+        content: "read result",
+      }),
+      createMessage({
+        role: "tool",
+        tool_call_id: "call_2",
+        content: "grep result",
+      }),
+      createMessage({
+        role: "tool",
+        tool_call_id: "call_3",
+        content: "bash result",
+      }),
+    ],
+  });
+  state.sessionMemory.initialized = true;
+  state.sessionMemory.tokensAtLastExtraction = 10_000;
+
   assert.deepEqual(shouldUpdateSessionMemory(state), { update: true });
 });
