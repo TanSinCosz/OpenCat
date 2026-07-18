@@ -14,7 +14,7 @@ import { createMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 
-test("query continues reasoning through beta prefix before forcing final answer", async () => {
+test("query recovers output truncation with ordinary chat messages", async () => {
   const previousRounds = process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS;
   process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS = "2";
 
@@ -55,7 +55,7 @@ test("query continues reasoning through beta prefix before forcing final answer"
       cwd: await mkdtemp(join(tmpdir(), "opencat-reasoning-continuation-")),
       deepSeekRuntimeConfig: {
         apiKey: "test-key",
-        baseUrl: "https://api.deepseek.com/beta",
+        baseUrl: "https://openai-compatible.example/v1",
         model: "deepseek-v4-pro",
         maxTokens: 1024,
         reasoningEffort: "max",
@@ -73,28 +73,28 @@ test("query continues reasoning through beta prefix before forcing final answer"
     }
 
     assert.equal(streamRequests.length, 4);
-    const firstContinuationPrefix = lastAssistantRequestMessage(
+    const firstRecoveryMessage = lastUserRequestMessage(
       streamRequests[1]!,
     );
-    const secondContinuationPrefix = lastAssistantRequestMessage(
+    const secondRecoveryMessage = lastUserRequestMessage(
       streamRequests[2]!,
     );
-    const finalAnswerPrefix = lastAssistantRequestMessage(streamRequests[3]!);
+    const finalAnswerMessage = lastUserRequestMessage(streamRequests[3]!);
 
-    assert.equal(firstContinuationPrefix.prefix, true);
-    assert.equal(
-      firstContinuationPrefix.reasoning_content,
-      "reasoning-1",
-    );
-    assert.equal(
-      secondContinuationPrefix.reasoning_content,
-      "reasoning-1\n\nreasoning-2",
-    );
-    assert.equal(finalAnswerPrefix.content, "Final answer:\n");
-    assert.equal(
-      finalAnswerPrefix.reasoning_content,
-      "reasoning-1\n\nreasoning-2\n\nreasoning-3",
-    );
+    assert.match(firstRecoveryMessage.content, /Output token limit hit/);
+    assert.match(secondRecoveryMessage.content, /Recovery attempt 2/);
+    assert.match(finalAnswerMessage.content, /Produce the final visible answer now/);
+    for (const request of streamRequests.slice(1)) {
+      const assistantMessages = request.messages.filter((message) =>
+        message.role === "assistant"
+      );
+      assert.equal(
+        assistantMessages.some((message) =>
+          Boolean(message.prefix) || Boolean(message.reasoning_content)
+        ),
+        false,
+      );
+    }
     assert.deepEqual(
       continuationEvents.map((event) => event.phase),
       ["continue_reasoning", "continue_reasoning", "force_final_answer"],
@@ -116,11 +116,85 @@ test("query continues reasoning through beta prefix before forcing final answer"
   }
 });
 
-function lastAssistantRequestMessage(request: DeepSeekStreamRequest) {
+test("query preserves visible partial content when recovering output truncation", async () => {
+  const previousRounds = process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS;
+  process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS = "1";
+
+  try {
+    const streamRequests: DeepSeekStreamRequest[] = [];
+    const client: DeepSeekClient = {
+      async create(_input: DeepSeekCreateRequest) {
+        throw new Error("create is not used in this test");
+      },
+      async *stream(input) {
+        streamRequests.push(input);
+
+        if (streamRequests.length === 1) {
+          yield createContentLengthChunk("partial answer");
+        } else {
+          yield createContentChunk("continued answer");
+        }
+
+        yield {
+          raw: "[DONE]",
+          done: true,
+          chunk: null,
+        };
+      },
+      async collectStream() {
+        throw new Error("collectStream is not used in this test");
+      },
+    };
+    const state = createState({
+      messages: [
+        createMessage({
+          role: "user",
+          content: "write a long answer",
+        }),
+      ],
+    });
+    const runtime = createRuntime({
+      cwd: await mkdtemp(join(tmpdir(), "opencat-output-recovery-")),
+      deepSeekRuntimeConfig: {
+        apiKey: "test-key",
+        baseUrl: "https://openai-compatible.example/v1",
+        model: "openai-compatible-model",
+        maxTokens: 1024,
+        reasoningEffort: "max",
+      },
+      deepSeekClient: client,
+      MemoryConfig: createMemoryConfig(),
+      tools: [],
+    });
+
+    for await (const _event of query(runtime, state, { maxTurns: 1 })) {
+      // Drain the query.
+    }
+
+    assert.equal(streamRequests.length, 2);
+    const recoveryAssistant = streamRequests[1]!.messages.at(-2);
+    assert.ok(recoveryAssistant);
+    assert.equal(recoveryAssistant.role, "assistant");
+    assert.equal(recoveryAssistant.content, "partial answer");
+
+    const finalMessage = state.Messages.at(-1);
+    assert.ok(finalMessage);
+    assert.equal(finalMessage.role, "assistant");
+    assert.equal(finalMessage.content, "partial answer\ncontinued answer");
+  } finally {
+    if (previousRounds === undefined) {
+      delete process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS;
+    } else {
+      process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS = previousRounds;
+    }
+  }
+});
+
+function lastUserRequestMessage(request: DeepSeekStreamRequest) {
   const message = request.messages.at(-1);
   assert.ok(message);
-  if (message.role !== "assistant") {
-    throw new Error(`Expected assistant message, got ${message.role}`);
+  if (message.role !== "user") {
+    throw new Error(`Expected user message, got ${message.role}`);
   }
   return message;
 }
@@ -140,6 +214,29 @@ function createReasoningLengthChunk(reasoning: string): DeepSeekStreamEnvelope {
           delta: {
             role: "assistant",
             reasoning_content: reasoning,
+          },
+          finish_reason: "length",
+        },
+      ],
+    },
+  };
+}
+
+function createContentLengthChunk(content: string): DeepSeekStreamEnvelope {
+  return {
+    raw: content,
+    done: false,
+    chunk: {
+      id: "assistant-content-length",
+      object: "chat.completion.chunk",
+      created: 0,
+      model: "deepseek-v4-pro",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            content,
           },
           finish_reason: "length",
         },

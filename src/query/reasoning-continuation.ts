@@ -1,4 +1,4 @@
-import { createDeepSeekClient, type DeepSeekClient } from "../deepseek/client.js";
+import type { DeepSeekClient } from "../deepseek/client.js";
 import type {
   DeepSeekAssistantMessage,
   DeepSeekCreateRequest,
@@ -21,7 +21,6 @@ type ReasoningContinuationOptions = {
 };
 
 const DEFAULT_REASONING_CONTINUATION_ROUNDS = 2;
-const DEFAULT_DEEPSEEK_BETA_BASE_URL = "https://api.deepseek.com/beta";
 
 export type AssistantWithUsage = {
   message: DeepSeekAssistantMessage;
@@ -30,15 +29,14 @@ export type AssistantWithUsage = {
 };
 
 /**
- * Streams one assistant turn, continuing hidden reasoning when the provider
- * cuts the response at the output-token boundary before any visible answer is
- * produced.
+ * Streams one assistant turn, recovering when the provider cuts the response at
+ * the output-token boundary.
  *
- * DeepSeek beta prefix completion can accept an assistant message containing
- * `reasoning_content`, so we use that as a checkpoint for continuation rounds.
- * The final persisted assistant message is still one logical response: visible
- * content comes from the last successful stream, while reasoning text is merged
- * across all continuation attempts.
+ * This intentionally uses only ordinary OpenAI-compatible chat messages. Older
+ * versions used DeepSeek beta `prefix + reasoning_content` to continue hidden
+ * reasoning, but that path is provider-specific and breaks compatible gateways.
+ * The generic recovery keeps visible partial assistant text as ordinary context,
+ * then asks the model to resume directly.
  */
 export async function* streamAssistantWithReasoningContinuation(
   runtime: Runtime,
@@ -53,16 +51,15 @@ export async function* streamAssistantWithReasoningContinuation(
   let result = primaryResult;
   let usage = result.usage;
   let reasoningTrail = result.message.reasoning_content ?? "";
+  let visibleContentTrail = getAssistantContent(result.message);
 
-  if (!shouldContinueReasoning(result)) {
+  if (!shouldRecoverMaxOutput(result)) {
     return {
       message: result.message,
       usage,
       contextTokenCount: getContextTokenCount(result.usage),
     };
   }
-
-  const continuationClient = createReasoningContinuationClient(runtime);
 
   for (let round = 1; round <= options.maxContinuationRounds; round++) {
     yield {
@@ -74,17 +71,30 @@ export async function* streamAssistantWithReasoningContinuation(
 
     result = yield* streamAssistantOnce(
       runtime,
-      continuationClient,
-      createReasoningContinuationRequest(runtime, request, reasoningTrail),
+      runtime.deepSeekClient,
+      createOutputRecoveryRequest(
+        runtime,
+        request,
+        visibleContentTrail,
+        round,
+      ),
     );
     usage = combineUsage(usage, result.usage);
     reasoningTrail = appendReasoningTrail(
       reasoningTrail,
       result.message.reasoning_content,
     );
+    visibleContentTrail = appendVisibleContentTrail(
+      visibleContentTrail,
+      getAssistantContent(result.message),
+    );
 
-    if (!shouldContinueReasoning(result)) {
-      const message = mergeReasoningIntoMessage(result.message, reasoningTrail);
+    if (!shouldRecoverMaxOutput(result)) {
+      const message = mergeTrailsIntoMessage(
+        result.message,
+        visibleContentTrail,
+        reasoningTrail,
+      );
       return {
         message,
         usage,
@@ -105,13 +115,18 @@ export async function* streamAssistantWithReasoningContinuation(
 
   result = yield* streamAssistantOnce(
     runtime,
-    continuationClient,
-    createFinalAnswerPrefixRequest(runtime, request, reasoningTrail),
+    runtime.deepSeekClient,
+    createFinalAnswerRecoveryRequest(runtime, request, visibleContentTrail),
   );
   usage = combineUsage(usage, result.usage);
+  visibleContentTrail = appendVisibleContentTrail(
+    visibleContentTrail,
+    getAssistantContent(result.message),
+  );
 
-  const message = mergeReasoningIntoMessage(
+  const message = mergeTrailsIntoMessage(
     result.message,
+    visibleContentTrail,
     appendReasoningTrail(reasoningTrail, result.message.reasoning_content),
   );
   return {
@@ -220,86 +235,55 @@ function getContinuationContextTokenCount(
     Math.ceil(JSON.stringify(finalMessage).length / 4);
 }
 
-function shouldContinueReasoning(result: AssistantReady): boolean {
+function shouldRecoverMaxOutput(result: AssistantReady): boolean {
   return result.finishReason === "length" &&
-    !result.hadContent &&
-    (result.message.tool_calls?.length ?? 0) === 0 &&
-    Boolean(result.message.reasoning_content);
+    (result.message.tool_calls?.length ?? 0) === 0;
 }
 
-/**
- * Uses the runtime client when it is already configured for DeepSeek beta.
- * Otherwise creates a short-lived beta client only for prefix continuation.
- * This keeps ordinary requests on the configured endpoint while enabling the
- * beta-only `prefix + reasoning_content` recovery path.
- */
-function createReasoningContinuationClient(runtime: Runtime): DeepSeekClient {
-  if (isDeepSeekBetaBaseUrl(runtime.deepSeekRuntimeConfig.baseUrl)) {
-    return runtime.deepSeekClient;
-  }
-
-  return createDeepSeekClient({
-    config: {
-      ...runtime.deepSeekRuntimeConfig,
-      baseUrl: getDeepSeekBetaBaseUrl(runtime.deepSeekRuntimeConfig.baseUrl),
-    },
-  });
-}
-
-function createReasoningContinuationRequest(
+function createOutputRecoveryRequest(
   runtime: Runtime,
   request: DeepSeekCreateRequest & { stream: true },
-  reasoningTrail: string,
+  visibleContentTrail: string,
+  round: number,
 ): DeepSeekStreamRequest {
   return {
     ...request,
     messages: [
       ...request.messages,
+      ...createVisiblePartialAssistantMessages(visibleContentTrail),
       {
         role: "user",
         content: [
-          "Your previous hidden reasoning was cut off by the output-token limit.",
-          "Continue the hidden reasoning from the assistant checkpoint.",
-          "Do not restart from scratch.",
-          "If the reasoning becomes complete, produce the final answer.",
+          "Output token limit hit.",
+          "Resume directly; do not apologize, recap, or restart from scratch.",
+          "Pick up from the cut-off point if visible text was already produced.",
+          "Break the remaining work into smaller pieces if needed.",
+          `Recovery attempt ${round}.`,
         ].join(" "),
-      },
-      {
-        role: "assistant",
-        content: "",
-        prefix: true,
-        reasoning_content: reasoningTrail,
       },
     ],
     model: runtime.deepSeekRuntimeConfig.model as DeepSeekCreateRequest["model"],
     max_tokens: getContinuationMaxTokens(runtime),
-    tools: undefined,
-    tool_choice: "none",
   };
 }
 
-function createFinalAnswerPrefixRequest(
+function createFinalAnswerRecoveryRequest(
   runtime: Runtime,
   request: DeepSeekCreateRequest & { stream: true },
-  reasoningTrail: string,
+  visibleContentTrail: string,
 ): DeepSeekStreamRequest {
   return {
     ...request,
     messages: [
       ...request.messages,
+      ...createVisiblePartialAssistantMessages(visibleContentTrail),
       {
         role: "user",
         content: [
-          "The hidden reasoning has reached the configured continuation limit.",
-          "Use the assistant checkpoint to produce the final answer now.",
-          "Do not include the hidden reasoning. Start with the final answer.",
+          "The output-limit recovery attempts have reached their configured limit.",
+          "Produce the final visible answer now.",
+          "Do not include hidden reasoning. Start with the final answer.",
         ].join(" "),
-      },
-      {
-        role: "assistant",
-        content: "Final answer:\n",
-        prefix: true,
-        reasoning_content: reasoningTrail,
       },
     ],
     model: runtime.deepSeekRuntimeConfig.model as DeepSeekCreateRequest["model"],
@@ -310,12 +294,27 @@ function createFinalAnswerPrefixRequest(
   };
 }
 
-function mergeReasoningIntoMessage(
+function createVisiblePartialAssistantMessages(
+  visibleContentTrail: string,
+): DeepSeekStreamRequest["messages"] {
+  if (!visibleContentTrail.trim()) {
+    return [];
+  }
+
+  return [{
+    role: "assistant",
+    content: visibleContentTrail,
+  }];
+}
+
+function mergeTrailsIntoMessage(
   message: DeepSeekAssistantMessage,
+  visibleContentTrail: string,
   reasoningTrail: string,
 ): DeepSeekAssistantMessage {
   return {
     ...message,
+    content: visibleContentTrail.trim() ? visibleContentTrail : message.content,
     reasoning_content: reasoningTrail || message.reasoning_content,
   };
 }
@@ -333,6 +332,32 @@ function appendReasoningTrail(
   }
 
   return `${current}\n\n${next}`;
+}
+
+function getAssistantContent(message: DeepSeekAssistantMessage): string {
+  if (typeof message.content !== "string") {
+    return "";
+  }
+
+  return isSyntheticNoFinalAnswerContent(message.content) ? "" : message.content;
+}
+
+function appendVisibleContentTrail(current: string, next: string): string {
+  if (!next) {
+    return current;
+  }
+
+  if (!current) {
+    return next;
+  }
+
+  return `${current}\n${next}`;
+}
+
+function isSyntheticNoFinalAnswerContent(content: string): boolean {
+  return content.startsWith(
+    "The model returned internal reasoning but did not produce a final answer.",
+  );
 }
 
 function getReasoningContinuationOptions(): ReasoningContinuationOptions {
@@ -361,26 +386,4 @@ function getFinalAnswerMaxTokens(runtime: Runtime): number {
 function readPositiveIntegerEnv(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isInteger(value) && value > 0 ? value : fallback;
-}
-
-function getDeepSeekBetaBaseUrl(baseUrl: string | undefined): string {
-  const explicit = process.env.DEEPSEEK_BETA_BASE_URL?.trim();
-  if (explicit) {
-    return explicit.replace(/\/+$/, "");
-  }
-
-  if (!baseUrl) {
-    return DEFAULT_DEEPSEEK_BETA_BASE_URL;
-  }
-
-  const normalized = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
-  if (isDeepSeekBetaBaseUrl(normalized)) {
-    return normalized;
-  }
-
-  return `${normalized}/beta`;
-}
-
-function isDeepSeekBetaBaseUrl(baseUrl: string | undefined): boolean {
-  return /\/beta$/.test(baseUrl?.replace(/\/+$/, "") ?? "");
 }

@@ -85,7 +85,10 @@ interface WebCliTranscriptSummary {
   sessionId: string;
   modifiedAt: number;
   size: number;
+  category: WebCliTranscriptCategory;
 }
+
+type WebCliTranscriptCategory = "general" | "swe" | "swe_serial";
 
 interface SweBenchItem {
   instanceId: string;
@@ -228,6 +231,7 @@ async function listMainTranscriptSessions(
             sessionId: parse(entry.name).name,
             modifiedAt: fileStat.mtimeMs,
             size: fileStat.size,
+            category: categorizeTranscriptSessionId(parse(entry.name).name),
           };
         }),
     );
@@ -236,6 +240,18 @@ async function listMainTranscriptSessions(
   } catch {
     return [];
   }
+}
+
+function categorizeTranscriptSessionId(sessionId: string): WebCliTranscriptCategory {
+  if (sessionId.startsWith("session_swe_serial_")) {
+    return "swe_serial";
+  }
+
+  if (sessionId.startsWith("session_swe_")) {
+    return "swe";
+  }
+
+  return "general";
 }
 
 async function hasMainTranscriptSession(
@@ -1394,6 +1410,14 @@ function renderHtml(): string {
     .session-item .id { font-family: var(--font-mono); font-size: 11px; color: var(--text-primary); word-break: break-all; }
     .session-item .date { font-size: 11px; color: var(--text-muted); }
     .session-item .meta { display: flex; gap: 8px; font-size: 10px; color: var(--text-secondary); margin-top: 2px; }
+    .session-group-label {
+      padding: 8px 8px 4px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      color: var(--text-muted);
+    }
 
     /* ===== Main Chat Area ===== */
     #main {
@@ -2436,27 +2460,60 @@ function renderHtml(): string {
           var payload = await response.json();
           var sessions = payload.sessions || [];
           if (!sessions.some(function(item) { return item.sessionId === selectedSessionId; })) {
-            sessions.unshift({ sessionId: selectedSessionId, modifiedAt: Date.now(), size: 0 });
+            sessions.unshift({
+              sessionId: selectedSessionId,
+              modifiedAt: Date.now(),
+              size: 0,
+              category: categorizeSessionId(selectedSessionId),
+            });
           }
 
           sessionList.textContent = "";
 
-          for (var i = 0; i < sessions.length; i++) {
-            var item = sessions[i];
-            var div = document.createElement("div");
-            div.className = "session-item" + (item.sessionId === selectedSessionId ? " active" : "");
-            div.innerHTML =
-              '<div class="id">' + escapeHtml(item.sessionId) + '</div>' +
-              '<div class="date">' + new Date(item.modifiedAt).toLocaleString() + '</div>' +
-              '<div class="meta"><span>' + formatBytes(item.size || 0) + '</span></div>';
-            div.addEventListener("click", function(sid) {
-              return function() { loadSession(sid); };
-            }(item.sessionId));
-            sessionList.append(div);
-          }
+          appendSessionGroup("General", sessions.filter(function(item) {
+            return (item.category || categorizeSessionId(item.sessionId)) === "general";
+          }), selectedSessionId);
+          appendSessionGroup("SWE Sessions", sessions.filter(function(item) {
+            return (item.category || categorizeSessionId(item.sessionId)) === "swe";
+          }), selectedSessionId);
+          appendSessionGroup("SWE Serial", sessions.filter(function(item) {
+            return (item.category || categorizeSessionId(item.sessionId)) === "swe_serial";
+          }), selectedSessionId);
         } catch (e) {
           // ignore
         }
+      }
+
+      function appendSessionGroup(label, items, selectedSessionId) {
+        if (!items.length) return;
+        var header = document.createElement("div");
+        header.className = "session-group-label";
+        header.textContent = label;
+        sessionList.append(header);
+
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          var div = document.createElement("div");
+          div.className = "session-item" + (item.sessionId === selectedSessionId ? " active" : "");
+          div.innerHTML =
+            '<div class="id">' + escapeHtml(item.sessionId) + '</div>' +
+            '<div class="date">' + new Date(item.modifiedAt).toLocaleString() + '</div>' +
+            '<div class="meta"><span>' + formatBytes(item.size || 0) + '</span></div>';
+          div.addEventListener("click", function(sid) {
+            return function() { loadSession(sid); };
+          }(item.sessionId));
+          sessionList.append(div);
+        }
+      }
+
+      function categorizeSessionId(sessionId) {
+        if (typeof sessionId === "string" && sessionId.indexOf("session_swe_serial_") === 0) {
+          return "swe_serial";
+        }
+        if (typeof sessionId === "string" && sessionId.indexOf("session_swe_") === 0) {
+          return "swe";
+        }
+        return "general";
       }
 
       async function loadSession(sessionId) {

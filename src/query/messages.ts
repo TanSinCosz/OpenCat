@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DeepSeekMessage } from "../deepseek/types.js";
 import { applyAutoCompressSummary } from "../auto-compress/index.js";
-import { persistToolResultForBudget } from "../tool-results/persistence.js";
 import {
   buildSystemPrompt,
   appendSystemContext,
@@ -25,7 +24,6 @@ import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
 import type { MessageProjectionStats, MessagesForQuery } from "./types.js";
 
-const MAX_TOOL_RESULTS_PER_MESSAGE_TOKENS = 50_000;
 const BULKY_TOOL_RESULT_COMPACT_TAG = "<tool-result-compact>";
 const BULKY_TOOL_NAMES = new Set([
   "Read",
@@ -381,7 +379,9 @@ export async function createDeepSeekMessages(options: {
     ? await getOrCreateUserContext(options.runtime)
     : {};
   const systemPrompt = appendSystemContext(options.systemPrompt, systemContext);
-  const messages = prependUserContextMessages(options.messages, userContext);
+  const messages = repairToolCallMessagePairs(
+    prependUserContextMessages(options.messages, userContext),
+  );
 
   return [
     {
@@ -390,6 +390,65 @@ export async function createDeepSeekMessages(options: {
     },
     ...messages.map(toDeepSeekMessage),
   ];
+}
+
+function repairToolCallMessagePairs(messages: Message[]): Message[] {
+  const repaired: Message[] = [];
+  let pendingToolCallIds = new Set<string>();
+
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]!;
+
+    if (message.role === "assistant" && message.tool_calls?.length) {
+      pendingToolCallIds = new Set();
+
+      const immediateToolResultIds = new Set<string>();
+      for (let nextIndex = index + 1; nextIndex < messages.length; nextIndex++) {
+        const nextMessage = messages[nextIndex]!;
+        if (nextMessage.role !== "tool") {
+          break;
+        }
+
+        immediateToolResultIds.add(nextMessage.tool_call_id);
+      }
+
+      const keptToolCalls = message.tool_calls.filter((toolCall) =>
+        immediateToolResultIds.has(toolCall.id)
+      );
+
+      if (keptToolCalls.length > 0) {
+        pendingToolCallIds = new Set(
+          keptToolCalls.map((toolCall) => toolCall.id),
+        );
+        repaired.push(withMessageSize({
+          ...message,
+          tool_calls: keptToolCalls,
+        }));
+        continue;
+      }
+
+      if (typeof message.content === "string" && message.content.trim()) {
+        const { tool_calls: _toolCalls, ...contentOnlyMessage } = message;
+        repaired.push(withMessageSize(contentOnlyMessage));
+      }
+      continue;
+    }
+
+    if (message.role === "tool") {
+      if (!pendingToolCallIds.has(message.tool_call_id)) {
+        continue;
+      }
+
+      pendingToolCallIds.delete(message.tool_call_id);
+      repaired.push(message);
+      continue;
+    }
+
+    pendingToolCallIds = new Set();
+    repaired.push(message);
+  }
+
+  return repaired;
 }
 
 export async function getOrCreateSystemPrompt(
@@ -414,19 +473,6 @@ type ToolResultCandidate = {
   content: string;
   sizeTokens: number;
 };
-
-type CandidatePartition = {
-  mustReapply: Array<ToolResultCandidate & { replacement: string }>;
-  frozen: ToolResultCandidate[];
-  fresh: ToolResultCandidate[];
-};
-
-export function compactBulkyToolResults(
-  messages: Message[],
-  runtime: Runtime,
-): Message[] {
-  return compactBulkyToolResultsWithStats(messages, runtime).messages;
-}
 
 function compactBulkyToolResultsWithStats(
   messages: Message[],
@@ -610,13 +656,6 @@ function createBulkyToolCompactionsWithStats(
   };
 }
 
-export async function budgetToolResults(
-  messages: Message[],
-  runtime: Runtime,
-): Promise<Message[]> {
-  return (await budgetToolResultsWithStats(messages, runtime)).messages;
-}
-
 function applyExistingToolResultBudgetWithStats(
   messages: Message[],
   runtime: Runtime,
@@ -634,127 +673,6 @@ function applyExistingToolResultBudgetWithStats(
     for (const candidate of candidates) {
       const replacement = budgetState.replacements.get(candidate.budgetKey);
       if (replacement !== undefined) {
-        replacementByMessageIndex.set(candidate.messageIndex, replacement);
-      }
-    }
-  }
-
-  if (replacementByMessageIndex.size === 0) {
-    return {
-      messages,
-      stats: {
-        toolResultBudgetReplacementCount: 0,
-        toolResultCharsBeforeBudget: totalToolResultContentChars(messages),
-        toolResultCharsAfterBudget: totalToolResultContentChars(messages),
-      },
-    };
-  }
-
-  const budgetedMessages = applyToolResultReplacements(
-    messages,
-    replacementByMessageIndex,
-  );
-
-  return {
-    messages: budgetedMessages,
-    stats: {
-      toolResultBudgetReplacementCount: replacementByMessageIndex.size,
-      toolResultCharsBeforeBudget: totalToolResultContentChars(messages),
-      toolResultCharsAfterBudget: totalToolResultContentChars(budgetedMessages),
-    },
-  };
-}
-
-async function budgetToolResultsWithStats(
-  messages: Message[],
-  runtime: Runtime,
-  ownerState?: State,
-): Promise<{ messages: Message[]; stats: Pick<MessageProjectionStats,
-  | "toolResultBudgetReplacementCount"
-  | "toolResultCharsBeforeBudget"
-  | "toolResultCharsAfterBudget"
-> }> {
-  const budgetState = getOrCreateToolResultBudgetState(runtime, ownerState);
-
-  // Tool messages only carry tool_call_id, so recover the tool name from the
-  // preceding assistant tool call before applying budget decisions.
-  const toolNameById = buildToolNameById(messages);
-  const skipToolNames = new Set(
-    runtime.tools
-      .filter((tool) => tool.maxResultSizeChars === Infinity)
-      .map((tool) => tool.name),
-  );
-  const shouldSkip = (candidate: ToolResultCandidate): boolean =>
-    candidate.toolName !== undefined && skipToolNames.has(candidate.toolName);
-
-  const replacementByMessageIndex = new Map<number, string>();
-
-  for (
-    const candidates of collectToolResultGroups(messages, toolNameById)
-  ) {
-    const { mustReapply, frozen, fresh } = partitionByPriorDecision(
-      candidates,
-      budgetState,
-    );
-
-    for (const candidate of mustReapply) {
-      replacementByMessageIndex.set(candidate.messageIndex, candidate.replacement);
-    }
-
-    if (fresh.length === 0) {
-      for (const candidate of candidates) {
-        budgetState.seenIds.add(candidate.budgetKey);
-      }
-      continue;
-    }
-
-    const skipped = fresh.filter(shouldSkip);
-    for (const candidate of skipped) {
-      budgetState.seenIds.add(candidate.budgetKey);
-    }
-    const eligibleFresh = fresh.filter((candidate) => !shouldSkip(candidate));
-
-    const frozenSize = frozen.reduce(
-      (sum, candidate) => sum + candidate.sizeTokens,
-      0,
-    );
-    const freshSize = eligibleFresh.reduce(
-      (sum, candidate) => sum + candidate.sizeTokens,
-      0,
-    );
-    const selected =
-      frozenSize + freshSize > MAX_TOOL_RESULTS_PER_MESSAGE_TOKENS
-        ? selectFreshToReplace(
-          eligibleFresh,
-          frozenSize,
-          MAX_TOOL_RESULTS_PER_MESSAGE_TOKENS,
-        )
-        : [];
-    const selectedIds = new Set(
-      selected.map((candidate) => candidate.budgetKey),
-    );
-
-    for (const candidate of candidates) {
-      if (!selectedIds.has(candidate.budgetKey)) {
-        budgetState.seenIds.add(candidate.budgetKey);
-      }
-    }
-
-    for (const candidate of selected) {
-      try {
-        const replacement = await persistToolResultForBudget({
-          runtime,
-          toolCallId: candidate.toolCallId,
-          content: candidate.content,
-          toolName: candidate.toolName,
-        });
-        budgetState.seenIds.add(candidate.budgetKey);
-        budgetState.replacements.set(candidate.budgetKey, replacement);
-        replacementByMessageIndex.set(candidate.messageIndex, replacement);
-      } catch {
-        const replacement = buildToolResultReplacement(candidate);
-        budgetState.seenIds.add(candidate.budgetKey);
-        budgetState.replacements.set(candidate.budgetKey, replacement);
         replacementByMessageIndex.set(candidate.messageIndex, replacement);
       }
     }
@@ -1383,53 +1301,6 @@ function collectToolResultGroups(
   return groups;
 }
 
-function partitionByPriorDecision(
-  candidates: ToolResultCandidate[],
-  state: ToolResultBudgetState,
-): CandidatePartition {
-  return candidates.reduce<CandidatePartition>(
-    (partition, candidate) => {
-      const replacement = state.replacements.get(candidate.budgetKey);
-
-      if (replacement !== undefined) {
-        partition.mustReapply.push({ ...candidate, replacement });
-      } else if (state.seenIds.has(candidate.budgetKey)) {
-        partition.frozen.push(candidate);
-      } else {
-        partition.fresh.push(candidate);
-      }
-
-      return partition;
-    },
-    { mustReapply: [], frozen: [], fresh: [] },
-  );
-}
-
-function selectFreshToReplace(
-  fresh: ToolResultCandidate[],
-  frozenSize: number,
-  limit: number,
-): ToolResultCandidate[] {
-  const sorted = [...fresh].sort((a, b) => b.sizeTokens - a.sizeTokens);
-  const selected: ToolResultCandidate[] = [];
-  let remaining = frozenSize + fresh.reduce(
-    (sum, candidate) => sum + candidate.sizeTokens,
-    0,
-  );
-
-  for (const candidate of sorted) {
-    if (remaining <= limit) {
-      break;
-    }
-
-    selected.push(candidate);
-    remaining -= candidate.sizeTokens;
-  }
-
-  return selected;
-}
-
-
 function renderHeadTailToolResultPreview(content: string, maxTokens: number): string {
   const maxChars = maxTokens * 4;
   const previewChars = Math.floor(maxChars / 2);
@@ -1542,53 +1413,6 @@ function buildBulkyToolResultReplacement(
     ),
     "</tool-result-compact>",
   ].join("\n");
-}
-
-function buildToolResultReplacement(candidate: ToolResultCandidate): string {
-  const toolLabel = candidate.toolName ?? "unknown tool";
-  const persistedReference = extractPersistedToolResultReference(
-    candidate.content,
-  );
-  const originalSize = persistedReference?.size ?? candidate.content.length;
-  const contentHash = persistedReference?.sha256 ??
-    createHash("sha256").update(candidate.content).digest("hex");
-  const storageLine = persistedReference
-    ? `Full result path: ${persistedReference.path}`
-    : "Full result location: authoritative session messages/transcript";
-
-  return [
-    TOOL_RESULT_BUDGET_TAG,
-    `Tool result from ${toolLabel} was omitted from this request because the tool-result group exceeded the context budget.`,
-    `tool_call_id: ${candidate.toolCallId}`,
-    `original_size: ${originalSize} ${persistedReference ? "bytes" : "characters"}`,
-    `estimated_tokens: ${candidate.sizeTokens}`,
-    `sha256: ${contentHash}`,
-    storageLine,
-    "The original result was not re-executed and was not deleted. Use the persisted/session copy if the full output is needed.",
-    "</tool-result-budget>",
-  ].join("\n");
-}
-
-function extractPersistedToolResultReference(content: string): {
-  path: string;
-  sha256?: string;
-  size?: number;
-} | null {
-  const path = content.match(/^Full output path:\s*(.+)$/m)?.[1]?.trim();
-
-  if (!path) {
-    return null;
-  }
-
-  const sha256 = content.match(/^SHA-256:\s*([a-fA-F0-9]{64})$/m)?.[1];
-  const sizeText = content.match(/^Tool result.* was (\d+) bytes /m)?.[1];
-  const size = sizeText ? Number(sizeText) : undefined;
-
-  return {
-    path,
-    ...(sha256 ? { sha256 } : {}),
-    ...(Number.isFinite(size) ? { size } : {}),
-  };
 }
 
 function isToolResultAlreadyBudgeted(content: string): boolean {

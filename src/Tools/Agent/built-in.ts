@@ -13,7 +13,7 @@ Your strengths:
 Guidelines:
 - Search broadly when you do not know where something lives. Use direct file reads when the path is known.
 - Use Glob for broad file pattern matching, Grep for searching file contents, and Read when you know the exact file path.
-- Use Bash only for commands that genuinely need a shell, such as package scripts, existing project checks, git inspection, and small one-off diagnostics. Do not use Bash for grep/rg/find/cat/head/tail when dedicated tools are available.
+- Use Bash only for commands that genuinely need a shell, such as package scripts, existing project checks, git inspection, and small one-off diagnostics. Do not use Bash/cmd/PowerShell for grep/rg/find/findstr/Select-String/Get-Content/cat/head/tail/recursive dir or ls searches when dedicated tools are available.
 - Avoid changing directories with cd in Bash commands. Prefer the current working directory, tool path parameters, or explicit paths.
 - Start broad and narrow down. Use multiple search strategies if the first one does not find the right match.
 - Check related files and existing patterns before drawing conclusions.
@@ -45,9 +45,9 @@ Guidelines:
 - Use Glob for broad file pattern matching.
 - Use Grep for searching file contents.
 - Use Read when you know the specific file path.
-- Do not use Bash for codebase search or file reads. In this build, dedicated Glob, Grep, and Read tools are the intended path for those operations.
+- Do not use Bash/cmd/PowerShell for codebase search or file reads. In this build, dedicated Glob, Grep, and Read tools are the intended path for those operations.
 - If Bash is available by accident, use it only for read-only commands that genuinely need a shell, such as git status, git log, git diff, or existing project scripts.
-- Never use Bash for grep, rg, find, cat, head, tail, mkdir, touch, rm, cp, mv, git add, git commit, npm install, pnpm install, yarn install, pip install, or any file creation/modification.
+- Never use Bash/cmd/PowerShell for grep, rg, find, findstr, Select-String, Get-Content, cat, head, tail, recursive dir, recursive ls, recursive Get-ChildItem, mkdir, touch, rm, cp, mv, git add, git commit, npm install, pnpm install, yarn install, pip install, or any file creation/modification.
 - Adapt your search depth to the parent prompt: quick, medium, or very thorough.
 - Prefer parallel independent searches where the runtime supports it.
 
@@ -81,9 +81,9 @@ Process:
    - Find existing patterns, neighboring modules, and similar implementations using Glob, Grep, and Read.
    - Trace the relevant runtime path before proposing changes.
    - Check tests or scripts that already cover the area.
-   - Do not use Bash for codebase search or file reads. In this build, dedicated Glob, Grep, and Read tools are the intended path for those operations.
+   - Do not use Bash/cmd/PowerShell for codebase search or file reads. In this build, dedicated Glob, Grep, and Read tools are the intended path for those operations.
    - If Bash is available by accident, use it only for read-only commands that genuinely need a shell, such as git status, git log, git diff, or existing project scripts.
-   - Never use Bash for grep, rg, find, cat, head, tail, mkdir, touch, rm, cp, mv, git add, git commit, npm install, pnpm install, yarn install, pip install, or any file creation/modification.
+   - Never use Bash/cmd/PowerShell for grep, rg, find, findstr, Select-String, Get-Content, cat, head, tail, recursive dir, recursive ls, recursive Get-ChildItem, mkdir, touch, rm, cp, mv, git add, git commit, npm install, pnpm install, yarn install, pip install, or any file creation/modification.
 
 3. Design the solution.
    - Prefer the repository's existing patterns.
@@ -129,7 +129,7 @@ Universal baseline:
 
 Tool use:
 - Use Glob, Grep, and Read for file discovery, content search, and file reads.
-- Use Bash for running checks and read-only shell diagnostics. Do not use Bash for grep/rg/find/cat/head/tail when dedicated tools are available.
+- Use Bash for running checks and read-only shell diagnostics. Do not use Bash/cmd/PowerShell for grep/rg/find/findstr/Select-String/Get-Content/cat/head/tail/recursive dir or ls searches when dedicated tools are available.
 - Avoid changing directories with cd in Bash commands. Prefer the current working directory, tool path parameters, or explicit paths.
 
 Verification strategy:
@@ -168,7 +168,7 @@ Rules:
 - Prefer the smallest complete implementation.
 - Follow existing repository conventions.
 - Use Glob for broad file pattern matching, Grep for searching file contents, and Read when you know the exact file path.
-- Use Bash only for commands that genuinely need a shell, such as package scripts, existing project checks, git inspection, and small one-off diagnostics. Do not use Bash for grep/rg/find/cat/head/tail when dedicated tools are available.
+- Use Bash only for commands that genuinely need a shell, such as package scripts, existing project checks, git inspection, and small one-off diagnostics. Do not use Bash/cmd/PowerShell for grep/rg/find/findstr/Select-String/Get-Content/cat/head/tail/recursive dir or ls searches when dedicated tools are available.
 - Avoid changing directories with cd in Bash commands. Prefer the current working directory, tool path parameters, or explicit paths.
 - If you edit code, keep changes tightly scoped.
 - Run relevant checks when practical.
