@@ -20,7 +20,7 @@ export class TodoWrite
   inputSchema = inputSchema;
   outputSchema = outputSchema;
   strict = true;
-  maxResultSizeChars = 20_000;
+  maxResultSizeChars = 100_000;
   searchHint = "update the session todo list";
   shouldDefer = false;
   alwaysLoad = true;

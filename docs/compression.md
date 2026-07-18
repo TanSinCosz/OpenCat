@@ -13,7 +13,6 @@
 | `src/session-memory/session-memory.ts`       | 280  | Session Memory：滚动会话笔记的读写与更新调度              |
 | `src/session-memory/prompts.ts`              | 144  | Session Memory 更新提示词                                 |
 | `src/session-memory/persistence.ts`          | 126  | Session Memory JSON 持久化                                |
-| `src/tool-results/persistence.ts`            | 84   | Tool Result Budget：大体积结果离线存储                    |
 | `src/types/context.ts`                       | 46   | 压缩相关类型（AutoCompressState, HistorySnipBoundary 等） |
 
 ### 6.1 四级压缩管道（两轮循环 + 两阶段调用）
@@ -57,8 +56,8 @@ buildMessagesForQuery(runtime, state)
   │     唯一 maxResultSizeChars === Infinity 的内置工具是 Read（FileRead）。
   │     设计意图：Read 自备 offset/limit 参数可防御性控制输出大小，
   │     用户调 Read 是"我要这份文件"的显式意图，不应被系统透明替换。
-  │     其他工具的 maxResultSizeChars 均为有限值（Grep/Bash 20K，
-  │     Glob/Edit/Write/WebFetch 100K，ReadSkill 80K，MemorySave 20K 等），
+  │     其他工具的 maxResultSizeChars 均为有限值（Bash 30K，Grep/Memory 20K，
+  │     Glob/Edit/Write/WebFetch/ReadSkill/Agent/TodoWrite/Plan/SendMessage 100K 等），
   │     全部参与 Budget 计算。
   │     实际影响：若一轮工具调用中 Read 占了大头，剩余工具的 token 总量
   │     可能达不到 50K 阈值，导致 Tool Result Budget 不触发。
@@ -206,14 +205,20 @@ applyAutoCompression(runtime, state, options)
 
 ```
 <tool-result-compact>
-Tool result from {toolName} was compacted...
+Tool result from {toolName} was compacted in this request because this tool commonly produces large, regenerable outputs.
 tool_call_id: ...
+original_size: ... characters
+estimated_tokens: ...
+persisted_path: .opencat/tool-results/{sessionId}/{id}
 sha256: ...
+The original result was persisted once and was not re-executed.
 <preview_head>...</preview_head>
 [N chars omitted from the middle]
 <preview_tail>...</preview_tail>
 </tool-result-compact>
 ```
+
+**持久化**：`buildBulkyToolResultReplacement()` 现在调用 `persistToolResultContent()`（`src/tool-results/storage.ts`）将原内容落盘到 `.opencat/tool-results/{sessionId}/{id}`，替换消息中写入 `persisted_path` 和 `sha256`。之前的纯内存 SHA256 哈希逻辑已替换为磁盘持久化 + 路径引用。
 
 **候选选择**（`createBulkyToolCompactionsWithStats()`）：
 

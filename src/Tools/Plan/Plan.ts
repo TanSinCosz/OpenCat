@@ -20,7 +20,7 @@ export class Plan
   inputSchema = inputSchema;
   outputSchema = outputSchema;
   strict = true;
-  maxResultSizeChars = 4_000;
+  maxResultSizeChars = 100_000;
   searchHint = "enter or exit planning-only mode";
   shouldDefer = false;
   alwaysLoad = true;

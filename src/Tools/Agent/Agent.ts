@@ -20,7 +20,7 @@ export class Agent implements Tool<AgentInput, AgentToolOutput, typeof inputSche
   inputSchema = inputSchema;
   outputSchema = outputSchema;
   strict = true;
-  maxResultSizeChars = 20_000;
+  maxResultSizeChars = 100_000;
   searchHint = "delegate complex work to a specialized subagent";
   shouldDefer = false;
   alwaysLoad = true;

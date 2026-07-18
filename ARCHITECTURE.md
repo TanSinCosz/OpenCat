@@ -89,12 +89,6 @@ src/
 │   ├── auto-dream.ts          #   Dream 合并：日志 → topic 文件
 │   ├── runtime.ts             #   运行时配置（LongTermMemoryRuntimeConfig）
 │   ├── config.ts              #   配置解析
-│   ├── Memory.ts              #   向量记忆工具（MemorySearch 使用，不参与当前注入流程）
-│   ├── VectorStore/           #   向量存储（SQLite + OpenAI Embedding）
-│   ├── Embedding/             #   嵌入接口
-│   ├── HistoryStore/          #   历史存储
-│   ├── LLM/                   #   记忆 LLM 调用
-│   └── utils/                 #   实体提取、评分等工具函数
 │
 ├── transcript/                # ★ 对话持久化
 │   └── persistence.ts         #   JSONL 读写、状态恢复
@@ -327,9 +321,9 @@ src/
 
 这让系统能够区分不同性质的消息，在投影时做出精确的保留/压缩决策。
 
-### 13.3 懒加载长期记忆
+### 13.3 基于文件系统的长期记忆
 
-MemoryTool 在首次使用时才初始化，避免不必要的资源消耗（不创建 SQLite 文件、不初始化 Embedding 客户端）。
+不再依赖数据库或向量存储。长期记忆完全基于 Markdown 文件 + MEMORY.md 索引，通过 `file-memory.ts` 和 `auto-dream.ts` 实现。记忆内容直接以人类可读的 Markdown 格式存储在 `.opencat/memory/` 目录下，无需 SQLite、Embedding 等外部依赖。
 
 ### 13.4 Fork 模式的上下文继承
 
@@ -348,8 +342,6 @@ MemoryTool 在首次使用时才初始化，避免不必要的资源消耗（不
 | **运行时**           | Node.js + TypeScript                     |
 | **LLM 接口**         | DeepSeek API（HTTP + SSE 流式）          |
 | **类型校验**         | Zod（运行时类型安全）                    |
-| **向量存储**         | better-sqlite3 / Qdrant / pgvector       |
-| **嵌入模型**         | OpenAI Embedding API                     |
 | **==MCP== 协议** | JSON-RPC 2.0                             |
 | **对话存储**         | JSONL（自定义格式）                      |
 | **Web 界面**         | 内嵌 HTML/CSS/JS（无外部前端依赖）       |
@@ -373,7 +365,7 @@ MemoryTool 在首次使用时才初始化，避免不必要的资源消耗（不
 | `src/Tools/Agent/tool-policy.ts`               | 子智能体工具白名单/黑名单  |
 | `src/auto-compress/auto-compress.ts`           | 上下文压缩（两层策略）     |
 | `src/session-memory/session-memory.ts`         | 滚动会话笔记管理           |
-| `src/Memory/Memory.ts`                         | 长期记忆核心               |
+| `src/Memory/file-memory.ts`                     | 长期记忆核心（Markdown 文件 + 索引） |
 | `src/Memory/runtime.ts`                        | 长期记忆运行时集成         |
 | `src/mcp/tool-adapter.ts`                      | ==MCP== 工具适配器     |
 | `src/mcp/stdio-client.ts`                      | ==MCP== stdio 客户端   |

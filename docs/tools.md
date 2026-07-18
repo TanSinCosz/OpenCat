@@ -28,7 +28,7 @@ interface Tool<
     inputJsonSchema?: JSONSchemaObject; // 可选的 JSON Schema（MCP 工具的 schema 双轨制）
     maxResultSizeChars?: number;       // 结果字符上限，超出的触发大体积工具压缩
     searchHint?: string;              // 搜索提示（未充分使用）
-    shouldDefer?: boolean;            // 推迟到下一轮批量执行
+    shouldDefer?: boolean;            // 延迟加载标记（需 tool research 支持，DeepSeek 未提供，目前未激活）
     alwaysLoad?: boolean;             // 始终加载（不受工具过滤影响）
     strict?: boolean;                 // DeepSeek strict function calling 模式
 
@@ -37,7 +37,7 @@ interface Tool<
 
     isEnabled?(): MaybePromise<boolean>;   // 动态启用/禁用
     userFacingName?(): string;             // 用户界面展示名
-    isConcurrencySafe?(): boolean;         // 同轮是否可多次调用
+    isConcurrencySafe?(): boolean;         // 是否可并行执行
 
     formatResult?(options: { output: TOutput }): string;
     // 将 Tool 的内部输出格式化为发给模型的字符串。
@@ -69,6 +69,7 @@ tool_calls 解析
     → formatToolResult() 格式化输出
         → 有 formatResult() → 用工具自定义格式化
         → 无 → JSON.stringify
+    → maybePersistToolResultContent() 检查输出大小 → 超限落盘到 .opencat/tool-results/
     → createToolResultMessage() 封装为 DeepSeekMessage(tool)
 ```
 
@@ -76,22 +77,22 @@ tool_calls 解析
 
 ### 3.4 14 工具总览
 
-| #  | 工具                  | strict | 并发安全 | 结果上限 | 特殊标志                |
-| -- | --------------------- | ------ | -------- | -------- | ----------------------- |
-| 1  | **Read**        | ✅     | ✅       | -        | alwaysLoad              |
-| 2  | **Write**       | ✅     | ❌       | 100K     | -                       |
-| 3  | **Edit**        | ✅     | ❌       | 100K     | -                       |
-| 4  | **Bash**        | ✅     | ❌       | 100K     | -                       |
-| 5  | **Agent**       | ✅     | ❌       | 20K      | alwaysLoad              |
-| 6  | **MemorySave**  | ✅     | ❌       | 20K      | alwaysLoad              |
-| 7  | **ReadSkill**   | ✅     | ✅       | 80K      | alwaysLoad              |
-| 8  | **SendMessage** | ✅     | ❌       | 4K       | alwaysLoad              |
-| 9  | **Grep**        | ❌     | ✅       | 20K      | -                       |
-| 10 | **Glob**        | ❌     | ✅       | 100K     | -                       |
-| 11 | **WebSearch**   | ❌     | ✅       | 100K     | alwaysLoad              |
-| 12 | **WebFetch**    | ❌     | ✅       | -        | shouldDefer, alwaysLoad |
-| 13 | **TodoWrite**   | ❌     | ✅       | 50K      | alwaysLoad              |
-| 14 | **Plan**        | ❌     | ✅       | -        | alwaysLoad              |
+| #  | 工具                  | strict | 并发安全 | 结果上限（chars） | 特殊标志                                 |
+| -- | --------------------- | ------ | -------- | ----------------- | ---------------------------------------- |
+| 1  | **Read**        | ✅     | ✅       | 无限制            | alwaysLoad                               |
+| 2  | **Write**       | ✅     | ❌       | 100K              | -                                        |
+| 3  | **Edit**        | ✅     | ❌       | 100K              | -                                        |
+| 4  | **Bash**        | ✅     | ❌       | 30K               | -                                        |
+| 5  | **Agent**       | ✅     | ❌       | 100K              | alwaysLoad                               |
+| 6  | **MemorySave**  | ✅     | ❌       | 20K               | alwaysLoad                               |
+| 7  | **ReadSkill**   | ✅     | ✅       | 100K              | alwaysLoad                               |
+| 8  | **SendMessage** | ✅     | ❌       | 100K              | alwaysLoad                               |
+| 9  | **Grep**        | ❌     | ✅       | 20K               | -                                        |
+| 10 | **Glob**        | ❌     | ✅       | 100K              | -                                        |
+| 11 | **WebSearch**   | ❌     | ✅       | 100K              | alwaysLoad                               |
+| 12 | **WebFetch**    | ❌     | ✅       | 100K              | alwaysLoad（shouldDefer 已声明但未激活） |
+| 13 | **TodoWrite**   | ✅     | ❌       | 100K              | alwaysLoad                               |
+| 14 | **Plan**        | ✅     | ❌       | 100K              | alwaysLoad                               |
 
 ---
 
@@ -99,51 +100,48 @@ tool_calls 解析
 
 #### 3.5.1 Read — 文件读取
 
-| 属性 | 值                                                                               |
-| ---- | -------------------------------------------------------------------------------- |
-| 输入 | `file_path`（绝对路径）、`offset`（起始行号）、`limit`（行数）             |
-| 输出 | `{ filePath, content, numLines, startLine, totalLines }` 或 `file_unchanged` |
-| 安全 | 拒绝二进制文件；文件大于 256KB 报错                                              |
+| 属性   | 值                                                                                                                      |
+| ------ | ----------------------------------------------------------------------------------------------------------------------- |
+| 输入   | `file_path`（绝对路径）、`offset`（起始行号）、`limit`（行数）                                                    |
+| 输出   | `{ filePath, content, numLines, startLine, totalLines }` 或 `file_unchanged`                                        |
+| 格式化 | text 类型：`文件路径 (行范围 / 总行数):\n内容`；file_unchanged 类型：`File has not changed since last read: {path}` |
+| 安全   | 拒绝二进制文件；文件大于 256KB 报错                                                                                     |
 
 **读缓存机制**：同一文件、相同 offset/limit、mtime 未变 → 返回 `file_unchanged` 标志，调用方跳过输出。缓存使用 LRU（`FileStateCache`），最大 100 条目 / 25MB。
 
-**多格式支持**：
-
-- 图片（PNG/JPG 等）：以多模态方式展示给模型
-- PDF：最多 20 页，通过 `pages` 参数指定范围
-- Jupyter Notebook（.ipynb）：渲染所有 cell（代码 + 输出 + 文本）
-
 **副作用**：读取成功后调用 `discoverSkillsForReadPath()`，沿目录链扫描 `.claude/skills/` 目录。
 
-**限制**：每次最多返回 2000 行。超过此限制需要使用 offset 分批读取。文件 > 256KB 直接拒绝。
+**限制**：文件 > 256KB 直接拒绝，内容超过 25000 estimated tokens 报错。仅支持纯文本文件，二进制文件（图片/PDF 等）通过 `hasBinaryExtension()` 直接拒绝。
 
 #### 3.5.2 Write — 文件写入
 
-| 属性 | 值                                                                  |
-| ---- | ------------------------------------------------------------------- |
-| 输入 | `file_path`（必须绝对路径）、`content`                          |
-| 输出 | `{ type: 'create'\|'update', filePath, content, structuredPatch }` |
+| 属性   | 值                                                                           |
+| ------ | ---------------------------------------------------------------------------- |
+| 输入   | `file_path`（必须绝对路径）、`content`                                   |
+| 输出   | `{ type, filePath, content, originalFile, structuredPatch, gitDiff? }`     |
+| 格式化 | `The file {path} has been created/updated successfully.`（根据 type 决定） |
 
 **read-before-write 机制**：
 
 ```
 1. 检查 readFileState 中是否有该文件的记录
 2. 无记录 → 拒绝："File has not been read yet. Read it first before writing."
-3. 记录存在但 isPartialView → 拒绝（模型只看到了部分内容）
+3. 记录存在但 isPartialView → 拒绝（该文件内容不是模型主动 Read 的，而是通过压缩恢复或上下文注入等方式被动进入的）
 4. 检查 mtime：如果文件被外部修改（mtime > read 时间戳）→ 拒绝
 5. 全部通过 → 允许写入
 ```
 
-**原子写入**：自动创建父目录（`mkdir recursive`）。
+**写入**：自动创建父目录（`mkdir recursive`）。
 
 **规则约束**：prompt 明确禁止未经用户要求就创建 `.md` 文档，禁止自行添加 emoji。
 
 #### 3.5.3 Edit — 搜索替换编辑
 
-| 属性 | 值                                                                         |
-| ---- | -------------------------------------------------------------------------- |
-| 输入 | `file_path`、`old_string`、`new_string`（必须不同）、`replace_all` |
-| 输出 | `{ filePath, oldString, newString, structuredPatch, replaceAll }`        |
+| 属性   | 值                                                                                                        |
+| ------ | --------------------------------------------------------------------------------------------------------- |
+| 输入   | `file_path`、`old_string`、`new_string`（必须不同）、`replace_all`                                |
+| 输出   | `{ filePath, oldString, newString, originalFile, userModified, structuredPatch, replaceAll, gitDiff? }` |
+| 格式化 | `The file {path} has been updated successfully.` + userModified/replaceAll 追加说明                     |
 
 **prepareEdit 校验链**（6 步）：
 
@@ -171,10 +169,11 @@ tool_calls 解析
 
 #### 3.5.4 Grep — 正则搜索
 
-| 属性 | 值                                                                                   |
-| ---- | ------------------------------------------------------------------------------------ |
-| 输入 | `pattern`（正则）、`path`、`glob`、`output_mode`、`head_limit`（默认 250） |
-| 输出 | 依 output_mode 不同                                                                  |
+| 属性   | 值                                                                                                                                                                                          |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 输入   | `pattern`（正则）、`path`、`glob`、`type`、`output_mode`、`-B`/`-A`/`-C`（上下文）、`-n`/`-i`（行号/忽略大小写）、`head_limit`（默认 250）、`offset`、`multiline` |
+| 输出   | 依 output_mode 不同                                                                                                                                                                         |
+| 格式化 | 按 output_mode 分三种：content/count → 匹配行 + 统计摘要；files_with_matches → 文件名列表 + 计数                                                                                          |
 
 **三种输出模式**：
 
@@ -182,16 +181,17 @@ tool_calls 解析
 - `files_with_matches`：匹配的文件路径，按修改时间排序
 - `count`：每个文件的匹配数
 
-**底层**：ripgrep，参数 `--hidden --max-columns 500`。排除 VCS 目录（`.git`/`.svn`/`.hg`）。
+**底层**：ripgrep，参数 `--hidden --max-columns 500`。排除 VCS 目录（`.git`/`.svn`/`.hg`/`.bzr`/`.jj`/`.sl`）。
 
 **多行搜索**：`multiline: true` 启用 `-U --multiline-dotall`，`.` 匹配换行。
 
 #### 3.5.5 Glob — 文件模式匹配
 
-| 属性 | 值                                                 |
-| ---- | -------------------------------------------------- |
-| 输入 | `pattern`（glob 表达式）、`path`（搜索目录）   |
-| 输出 | `{ filenames, numFiles, durationMs, truncated }` |
+| 属性   | 值                                                                |
+| ------ | ----------------------------------------------------------------- |
+| 输入   | `pattern`（glob 表达式）、`path`（搜索目录）                  |
+| 输出   | `{ filenames, numFiles, durationMs, truncated }`                |
+| 格式化 | 文件名列表（每行一个）+ 文件数 + 耗时 + 截断提示（超过 100 条时） |
 
 **底层**：ripgrep `--files --glob`，按修改时间排序。
 
@@ -199,10 +199,11 @@ tool_calls 解析
 
 #### 3.5.6 Bash — Shell 执行
 
-| 属性 | 值                                                                                               |
-| ---- | ------------------------------------------------------------------------------------------------ |
-| 输入 | `command`、`timeout`（默认 120s，最大 600s）、`description`、`dangerouslyDisableSandbox` |
-| 输出 | `{ stdout, stderr, interrupted, returnCodeInterpretation }`                                    |
+| 属性   | 值                                                                                               |
+| ------ | ------------------------------------------------------------------------------------------------ |
+| 输入   | `command`、`timeout`（默认 120s，最大 600s）、`description`、`dangerouslyDisableSandbox` |
+| 输出   | `{ stdout, stderr, interrupted, returnCodeInterpretation }`                                    |
+| 格式化 | 后台任务 →`Task id: {id}`；前台任务 → stdout / stderr / returnCodeInterpretation 分段拼接    |
 
 **安全校验层**（`getBlockedCommandReason`）：
 
@@ -215,23 +216,24 @@ tool_calls 解析
 7. 命令替换（反引号、`$()`）→ 拒绝
 8. Heredoc → 拒绝
 9. Shell 重定向（`>`、`>>`、`<`）→ 拒绝
-10. 长管道（>3 个 `|`）→ 拒绝
+10. 长管道（≥3 个 `|`）→ 拒绝
 11. 危险命令匹配（rm、git push --force、curl/wget、npm install 等）→ 拒绝
 
-**缓冲上限**：stdout/stderr 各 100K 字符，超出截断并标注。
+**缓冲上限**：stdout/stderr 各 30K 字符，超出截断并标注。
 
 **formatResult**：按优先级输出 `returnCodeInterpretation → interrupted → stdout → stderr → persistedOutputPath`。
 
 #### 3.5.7 Agent — 子智能体
 
-| 属性 | 值                                                                                                                    |
-| ---- | --------------------------------------------------------------------------------------------------------------------- |
-| 输入 | `prompt`、`description`、`subagent_type`、`execution_mode`（sync/async/fork）、`isolation`（none/worktree） |
-| 输出 | sync → 完整结果 + changedFiles；async → agentId + outputFile                                                        |
+| 属性   | 值                                                                                                                                                                                   |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 输入   | `prompt`、`description`、`subagent_type`、`execution_mode`（sync/async/fork）、`isolation`（none/worktree）、`name`（可选稳定名称）、`run_in_background`（async 别名） |
+| 输出   | sync → 完整结果 + changedFiles；async → agentId + outputFile                                                                                                                       |
+| 格式化 | async_launched → header + mode + description + output file；其他 → header + mode + changed files + result                                                                          |
 
 **三种执行模式**：
 
-- **sync**：等待子 agent 完成，返回完整结果。结果上限 20K 字符，超出截断。
+- **sync**：等待子 agent 完成，返回完整结果。结果上限 100K 字符，超出截断。
 - **async**：后台启动，返回 agentId + 输出文件路径。后续用 `SendMessage` 通信。
 - **fork**：继承完整父上下文（消息历史），子 agent 的工具输出不污染父对话。只能从 main agent 发起，不能用 subagent_type。
 
@@ -246,10 +248,11 @@ tool_calls 解析
 
 #### 3.5.8 MemorySave — 文件长期记忆
 
-| 属性 | 值                                                                                                        |
-| ---- | --------------------------------------------------------------------------------------------------------- |
-| 输入 | `memory`（一条记忆文本）、`reason`（可选保存原因）、`memoryType`（user/feedback/project/reference） |
-| 输出 | `{ event: "CREATED" \| "EXISTS", file: { path, slug, hash } }`                                           |
+| 属性   | 值                                                                                                        |
+| ------ | --------------------------------------------------------------------------------------------------------- |
+| 输入   | `memory`（一条记忆文本）、`reason`（可选保存原因）、`memoryType`（user/feedback/project/reference） |
+| 输出   | `{ results: Array<{ id: string, memory: string, metadata?: Record<string, any> }> }`                    |
+| 格式化 | `Saved {N} long-term memor{ies}.` + 逐条 `- {id}: {memory}` 列表                                      |
 
 **行为**：调用 `saveFileMemory()`，将记忆写入 `~/.opencat/memory/projects/<project-key>/` 下的 Markdown 文件。流程：
 
@@ -267,10 +270,11 @@ tool_calls 解析
 
 #### 3.5.9 ReadSkill — 读取项目技能
 
-| 属性 | 值                                                                   |
-| ---- | -------------------------------------------------------------------- |
-| 输入 | `name` 或 `path`（二选一）                                       |
-| 输出 | `{ name, description, skillDir?, skillPath?, content, truncated }` |
+| 属性   | 值                                                                              |
+| ------ | ------------------------------------------------------------------------------- |
+| 输入   | `name` 或 `path`（二选一）                                                  |
+| 输出   | `{ name, description, skillDir?, skillPath?, content, truncated }`            |
+| 格式化 | `Skill: {name}\nDescription: {desc}\nPath: {path}\n{content}`（可选截断提示） |
 
 **沙箱**：只能读取 `skillRuntime.dynamicSkills` 中已发现的技能，不能读任意文件。这是一个安全机制——防止模型通过 ReadSkill 绕过文件访问控制。
 
@@ -282,10 +286,11 @@ tool_calls 解析
 
 #### 3.5.10 WebSearch — 网页搜索
 
-| 属性 | 值                                                                                      |
-| ---- | --------------------------------------------------------------------------------------- |
-| 输入 | `query`（2-1000 字符）、`allowed_domains`/`blocked_domains`（各最多 20 个，互斥） |
-| 输出 | `{ results: [{ title, url }], summary }`                                              |
+| 属性   | 值                                                                                            |
+| ------ | --------------------------------------------------------------------------------------------- |
+| 输入   | `query`（2-1000 字符）、`allowed_domains`/`blocked_domains`（各最多 20 个，互斥）       |
+| 输出   | `{ query, results: [{ title, url }], summary, durationSeconds, filteredOutCount, errors? }` |
+| 格式化 | Query + searchRequests + errors（如有） + summary + 编号结果列表                              |
 
 **实现**：通过 DeepSeek API 的服务端搜索能力，而非自行 HTTP 请求。domain 过滤只接受 hostname，不支持通配符。
 
@@ -293,12 +298,14 @@ tool_calls 解析
 
 #### 3.5.11 WebFetch — 网页抓取
 
-| 属性 | 值                                                             |
-| ---- | -------------------------------------------------------------- |
-| 输入 | `url`（HTTP/HTTPS）、`prompt`（1-4000 字符，提取目标描述） |
-| 输出 | `{ url, code, contentType, text, truncated, redirected }`    |
+| 属性   | 值                                                                                                        |
+| ------ | --------------------------------------------------------------------------------------------------------- |
+| 输入   | `url`（HTTP/HTTPS）、`prompt`（1-4000 字符，提取目标描述）                                            |
+| 输出   | `{ url, finalUrl, code, codeText, contentType, text, bytes, truncated, redirected, durationMs, note? }` |
+| 格式化 | URL + status + Content-Type + bytes + note + 正文                                                         |
+| 注     | `prompt` 参数当前被接受但不参与提取（仅做纯文本提取，不做模型加工）                                     |
 
-**shouldDefer: true**：推迟到下一轮批量执行（避免并发 HTTP 请求带来的问题和资源竞争）。
+**shouldDefer**（未激活）：设计用于标记需要延迟加载的工具（WebFetch 设为 `true`）。本意是配合 tool research 机制——模型先声明意图，下一轮再实际调用。但因 DeepSeek 不支持 tool research，目前 `shouldDefer` 字段仅在类型和工具类中声明，executor 和 query 循环中无消费代码，实际行为与 `false` 无异。
 
 **HTML 提取流程**：去 script/style 标签 → 去注释 → 换行规范化 → 实体解码。
 
@@ -308,10 +315,11 @@ tool_calls 解析
 
 #### 3.5.12 SendMessage — 子 agent 通信
 
-| 属性 | 值                                                      |
-| ---- | ------------------------------------------------------- |
-| 输入 | `to`（agentId）、`message`、`summary`（可选预览） |
-| 输出 | `{ success, queued, pendingMessageCount }`            |
+| 属性   | 值                                                                 |
+| ------ | ------------------------------------------------------------------ |
+| 输入   | `to`（agentId）、`message`、`summary`（可选预览）            |
+| 输出   | `{ success, queued, agentId?, pendingMessageCount?, message }`   |
+| 格式化 | `Message queued/not queued.` + agentId + pending count + message |
 
 **功能**：向正在运行的子 agent 发送消息。消息入队 `task.pendingMessages[]`，子 agent 在下一轮读取并处理。
 
@@ -323,45 +331,51 @@ tool_calls 解析
 
 #### 3.5.13 TodoWrite — 任务列表
 
-| 属性 | 值                                                                    |
-| ---- | --------------------------------------------------------------------- |
-| 输入 | `todos`（任务数组，每项含 `content`、`activeForm`、`status`） |
-| 输出 | `{ oldTodos, newTodos }`                                            |
+| 属性   | 值                                                                                         |
+| ------ | ------------------------------------------------------------------------------------------ |
+| 输入   | `todos`（任务数组，每项含 `content`、`activeForm`、`status`）                      |
+| 输出   | `{ oldTodos, newTodos }`                                                                 |
+| 格式化 | `Todo list updated: {N} item(s).` + 编号列表（`{index}. [{status}] {content}`） + 尾注 |
 
 **功能**：创建和维护当前会话的结构化任务列表。主 agent 用它跟踪多步骤工作的进度，子 agent 也可用。
 
 **行为**：按 `runtime.agentId` 隔离（不同 agent 各自维护独立列表）。每次调用全量替换任务列表，写入 `state.todos[agentId]` 后通过 `recordTranscriptStateSnapshot` 持久化到 transcript。`formatResult()` 渲染为编号列表（`[pending]`/`[in_progress]`/`[completed]`）。
 
-**配置**：`alwaysLoad: true`，`strict: true`，结果上限 20K 字符。
+**配置**：`alwaysLoad: true`，`strict: true`，结果上限 100K 字符。
 
 #### 3.5.14 Plan — 计划模式
 
-| 属性 | 值                                                                          |
-| ---- | --------------------------------------------------------------------------- |
-| 输入 | `action`（enter/request_approval/exit）、`plan`（请求审批时的计划文本） |
-| 输出 | 取决于 action 类型                                                          |
+| 属性   | 值                                                                          |
+| ------ | --------------------------------------------------------------------------- |
+| 输入   | `action`（enter/request_approval/exit）、`plan`（请求审批时的计划文本） |
+| 输出   | 取决于 action 类型                                                          |
+| 格式化 | message + 可选 plan 文本                                                    |
 
 **功能**：在计划模式和默认执行模式之间切换，控制写操作的允许/禁止。
 
 **行为**：
 
 - `enter`：进入 plan 模式，只允许只读操作
-- `request_approval`：提交计划等待用户批准，批准后自动 exit plan 模式
+- `request_approval`：提交计划并立即退出 plan 模式，切换回 default 模式。模型应在调用前展示计划供用户审阅。
 - `exit`：仅在用户明确指示时退出 plan 模式
 
-**配置**：`alwaysLoad: true`，`isConcurrencySafe: true`。
+**配置**：`alwaysLoad: true`，`strict: true`，`isConcurrencySafe: false`。
 
 ---
 
 ### 3.6 执行管道控制
 
-**并发控制**：`isConcurrencySafe()` 决定工具在同一轮是否可被多次调用。不安全的工具（如 Edit、Write、Bash、Agent）同轮只调用一次。
+**并发控制**：`isConcurrencySafe()` 决定工具是否可与其他工具并行执行。`query.ts` 中 `partitionToolCallsForExecution()` 按并发安全性将同轮工具调用分组成 batch：安全的工具（如 Read、Glob、Grep）放入同一 batch，通过 `Promise.all` 并行执行；不安全的工具（如 Edit、Write、Bash、Agent）各自独立成 batch，串行执行。
 
-**延迟执行**：`shouldDefer: true` 的工具（WebFetch）推迟到下一轮批量执行，让模型在同轮继续推理而不等待 HTTP 响应。
+**落盘持久化**：`executor.ts` 中每次工具调用后，`maybePersistToolResultContent()` 检查输出是否超过 `maxResultSizeChars`。超限时内容落盘到 `.opencat/tool-results/{sessionId}/{toolCallId}`，消息中替换为瘦引用标记 `persistedToolResult`（含 path + sha256），供后续 bulky compact 复用。
+
+**shouldDefer（未激活）**：`shouldDefer` 字段在 Tool 接口和工具类中声明（目前仅 WebFetch 设为 `true`），设计意图是配合 tool research 实现延迟加载——模型先声明意图，下一轮再实际调用。但因 DeepSeek 不支持 tool research，executor 和 query 中无消费逻辑，实际不生效。
 
 **strict 模式**：`strict: true` 的工具要求 DeepSeek 在调用时启用 strict function calling 模式，确保参数类型严格匹配。
 
-**大体积结果压缩**：工具输出超过 `maxResultSizeChars` 时，触发 `persistToolResultForBudget` 逻辑——将大结果离线存储，替换为摘要传给模型。涉及文件 `src/tool-results/persistence.ts`。
+**大体积结果压缩（两阶段）**：
+1. **即时落盘**：`executor.ts` 中工具调用后立即通过 `maybePersistToolResultContent()` 检查输出是否超 `maxResultSizeChars`，超限时落盘到 `.opencat/tool-results/{sessionId}/{id}`，消息标记 `persistedToolResult`。
+2. **投影压缩**：`buildMessagesForQuery()` 中 `buildBulkyToolResultReplacement()` 复用已落盘的文件生成 `<tool-result-compact>` 预览替换消息，写入 `persisted_path` + `sha256`。落盘由 `src/tool-results/storage.ts` 统一管理。
 
 **formatResult 双层设计**：工具内部保留富结构输出（`TOutput`），通过 `formatResult()` 只给模型发送简洁摘要。例如：
 

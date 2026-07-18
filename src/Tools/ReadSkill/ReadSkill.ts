@@ -21,7 +21,7 @@ export class ReadSkill
   name = READ_SKILL_TOOL_NAME;
   inputSchema = inputSchema;
   outputSchema = outputSchema;
-  maxResultSizeChars = 80_000;
+  maxResultSizeChars = 100_000;
   searchHint = "read discovered project skill instructions";
   shouldDefer = false;
   alwaysLoad = true;

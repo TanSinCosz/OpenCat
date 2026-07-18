@@ -20,7 +20,7 @@ export class SendMessage
   inputSchema = inputSchema;
   outputSchema = outputSchema;
   strict = true;
-  maxResultSizeChars = 4_000;
+  maxResultSizeChars = 100_000;
   searchHint = "send an instruction to a running subagent";
   shouldDefer = false;
   alwaysLoad = true;

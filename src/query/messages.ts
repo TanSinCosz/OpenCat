@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { DeepSeekMessage } from "../deepseek/types.js";
 import { applyAutoCompressSummary } from "../auto-compress/index.js";
 import {
@@ -22,6 +22,7 @@ import {
 } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
+import { persistToolResultContent } from "../tool-results/storage.js";
 import type { MessageProjectionStats, MessagesForQuery } from "./types.js";
 
 const BULKY_TOOL_RESULT_COMPACT_TAG = "<tool-result-compact>";
@@ -77,7 +78,7 @@ export async function buildMessagesForQuery(
       runtime,
       state,
     );
-    const compacted = createBulkyToolCompactionsWithStats(
+    const compacted = await createBulkyToolCompactionsWithStats(
       visibleMessages,
       runtime,
       state,
@@ -474,14 +475,14 @@ type ToolResultCandidate = {
   sizeTokens: number;
 };
 
-function compactBulkyToolResultsWithStats(
+async function compactBulkyToolResultsWithStats(
   messages: Message[],
   runtime: Runtime,
   ownerState?: State,
   contextBaseTokens = 0,
-): { messages: Message[]; stats: Pick<MessageProjectionStats,
+): Promise<{ messages: Message[]; stats: Pick<MessageProjectionStats,
   "bulkyToolCompactNeeded" | "bulkyToolCompactCount" | "toolResultCharsAfterCompact"
-> } {
+> }> {
   const applied = applyExistingBulkyToolCompactionsWithStats(
     messages,
     runtime,
@@ -497,7 +498,7 @@ function compactBulkyToolResultsWithStats(
     return applied;
   }
 
-  const created = createBulkyToolCompactionsWithStats(
+  const created = await createBulkyToolCompactionsWithStats(
     applied.messages,
     runtime,
     ownerState,
@@ -572,14 +573,14 @@ function applyExistingBulkyToolCompactionsWithStats(
   };
 }
 
-function createBulkyToolCompactionsWithStats(
+async function createBulkyToolCompactionsWithStats(
   messages: Message[],
   runtime: Runtime,
   ownerState?: State,
   contextBaseTokens = 0,
-): { messages: Message[]; stats: Pick<MessageProjectionStats,
+): Promise<{ messages: Message[]; stats: Pick<MessageProjectionStats,
   "bulkyToolCompactNeeded" | "bulkyToolCompactCount" | "toolResultCharsAfterCompact"
-> } {
+> }> {
   const budgetState = getOrCreateToolResultBudgetState(runtime, ownerState);
   const toolNameById = buildToolNameById(messages);
   const contextTarget = getBulkyToolResultCompactTargetContextTokens();
@@ -603,7 +604,7 @@ function createBulkyToolCompactionsWithStats(
       continue;
     }
 
-    const replacement = buildBulkyToolResultReplacement({
+    const replacement = await buildBulkyToolResultReplacement(runtime, {
       budgetKey: candidate.budgetKey,
       toolCallId: candidate.toolCallId,
       toolName: candidate.toolName,
@@ -1392,12 +1393,17 @@ type BulkyToolResultReplacementCandidate = {
   sizeTokens: number;
 };
 
-function buildBulkyToolResultReplacement(
+async function buildBulkyToolResultReplacement(
+  runtime: Runtime,
   candidate: BulkyToolResultReplacementCandidate,
-): string {
-  const contentHash = createHash("sha256")
-    .update(candidate.content)
-    .digest("hex");
+): Promise<string> {
+  const persisted = await persistToolResultContent({
+    runtime,
+    id: candidate.toolCallId,
+    content: candidate.content,
+  });
+  const persistedToolResult = persisted.persistedToolResult;
+
   return [
     BULKY_TOOL_RESULT_COMPACT_TAG,
     `Tool result from ${candidate.toolName} was compacted in this request because this tool commonly produces large, regenerable outputs.`,
@@ -1405,8 +1411,13 @@ function buildBulkyToolResultReplacement(
     `budget_key: ${candidate.budgetKey}`,
     `original_size: ${candidate.content.length} characters`,
     `estimated_tokens: ${candidate.sizeTokens}`,
-    `sha256: ${contentHash}`,
-    "The original result remains in the authoritative session messages/transcript and was not re-executed.",
+    ...(persistedToolResult
+      ? [
+        `persisted_path: ${persistedToolResult.path}`,
+        `sha256: ${persistedToolResult.sha256}`,
+      ]
+      : []),
+    "The original result was persisted once and was not re-executed.",
     renderHeadTailToolResultPreview(
       candidate.content,
       BULKY_TOOL_RESULT_COMPACT_PREVIEW_TOKENS,

@@ -1,10 +1,13 @@
 import type { DeepSeekMessage, DeepSeekToolCall } from "../deepseek/types.js";
+import { maybePersistToolResultContent } from "../tool-results/storage.js";
+import type { PersistedToolResult } from "../types/messages.js";
 import type { Runtime } from "../types/runtime.js";
 import type { State } from "../types/state.js";
 import type { Tool, Tools } from "./types.js";
 
 export type ToolCallExecutionResult = {
   message: DeepSeekMessage;
+  persistedToolResult?: PersistedToolResult;
   permissionDenied?: {
     reason: string;
   };
@@ -77,11 +80,21 @@ export async function executeToolCallWithMetadata(
       runtime,
       state,
     );
+    const result = await maybePersistToolResultContent({
+      runtime,
+      toolCallId: toolCall.id,
+      toolName: tool.name,
+      content: formatToolResult(tool, output),
+      maxResultSizeChars: tool.maxResultSizeChars,
+    });
     return {
       message: createToolResultMessage(
         toolCall.id,
-        formatToolResult(tool, output),
+        result.content,
       ),
+      ...(result.persistedToolResult
+        ? { persistedToolResult: result.persistedToolResult }
+        : {}),
     };
   } catch (error) {
     return {

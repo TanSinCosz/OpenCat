@@ -255,75 +255,15 @@ export async function* _query(
       }
 
       const persistedToolResultMessages: ToolMessage[] = [];
-      for (const toolCall of toolCalls) {
-        throwIfQueryAborted(runtime);
-        yield { type: "tool_use", toolCall };
-        const toolStartedAt = Date.now();
-        await emitRunEvent(runtime, {
-          type: "tool_call_started",
-          turn,
-          toolCallId: toolCall.id,
-          toolName: toolCall.function.name,
-          argsChars: toolCall.function.arguments.length,
-          argsPreview: preview(toolCall.function.arguments, 500),
-        });
-        const permissionApproval = await requestToolApprovalIfNeeded(
+      for (const batch of partitionToolCallsForExecution(runtime, toolCalls)) {
+        const batchToolResultMessages = yield* executeToolCallBatch(
           runtime,
           state,
           options,
-          toolCall,
-        );
-        if (permissionApproval?.requested) {
-          yield {
-            type: "tool_permission_request",
-            approvalId: permissionApproval.approvalId,
-            toolCall,
-            mode: "plan",
-            reason: permissionApproval.reason,
-          };
-        }
-
-        const permissionDecision = permissionApproval?.decision
-          ? await permissionApproval.decision
-          : null;
-        const toolExecution = await executeToolAfterPermissionDecision(
-          runtime,
-          state,
-          toolCall,
-          permissionDecision,
-        );
-        const toolResultMessage = toolExecution.message;
-        if (toolExecution.permissionDenied) {
-          yield {
-            type: "tool_permission",
-            toolCall,
-            behavior: "denied",
-            reason: toolExecution.permissionDenied.reason,
-          };
-        }
-        const stateToolResultMessage = {
-          ...(createMessage(toolResultMessage) as ToolMessage),
-          toolName: toolCall.function.name,
-        };
-        await emitRunEvent(runtime, {
-          type: "tool_call_finished",
           turn,
-          toolCallId: toolCall.id,
-          toolName: toolCall.function.name,
-          resultChars: stateToolResultMessage.content.length,
-          durationMs: Date.now() - toolStartedAt,
-          persistedToolResult: false,
-          persistedToolResultPath: undefined,
-        });
-        throwIfQueryAborted(runtime);
-        state.Messages.push(stateToolResultMessage);
-        persistedToolResultMessages.push(stateToolResultMessage);
-        await recordTranscriptMessage(runtime, stateToolResultMessage);
-        yield {
-          type: "tool_result",
-          toolCall,
-          message: toDeepSeekMessage(stateToolResultMessage),
-        };
+          batch,
+        );
+        persistedToolResultMessages.push(...batchToolResultMessages);
       }
 
       await emitRunEvent(runtime, {
@@ -538,6 +478,206 @@ type PendingToolApproval = {
   reason: string;
   decision: Promise<ToolPermissionDecision>;
 };
+
+type ToolCallExecutionBatch = {
+  concurrencySafe: boolean;
+  toolCalls: DeepSeekToolCall[];
+};
+
+type PreparedToolCallExecution = {
+  toolCall: DeepSeekToolCall;
+  startedAt: number;
+  permissionApproval: PendingToolApproval | null;
+};
+
+type CompletedToolCallExecution = {
+  toolCall: DeepSeekToolCall;
+  startedAt: number;
+  finishedAt: number;
+  execution: ToolCallExecutionResult;
+};
+
+function partitionToolCallsForExecution(
+  runtime: Runtime,
+  toolCalls: readonly DeepSeekToolCall[],
+): ToolCallExecutionBatch[] {
+  const batches: ToolCallExecutionBatch[] = [];
+
+  for (const toolCall of toolCalls) {
+    const concurrencySafe = isToolCallConcurrencySafe(runtime, toolCall);
+    const previousBatch = batches.at(-1);
+
+    if (concurrencySafe && previousBatch?.concurrencySafe) {
+      previousBatch.toolCalls.push(toolCall);
+      continue;
+    }
+
+    batches.push({
+      concurrencySafe,
+      toolCalls: [toolCall],
+    });
+  }
+
+  return batches;
+}
+
+function isToolCallConcurrencySafe(
+  runtime: Runtime,
+  toolCall: DeepSeekToolCall,
+): boolean {
+  const tool = runtime.tools.find(
+    (candidate) => candidate.name === toolCall.function.name,
+  );
+  if (!tool?.isConcurrencySafe) {
+    return false;
+  }
+
+  try {
+    return tool.isConcurrencySafe();
+  } catch {
+    return false;
+  }
+}
+
+async function* executeToolCallBatch(
+  runtime: Runtime,
+  state: State,
+  options: QueryOptions,
+  turn: number,
+  batch: ToolCallExecutionBatch,
+): AsyncGenerator<QueryEvent, ToolMessage[], void> {
+  const preparedExecutions: PreparedToolCallExecution[] = [];
+
+  for (const toolCall of batch.toolCalls) {
+    throwIfQueryAborted(runtime);
+    yield { type: "tool_use", toolCall };
+
+    const startedAt = Date.now();
+    await emitRunEvent(runtime, {
+      type: "tool_call_started",
+      turn,
+      toolCallId: toolCall.id,
+      toolName: toolCall.function.name,
+      argsChars: toolCall.function.arguments.length,
+      argsPreview: preview(toolCall.function.arguments, 500),
+    });
+
+    const permissionApproval = await requestToolApprovalIfNeeded(
+      runtime,
+      state,
+      options,
+      toolCall,
+    );
+    if (permissionApproval?.requested) {
+      yield {
+        type: "tool_permission_request",
+        approvalId: permissionApproval.approvalId,
+        toolCall,
+        mode: "plan",
+        reason: permissionApproval.reason,
+      };
+    }
+
+    preparedExecutions.push({
+      toolCall,
+      startedAt,
+      permissionApproval,
+    });
+  }
+
+  const completedExecutions = batch.concurrencySafe
+    ? await Promise.all(preparedExecutions.map((execution) =>
+      executePreparedToolCall(runtime, state, execution)
+    ))
+    : await executePreparedToolCallsSerially(runtime, state, preparedExecutions);
+
+  const persistedToolResultMessages: ToolMessage[] = [];
+
+  // Preserve the API-visible order even when safe tools ran concurrently.
+  for (const completed of completedExecutions) {
+    const toolCall = completed.toolCall;
+    const toolResultMessage = completed.execution.message;
+
+    if (completed.execution.permissionDenied) {
+      yield {
+        type: "tool_permission",
+        toolCall,
+        behavior: "denied",
+        reason: completed.execution.permissionDenied.reason,
+      };
+    }
+
+    const stateToolResultMessage = {
+      ...(createMessage(toolResultMessage) as ToolMessage),
+      toolName: toolCall.function.name,
+      ...(completed.execution.persistedToolResult
+        ? { persistedToolResult: completed.execution.persistedToolResult }
+        : {}),
+    };
+    await emitRunEvent(runtime, {
+      type: "tool_call_finished",
+      turn,
+      toolCallId: toolCall.id,
+      toolName: toolCall.function.name,
+      resultChars: stateToolResultMessage.content.length,
+      durationMs: completed.finishedAt - completed.startedAt,
+      persistedToolResult: completed.execution.persistedToolResult !== undefined,
+      persistedToolResultPath: completed.execution.persistedToolResult?.path,
+    });
+
+    throwIfQueryAborted(runtime);
+    state.Messages.push(stateToolResultMessage);
+    persistedToolResultMessages.push(stateToolResultMessage);
+    await recordTranscriptMessage(runtime, stateToolResultMessage);
+    yield {
+      type: "tool_result",
+      toolCall,
+      message: toDeepSeekMessage(stateToolResultMessage),
+    };
+  }
+
+  return persistedToolResultMessages;
+}
+
+async function executePreparedToolCallsSerially(
+  runtime: Runtime,
+  state: State,
+  preparedExecutions: readonly PreparedToolCallExecution[],
+): Promise<CompletedToolCallExecution[]> {
+  const completedExecutions: CompletedToolCallExecution[] = [];
+
+  for (const preparedExecution of preparedExecutions) {
+    throwIfQueryAborted(runtime);
+    completedExecutions.push(
+      await executePreparedToolCall(runtime, state, preparedExecution),
+    );
+  }
+
+  return completedExecutions;
+}
+
+async function executePreparedToolCall(
+  runtime: Runtime,
+  state: State,
+  preparedExecution: PreparedToolCallExecution,
+): Promise<CompletedToolCallExecution> {
+  const permissionDecision = preparedExecution.permissionApproval?.decision
+    ? await preparedExecution.permissionApproval.decision
+    : null;
+  const execution = await executeToolAfterPermissionDecision(
+    runtime,
+    state,
+    preparedExecution.toolCall,
+    permissionDecision,
+  );
+
+  return {
+    toolCall: preparedExecution.toolCall,
+    startedAt: preparedExecution.startedAt,
+    finishedAt: Date.now(),
+    execution,
+  };
+}
 
 async function requestToolApprovalIfNeeded(
   runtime: Runtime,

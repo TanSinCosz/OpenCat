@@ -14,7 +14,7 @@ type ValidationResult =
     | { result: false; message: string; errorCode?: number };
 
 const MAX_COMMAND_LENGTH = 10_000;
-const MAX_BUFFER_CHARS = 100_000;
+const MAX_BUFFER_CHARS = 30_000;
 
 const INTERACTIVE_COMMANDS = /\b(?:vim|vi|nano|less|more|top|htop|ssh|python|node|irb|mysql|psql)\b\s*$/i;
 const BACKGROUND_COMMAND = /(?:^|[;&|]\s*)[^;&|]*&\s*$/;

@@ -53,6 +53,44 @@ test("large tool results stay inline until group budget selects them", async () 
   assert.equal(events.at(-1)?.type, "done");
 });
 
+test("tool results exceeding per-tool max are persisted immediately", async () => {
+  const largeOutput = `header\n${"x".repeat(4_096)}\nfooter`;
+  const streamRequests: DeepSeekStreamRequest[] = [];
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-tool-result-per-tool-store-")),
+    sessionId: "session_tool_result_per_tool_store_test",
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 1024,
+    },
+    deepSeekClient: createToolCallClient(streamRequests),
+    MemoryConfig: createMemoryConfig(),
+    tools: [createLargeOutputTool(largeOutput, 1_000)],
+  });
+  const state = createState();
+
+  for await (const _event of query(runtime, state, { maxTurns: 2 })) {
+    // Consume the stream.
+  }
+
+  const toolMessage = state.Messages.find(
+    (message) => message.role === "tool",
+  );
+
+  assert.ok(toolMessage);
+  assert.ok(toolMessage.persistedToolResult);
+  assert.match(toolMessage.content, /<persisted-output>/);
+  assert.match(toolMessage.content, /Full output saved to:/);
+  assert.doesNotMatch(toolMessage.content, /footer/);
+
+  const persistedContent = await readFile(
+    toolMessage.persistedToolResult.absolutePath,
+    "utf8",
+  );
+  assert.equal(persistedContent, largeOutput);
+});
+
 function createLargeOutputTool(
   output: string,
   maxResultSizeChars?: number,
