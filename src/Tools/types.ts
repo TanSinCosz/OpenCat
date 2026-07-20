@@ -282,6 +282,8 @@ export type SkillCommand = {
     name: string
     description: string
     content: string
+    allowedTools?: string[]
+    executionContext?: "fork"
     paths?: string[]
     skillDir?: string
     skillPath?: string

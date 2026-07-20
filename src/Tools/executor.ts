@@ -133,6 +133,10 @@ async function applyToolPermission(
   }
 
   const canUseTool = runtime.toolUseContext.canUseTool;
+  if (isAllowedByTemporaryCommandRule(tool, runtime)) {
+    return { ok: true, input };
+  }
+
   if (!canUseTool) {
     return { ok: true, input };
   }
@@ -271,4 +275,31 @@ function stringifyError(error: unknown): string {
   }
 
   return String(error);
+}
+
+function isAllowedByTemporaryCommandRule(tool: Tool, runtime: Runtime): boolean {
+  const rules = runtime.toolUseContext
+    .getAppState()
+    .toolPermissionContext
+    .alwaysAllowRules
+    .command ?? [];
+
+  return rules.some((rule) => isToolAllowedByRule(tool.name, rule));
+}
+
+function isToolAllowedByRule(toolName: string, rule: string): boolean {
+  const trimmed = rule.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (trimmed === "*") {
+    return true;
+  }
+
+  if (trimmed === toolName) {
+    return true;
+  }
+
+  return trimmed.startsWith(`${toolName}(`);
 }

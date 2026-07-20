@@ -33,30 +33,23 @@
 
 #### 8.1.2 基础常量（`file-memory.ts`）
 
-```typescript
-export const FILE_MEMORY_BASE_DIR = ".opencat/memory";
-export const FILE_MEMORY_ENTRYPOINT = "MEMORY.md";
-export const FILE_MEMORY_LOGS_DIR = "logs";
+系统默认将记忆存储在 `~/.opencat/memory/<project-key>/` 下。相关常量：
 
-const DEFAULT_MEMORY_TYPE: FileMemoryType = "user";
-const MAX_SCANNED_MEMORY_FILES = 200;
+| 常量                         | 值                  | 含义           |
+| ---------------------------- | ------------------- | -------------- |
+| `FILE_MEMORY_BASE_DIR`     | `.opencat/memory` | 记忆根目录     |
+| `FILE_MEMORY_ENTRYPOINT`   | `MEMORY.md`       | 索引文件名     |
+| `FILE_MEMORY_LOGS_DIR`     | `logs`            | 日志目录       |
+| `DEFAULT_MEMORY_TYPE`      | `"user"`          | 默认记忆类型   |
+| `MAX_SCANNED_MEMORY_FILES` | 200                 | 最大扫描文件数 |
 
-const ENTRYPOINT_HEADER = [
-  "# Long-term memory",
-  "",
-  "This file is an index. Keep each entry short and put memory details in topic files.",
-  "",
-].join("\n");
-```
+索引文件由 `ENTRYPOINT_HEADER` 模板生成，包含标题 "Long-term memory" 和一行使用说明。
 
-`getFileMemoryDir(runtime: Runtime): string` — 返回绝对路径：
+路径计算：
 
-1. 如果 `runtime.longTermMemoryConfig.fileMemoryDirectory` 已配置 → `resolve(configured)`
-2. 否则 → `join(homedir(), FILE_MEMORY_BASE_DIR, "projects", createProjectMemoryKey(runtime.cwd))`
-
-`getFileMemoryEntrypointPath(runtime)` → `join(memoryDir, "MEMORY.md")`
-
-`getFileMemoryLogsDir(runtime)` → `join(memoryDir, "logs")`
+- `getFileMemoryDir(runtime)`：如配置了 `fileMemoryDirectory` 则直接用；否则推导为 `~/.opencat/memory/projects/<project-key>`
+- `getFileMemoryEntrypointPath(runtime)` → `<memoryDir>/MEMORY.md`
+- `getFileMemoryLogsDir(runtime)` → `<memoryDir>/logs`
 
 #### 8.1.3 记忆文件格式
 
@@ -90,18 +83,7 @@ reason: "保存原因（可选）"
 | `project`   | 非代码可推导的项目上下文（动机、约束、决策） |
 | `reference` | 外部系统指针                                 |
 
-**Frontmatter 解析**（`parseFrontmatter()`）：
-
-```typescript
-// 正则匹配 /^---\r?\n([\s\S]*?)\r?\n---/
-// 然后逐行按 `:` 分割 key:value，value 经过 parseYamlScalar() 处理：
-//   - 引号包裹的去引号
-//   - "true"/"false" → 保持字符串（不做 boolean 转换）
-//   - 数字 → 保持字符串
-// 返回 Record<string, string>
-
-// stripFrontmatter() 用 /^---\r?\n[\s\S]*?\r?\n---\r?\n?/ 删除 frontmatter
-```
+**Frontmatter 解析**：用正则 `/^---\r?\n([\s\S]*?)\r?\n---/` 匹配 YAML 头，逐行按 `:` 分割 key:value。`parseYamlScalar()` 去引号、保持字符串（不做 boolean/数字转换）。`stripFrontmatter()` 用同样的正则删除 frontmatter，提取正文。
 
 #### 8.1.4 MEMORY.md 索引格式
 
@@ -119,47 +101,16 @@ This file is an index. Keep each entry short and put memory details in topic fil
 3. 用 `content.includes(\`](${link})\`)` 检查链接是否已存在（简单 substring 匹配）
 4. 不存在 → 追加 `\n- [title](link) - description\n`
 
-#### 8.1.5 核心类型（`file-memory.ts`）
+#### 8.1.5 核心类型
 
-```typescript
-export type FileMemoryType = "user" | "feedback" | "project" | "reference";
-
-export type SaveFileMemoryInput = {
-  memory: string;      // 记忆正文
-  reason?: string;     // 保存原因
-  type?: FileMemoryType; // 默认 "user"
-};
-
-export type SaveFileMemoryResult = {
-  id: string;          // 文件名去 .md 后缀
-  memory: string;
-  metadata: {
-    event: "ADD" | "EXISTS";  // ADD=新创建, EXISTS=已存在（去重命中）
-    path: string;             // .md 文件绝对路径
-    entrypointPath: string;   // MEMORY.md 绝对路径
-    type: FileMemoryType;
-    hash: string;             // SHA256 hex
-    reason?: string;
-  };
-};
-
-export type FileMemoryHeader = {
-  filename: string;     // 相对路径，如 "memory-331717f4.md"
-  path: string;         // 绝对路径
-  name?: string;        // 来自 frontmatter name
-  description?: string; // 来自 frontmatter description
-  type?: FileMemoryType;
-};
-
-export type LoadedFileMemory = FileMemoryHeader & {
-  content: string;      // strip frontmatter 后的正文
-};
-
-export type LoadedFileMemoryEntrypoint = {
-  path: string;
-  content: string;
-};
-```
+| 类型                           | 关键字段                                                         | 说明                                                                       |
+| ------------------------------ | ---------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `FileMemoryType`             | `"user"` \| `"feedback"` \| `"project"` \| `"reference"` | 记忆分类                                                                   |
+| `SaveFileMemoryInput`        | `memory`(必填), `reason?`, `type?`                         | MemorySave 工具的输入                                                      |
+| `SaveFileMemoryResult`       | `id`, `memory`, `metadata`                                 | 保存结果。`metadata.event` = `"ADD"`(新创建) 或 `"EXISTS"`(去重命中) |
+| `FileMemoryHeader`           | `filename`, `path`, `name?`, `description?`, `type?`   | 扫描得到的记忆文件元信息                                                   |
+| `LoadedFileMemory`           | 继承`FileMemoryHeader` + `content`                           | 加载后含已剥离 frontmatter 的正文                                          |
+| `LoadedFileMemoryEntrypoint` | `path`, `content`                                            | MEMORY.md 索引文件的内容                                                   |
 
 #### 8.1.6 文件扫描与去重
 
@@ -178,21 +129,18 @@ export type LoadedFileMemoryEntrypoint = {
 1. 先调 `scanFileMemoryHeaders()` 获取有效文件列表（防止注入非法路径）
 2. 对每个 filename，在 headers 中查找 → 读取文件 → `stripFrontmatter()` → 返回 `LoadedFileMemory[]`
 
-#### 8.1.7 关键常量（`long-term-memory.ts` / `auto-dream.ts`）
+#### 8.1.7 关键常量
 
-```typescript
-// long-term-memory.ts
-const MEMORY_QUERY_RECENT_MESSAGES = 6;      // 构建查询用的最近消息数
-const MEMORY_QUERY_MAX_CHARS = 4_000;        // 查询字符串最大长度
-const MAX_RELEVANT_MEMORY_FILES = 5;          // 每次注入最多选中的文件
-const MEMORY_SELECTOR_MAX_TOKENS = 512;       // 选择模型的输出 token 上限
-const FILE_MEMORY_EXTRACTION_MAX_TURNS = 5;   // 提取子 agent 最大轮数
-const RECENT_TOOL_NAMES_FOR_MEMORY_QUERY = 12; // 随 manifest 一起发给选择器的近期工具数
-
-// auto-dream.ts
-const MEMORY_DREAM_MAX_TURNS = 8;             // Dream 子 agent 最大轮数
-const MEMORY_DREAM_RECENT_SESSION_LIMIT = 8;  // 纳入考虑的最近 transcript 数
-```
+| 常量                                   | 值   | 来源                | 含义                           |
+| -------------------------------------- | ---- | ------------------- | ------------------------------ |
+| `MEMORY_QUERY_RECENT_MESSAGES`       | 6    | long-term-memory.ts | 构建查询用的最近消息数         |
+| `MEMORY_QUERY_MAX_CHARS`             | 4000 | long-term-memory.ts | 查询字符串最大长度             |
+| `MAX_RELEVANT_MEMORY_FILES`          | 5    | long-term-memory.ts | 每轮注入最多选中的文件数       |
+| `MEMORY_SELECTOR_MAX_TOKENS`         | 512  | long-term-memory.ts | 选择模型输出 token 上限        |
+| `FILE_MEMORY_EXTRACTION_MAX_TURNS`   | 5    | long-term-memory.ts | 提取子 agent 最大轮数          |
+| `RECENT_TOOL_NAMES_FOR_MEMORY_QUERY` | 12   | long-term-memory.ts | 发给选择器的近期工具数         |
+| `MEMORY_DREAM_MAX_TURNS`             | 8    | auto-dream.ts       | Dream 子 agent 最大轮数        |
+| `MEMORY_DREAM_RECENT_SESSION_LIMIT`  | 8    | auto-dream.ts       | Dream 考虑的最近 transcript 数 |
 
 ---
 
@@ -200,29 +148,20 @@ const MEMORY_DREAM_RECENT_SESSION_LIMIT = 8;  // 纳入考虑的最近 transcrip
 
 `LongTermMemoryRuntimeConfig`（`src/Memory/runtime.ts`）：
 
-```typescript
-export interface LongTermMemoryRuntimeConfig {
-  enabled: boolean;                  // 默认 true
-  autoInject: boolean;               // 默认 true — 每轮自动注入文件记忆
-  autoExtract: boolean;              // 默认 false — 每轮结束后 fork agent 提取
-  autoInjectTopK: number;            // 默认 6
-  searchThreshold: number;           // 默认 0.1
-  maxInjectedChars: number;          // 默认 8_000
-  fileMemoryDirectory?: string;      // 覆盖默认路径
-  userId: string;                    // 默认 "default-user"
-  agentId: string;
-  runId: string;
-}
-```
+| 字段                    | 类型    | 默认值             | 说明                           |
+| ----------------------- | ------- | ------------------ | ------------------------------ |
+| `enabled`             | boolean | `true`           | 总开关                         |
+| `autoInject`          | boolean | `true`           | 每轮自动注入文件记忆           |
+| `autoExtract`         | boolean | `false`          | 每轮结束后 fork agent 提取信号 |
+| `autoInjectTopK`      | number  | 6                  | 保留字段                       |
+| `searchThreshold`     | number  | 0.1                | 保留字段                       |
+| `maxInjectedChars`    | number  | 8000               | 注入记忆的最大字符数           |
+| `fileMemoryDirectory` | string? | —                 | 覆盖默认记忆存储路径           |
+| `userId`              | string  | `"default-user"` | 用户标识                       |
+| `agentId`             | string  | —                 | Agent 标识                     |
+| `runId`               | string  | —                 | 运行标识                       |
 
-`createLongTermMemoryRuntimeConfig()` 从 options 和 identity 中合并默认值。`cli.ts` 和 `web-cli.ts` 中传递的配置：
-
-```typescript
-longTermMemoryConfig: {
-  autoInject: true,   // 注入开启 — 每次用户消息时搜索相关文件记忆
-  autoExtract: false, // 提取关闭 — 用户需要显式开启
-}
-```
+`createLongTermMemoryRuntimeConfig()` 从 options 和 identity 合并默认值。CLI 入口中 `autoInject` 为 `true`（注入开启），`autoExtract` 为 `false`（提取需显式开启）。
 
 ---
 
@@ -244,226 +183,43 @@ query()                                          // query.ts:76
       → state.Messages.push(contextMessage)      // query.ts:579
 ```
 
-#### 8.3.2 `createLongTermMemoryContextMessage()` 完整流程
+#### 8.3.2 `createLongTermMemoryContextMessage()` — 9 步流程
 
-```typescript
-// long-term-memory.ts:35
-export async function createLongTermMemoryContextMessage(
-  runtime: Runtime,
-  messages: readonly Message[],
-): Promise<DeepSeekMessage | null> {
-  // 1. 检查配置
-  if (!config.enabled || !config.autoInject) return null;
+`src/query/long-term-memory.ts:35`。该函数从消息历史中提取上下文，查询文件记忆，渲染为 XML 块返回。异常静默捕获——记忆注入失败不阻塞主流程。
 
-  // 2. 构建查询
-  const query = buildLongTermMemoryQuery(messages);
-  if (!query) return null;
-
-  // 3. 加载 MEMORY.md 入口
-  const entrypoint = await loadFileMemoryEntrypoint(runtime);
-  if (!entrypoint) return null;  // 没有索引文件 → 跳过
-
-  // 4. 获取所有记忆文件的 headers
-  const headers = await scanFileMemoryHeaders(runtime);
-
-  // 5. 收集防重复信息
-  const alreadySurfaced = collectSurfacedLongTermMemoryFiles(messages);
-  const recentTools = collectRecentToolNames(messages);
-
-  // 6. 用 DeepSeek 选择相关文件
-  const selectedFiles = await selectRelevantFileMemories(
-    runtime, query, headers, { alreadySurfaced, recentTools }
-  );
-
-  // 7. 加载被选中的文件内容
-  const selectedMemories = await loadFileMemories(runtime, selectedFiles);
-
-  // 8. 渲染为 XML，不超过 maxInjectedChars
-  const content = renderLongTermMemoryFileContext(
-    entrypoint, selectedMemories, config.maxInjectedChars
-  );
-
-  // 9. 发送遥测事件
-  await emitRunEvent(runtime, {
-    type: "long_term_memory_injected",
-    queryChars: query.length,
-    resultCount: selectedMemories.length,
-    injectedChars: content.length,
-  });
-
-  return { role: "user", content };
-  // 异常静默捕获，返回 null — 记忆注入失败不阻塞主流程
-}
-```
+1. **检查配置**：`enabled && autoInject` 都为 true 才继续
+2. **构建查询**：调用 `buildLongTermMemoryQuery()`，从最近消息提取查询字符串
+3. **加载索引**：读 `MEMORY.md`，不存在则跳过
+4. **扫描文件**：`scanFileMemoryHeaders()` 获取所有记忆文件的元信息
+5. **收集防重复信息**：`collectSurfacedLongTermMemoryFiles()` 提取已注入过的文件名，`collectRecentToolNames()` 收集最近 12 个工具名
+6. **选择相关文件**：`selectRelevantFileMemories()` 用 DeepSeek（JSON mode, 512 tokens）从 manifest 中选 ≤5 个文件
+7. **加载内容**：`loadFileMemories()` 读取选中文件
+8. **渲染 XML**：`renderLongTermMemoryFileContext()` 生成 `<long_term_memory>` 块
+9. **发送事件**：`emitRunEvent()` 记录遥测（查询大小、结果数、注入字符数）
 
 #### 8.3.3 `buildLongTermMemoryQuery()`
 
-```typescript
-// long-term-memory.ts:472
-function buildLongTermMemoryQuery(messages: readonly Message[]): string {
-  const parts: string[] = [];
-  for (const message of messages
-    .filter(isLongTermMemorySourceMessage)  // role: user/assistant, source: user/assistant, 有文本
-    .slice(-MEMORY_QUERY_RECENT_MESSAGES)   // 最近 6 条
-  ) {
-    const text = getMessageText(message);
-    if (text) parts.push(`${message.role}: ${text}`);
-  }
-  return truncate(parts.join("\n"), MEMORY_QUERY_MAX_CHARS).trim();
-}
+从消息数组中提取最近 6 条 user/assistant 消息的文本，拼接为 `role: content` 格式，截断到 4000 字符。过滤条件：消息 `role` 为 `"user"` 或 `"assistant"`，`source` 为 `"user"` 或 `"assistant"`，有非空文本内容。
 
-function getMessageText(message: Message): string {
-  if (message.role === "user") return message.content;            // 用户消息直接取 content
-  if (message.role === "assistant")
-    return typeof message.content === "string" ? message.content : "";
-  return "";  // tool 消息、system 消息等被过滤
-}
+#### 8.3.4 `selectRelevantFileMemories()` — 文件选择器（核心）
 
-function isLongTermMemorySourceMessage(message: Message): boolean {
-  return (
-    (message.role === "user" || message.role === "assistant") &&
-    (message.source === "user" || message.source === "assistant") &&
-    getMessageText(message).trim().length > 0
-  );
-}
-```
+用轻量 DeepSeek 调用从 manifest 中挑选相关文件：
 
-#### 8.3.4 `selectRelevantFileMemories()` — 文件选择器
+- **模型**：`deepseek-v4-flash`（便宜、快）
+- **响应格式**：`json_object`（`{"selected_files":["path.md"]}`）
+- **输出上限**：512 tokens
+- **温度**：0
 
-这是整个注入流程的核心：用一个轻量的 DeepSeek 调用从 manifest 中挑选相关文件。
-
-```typescript
-// long-term-memory.ts:91
-async function selectRelevantFileMemories(
-  runtime: Runtime,
-  query: string,
-  headers: readonly FileMemoryHeader[],
-  options: {
-    alreadySurfaced?: ReadonlySet<string>;  // 已经注入过的文件名，排除
-    recentTools?: readonly string[];        // 最近使用的工具名
-  } = {},
-): Promise<string[]> {
-  // 过滤掉本轮已经注入过的文件（防重复）
-  const availableHeaders = headers.filter(
-    (header) => !options.alreadySurfaced?.has(header.filename)
-  );
-  if (availableHeaders.length === 0) return [];
-
-  const filenames = new Set(availableHeaders.map(h => h.filename));
-  const manifest = formatFileMemoryManifest(availableHeaders);
-  const toolsSection = options.recentTools?.length
-    ? `\n\nRecently used tools: ${options.recentTools.join(", ")}`
-    : "";
-
-  // 调用 DeepSeek，用 JSON mode 做结构化选择
-  const response = await runtime.deepSeekClient.create({
-    model: "deepseek-v4-flash",  // 选择模型用 flash（便宜、快）
-    max_tokens: MEMORY_SELECTOR_MAX_TOKENS,  // 512
-    temperature: 0,
-    thinking: { type: "disabled" },
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: [
-          "You are selecting long-term memory files that will be useful to OpenCat as it processes the user's next request.",
-          "You will be given the user's recent query context and a manifest of available memory files with their filenames, types, names, and descriptions.",
-          `Return JSON only: {"selected_files":["relative/path.md"]}.`,
-          `Return a list of filenames for memories that will clearly be useful to OpenCat as it processes the request, up to ${MAX_RELEVANT_MEMORY_FILES} files.`,
-          "Only select filenames from the provided manifest.",
-          "Select based on the manifest metadata. Do not invent filenames or rely on memories that are not listed.",
-          "Only include memories you are certain will help. If you are unsure whether a memory is useful, do not include it.",
-          "Be selective and discerning; keyword overlap alone is not enough.",
-          "If recently used tools are provided, do not select ordinary usage reference memories for those tools because active tool output already provides usage context. Still select memories containing warnings, gotchas, or known issues about those tools.",
-          "If no listed memory is clearly useful, return an empty list.",
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: [
-          `Query:\n${query}`,
-          "",
-          `Available memory files:\n${manifest}${toolsSection}`,
-        ].join("\n"),
-      },
-    ],
-  });
-
-  // 解析 JSON → 过滤（只保留 manifest 中确实存在的文件名） → 截断到 MAX_RELEVANT_MEMORY_FILES
-  const content = response.choices[0]?.message.content ?? "";
-  const parsed = parseSelectedMemoryFiles(content);
-  return parsed
-    .filter((filename) => filenames.has(filename))
-    .slice(0, MAX_RELEVANT_MEMORY_FILES);
-}
-```
-
-**`parseSelectedMemoryFiles()`** — JSON 解析容错：
-
-```typescript
-function parseSelectedMemoryFiles(content: string): string[] {
-  try {
-    const parsed = JSON.parse(extractJsonObject(content)) as {
-      selected_files?: unknown;
-    };
-    return Array.isArray(parsed.selected_files)
-      ? parsed.selected_files.filter((v): v is string => typeof v === "string")
-      : [];
-  } catch { return []; }
-}
-
-function extractJsonObject(content: string): string {
-  const start = content.indexOf("{");
-  const end = content.lastIndexOf("}");
-  return start >= 0 && end >= start ? content.slice(start, end + 1) : content;
-}
-```
+System prompt 约束：只从提供的 manifest 中选择文件名，不确定就不选，keyword 重叠不等于相关。如提供了近期工具名，不选这些工具的普通参考记忆（但保留警告/已知问题）。结果经过 `parseSelectedMemoryFiles()` 容错解析——`extractJsonObject()` 提取 JSON 子串，失败返回空数组。最终过滤并截断到 ≤5 个文件。
 
 **防重复逻辑**：
 
-- `collectSurfacedLongTermMemoryFiles()` — 扫描所有消息的 content 字段，用正则 `/<memory_file\s+path="([^"]+)"/g` 提取已注入过的文件名，返回 `Set<string>`
-- `collectRecentToolNames()` — 从最近的消息中遍历 tool 消息和 assistant tool_calls，收集最近 12 个唯一的工具名，传给选择器避免选到冗余的工具参考记忆
+- `collectSurfacedLongTermMemoryFiles()`：正则 `/<memory_file\s+path="([^"]+)"/g` 扫描消息，提取已注入文件名
+- `collectRecentToolNames()`：从最近消息中收集 12 个唯一工具名，传给选择器避免冗余
 
 #### 8.3.5 `renderLongTermMemoryFileContext()` — XML 渲染
 
-```typescript
-// long-term-memory.ts:501
-function renderLongTermMemoryFileContext(
-  entrypoint: { path: string; content: string },
-  memories: readonly LoadedFileMemory[],
-  maxChars: number,
-): string {
-  const lines = [
-    "<long_term_memory>",
-    "Relevant long-term memories for this request. Use them as context, but prefer newer user messages if there is a conflict.",
-    "<memory_index>",
-    `source=${entrypoint.path}`,
-    entrypoint.content,          // MEMORY.md 全文
-    "</memory_index>",
-  ];
-
-  if (memories.length > 0) {
-    lines.push("<memory_files>");
-    for (const memory of memories) {
-      lines.push(
-        `<memory_file path="${escapeAttribute(memory.filename)}"${
-          memory.type ? ` type="${memory.type}"` : ""
-        }>`,
-        memory.content,
-        "</memory_file>",
-      );
-    }
-    lines.push("</memory_files>");
-  }
-
-  lines.push("</long_term_memory>");
-  return truncate(lines.join("\n"), maxChars);
-}
-```
-
-`escapeAttribute()` — `&` → `&amp;`, `"` → `&quot;`, `<` → `&lt;`, `>` → `&gt;`
-
-`truncate()` — 如果总长度超过 `maxChars`，截断并追加 `\n[Long-term memory truncated]`
+生成如下结构（XML 转义用 `escapeAttribute()`，超长用 `truncate()` 截断）：
 
 #### 8.3.6 注入的 XML 最终形态
 
@@ -494,99 +250,26 @@ This file is an index. Keep each entry short and put memory details in topic fil
 
 #### 8.4.1 工具定义
 
-`MemorySave` 是 `alwaysLoad: true` 的 always-available 工具。其 schema：
+`MemorySave` 是 `alwaysLoad: true` 的 always-available 工具。输入：`memory`（必填，一个事实一条）、`memoryType`（可选，默认 `"user"`）、`reason`（可选）。输出：`results[{id, memory, metadata}]`，其中 `metadata.event` = `"ADD"` 或 `"EXISTS"`。
 
-```typescript
-// 输入
-z.strictObject({
-  memory: z.string().min(1)
-    .describe("The exact durable memory the user asked to add. Prefer one fact per call."),
-  memoryType: z.enum(["user", "feedback", "project", "reference"]).optional()
-    .describe("Optional memory category. Defaults to user."),
-  reason: z.string().optional()
-    .describe("Short reason this memory should be durable, when useful for auditing."),
-});
+工具 prompt 约束：仅在用户明确要求记忆时调用；不用于普通对话/任务进度/记忆查寻；不保存敏感信息除非用户明确要求。
 
-// 输出
-z.object({
-  results: z.array(z.object({
-    id: z.string(), memory: z.string(),
-    metadata: z.record(z.string(), z.any()).optional(),
-  })),
-});
-```
+#### 8.4.2 `saveFileMemory()` — 6 步流程
 
-工具 prompt 明确约束：
+`src/Memory/file-memory.ts:59`。核心保存逻辑：
 
-> "Use this only when the user explicitly asks you to remember, save, or add something to memory."
-> "Do not call this for ordinary conversation, transient task progress, or memory lookup."
-> "Do not save secrets or sensitive information unless the user explicitly asks."
+1. **门检查**：`enabled` 为 true 且 memory 非空
+2. **确保目录存在**：`mkdir(memoryDir, { recursive: true })`
+3. **SHA256 去重**：`hashMemory(memory)` → `findMemoryByHash()` 检查是否已存在
+4. **已存在**：只更新 `MEMORY.md` 索引链接 → 返回 `{ event: "EXISTS" }`
+5. **新创建**：`renderMemoryFile()` 生成 YAML frontmatter 格式的 `.md` 文件 → `writeFile()`
+6. **更新索引**：`ensureEntrypointHasLink()` 在 `MEMORY.md` 追加一行链接
 
-#### 8.4.2 `saveFileMemory()` 完整流程
-
-```typescript
-// file-memory.ts:59
-export async function saveFileMemory(
-  runtime: Runtime,
-  input: SaveFileMemoryInput,
-): Promise<{ results: SaveFileMemoryResult[] }> {
-  // 1. 门检查
-  if (!runtime.longTermMemoryConfig.enabled) return { results: [] };
-  const memory = input.memory.trim();
-  if (!memory) return { results: [] };
-
-  // 2. 确保目录存在
-  const memoryDir = getFileMemoryDir(runtime);
-  await mkdir(memoryDir, { recursive: true });
-
-  // 3. 去重检查
-  const hash = hashMemory(memory);           // SHA256
-  const existing = await findMemoryByHash(memoryDir, hash);
-  const type = input.type ?? DEFAULT_MEMORY_TYPE;  // 默认 "user"
-  const entrypointPath = getFileMemoryEntrypointPath(runtime);
-
-  // 4. 已存在 → 只更新索引
-  if (existing) {
-    await ensureEntrypointHasLink(entrypointPath, existing, memory);
-    return { results: [{
-      id: basename(existing, ".md"), memory,
-      metadata: { event: "EXISTS", path: existing, entrypointPath, type, hash,
-                  ...(input.reason ? { reason: input.reason } : {}) },
-    }] };
-  }
-
-  // 5. 不存在 → 创建新文件
-  const filename = `${slugify(memory)}-${hash.slice(0, 8)}.md`;
-  const path = join(memoryDir, filename);
-  await writeFile(path, renderMemoryFile({
-    name: titleFromMemory(memory),
-    description: descriptionFromMemory(memory),
-    type, memory, hash, reason: input.reason,
-  }), "utf8");
-
-  // 6. 更新 MEMORY.md 索引
-  await ensureEntrypointHasLink(entrypointPath, path, memory);
-
-  return { results: [{
-    id: basename(path, ".md"), memory,
-    metadata: { event: "ADD", path, entrypointPath, type, hash,
-                ...(input.reason ? { reason: input.reason } : {}) },
-  }] };
-}
-```
+文件名 = `slugify(memory)-{hash前8位}.md`。
 
 #### 8.4.3 结果格式化
 
-```typescript
-// MemorySave.formatResult()
-formatResult({ output }: { output: MemorySaveOutput }): string {
-  if (output.results.length === 0) return "No long-term memory was saved.";
-  return [
-    `Saved ${output.results.length} long-term memor${output.results.length === 1 ? "y" : "ies"}.`,
-    ...output.results.map(result => `- ${result.id}: ${result.memory}`),
-  ].join("\n");
-}
-```
+`formatResult()` 将输出渲染为简短描述：`Saved N long-term memories.` + 逐行 `- id: memory`。
 
 ---
 
@@ -594,241 +277,75 @@ formatResult({ output }: { output: MemorySaveOutput }): string {
 
 #### 8.5.1 触发位置与条件
 
-入口：`query.ts:220` — 模型本轮无工具调用时（即本轮可以结束）：
+入口：`query.ts:220` — 模型本轮无工具调用时调用 `extractLongTermMemoryForCompletedQuery()`。
 
-```typescript
-// 当 toolCalls.length === 0, 本轮无更多工具调用
-const extraction = await extractLongTermMemoryForCompletedQuery(
-  runtime, state, { turnStartMessageId, turnStartedAt }
-);
-```
+**四道门**（`long-term-memory.ts:233`）：
 
-四道门（`long-term-memory.ts:233`）：
-
-```typescript
-export async function extractLongTermMemoryForCompletedQuery(
-  runtime: Runtime,
-  state: State,
-  options: { turnStartMessageId?: MessageId; turnStartedAt?: number } = {},
-): Promise<LongTermMemoryExtractionResult> {
-  const config = runtime.longTermMemoryConfig;
-
-  // 门 1: 只有主 Agent
-  if (runtime.agentRole !== "main" ||
-      !config.enabled ||
-      !config.autoExtract) {
-    return { status: "skipped", reason: "disabled" };
-  }
-
-  // 门 2: 本轮有新消息
-  const turn = selectTurnMessagesFromMessages(state.Messages, options.turnStartMessageId);
-  if (!turn || turn.newMessages.length === 0) {
-    return { status: "skipped", reason: "no_extractable_messages" };
-  }
-
-  // 门 3: 本轮未显式保存过（互斥保护）
-  if (hasMemorySaveSince(state.Messages, options.turnStartMessageId)) {
-    return { status: "skipped", reason: "memory_saved_by_main_agent" };
-  }
-
-  // Fire-and-forget: 不 await
-  void runFileMemoryExtractionAgent(runtime, state, {
-    newMessageCount: turn.newMessages.length,
-  }).catch((error) => {
-    void emitRunEvent(runtime, {
-      type: "long_term_memory_extracted",
-      status: "failed",
-      reason: error instanceof Error ? error.message : String(error),
-    });
-  });
-
-  return { status: "skipped", reason: "file_memory_extract_launched" };
-}
-```
+| 门 | 条件                                                                      | 失败原因                           |
+| -- | ------------------------------------------------------------------------- | ---------------------------------- |
+| 1  | `agentRole === "main"` 且 `enabled` 且 `autoExtract`                | `"disabled"`                     |
+| 2  | 本轮有新消息（从`turnStartMessageId` 或最近用户消息开始）               | `"no_extractable_messages"`      |
+| 3  | 本轮未调用过 MemorySave（互斥保护）                                       | `"memory_saved_by_main_agent"`   |
+| 4  | 通过后 fire-and-forget：`void runFileMemoryExtractionAgent()`，不 await | `"file_memory_extract_launched"` |
 
 辅助函数：
 
-```typescript
-function selectTurnMessagesFromMessages(
-  messages: readonly Message[],
-  turnStartMessageId: MessageId | undefined,
-): { newMessages: Message[] } | null {
-  // 从 turnStartMessageId 指定的位置开始（如果有）
-  // 否则从最近一条用户消息开始（findLastUserMessageIndex）
-  const startIndex = turnStartMessageId
-    ? messages.findIndex(m => m.id === turnStartMessageId)
-    : findLastUserMessageIndex(messages);
-  if (startIndex < 0) return null;
-  return { newMessages: messages.slice(startIndex).filter(isLongTermMemorySourceMessage) };
-}
-
-function hasMemorySaveSince(messages, turnStartMessageId): boolean {
-  const startIndex = turnStartMessageId
-    ? messages.findIndex(m => m.id === turnStartMessageId)
-    : 0;
-  return messages.slice(Math.max(0, startIndex)).some(m =>
-    m.role === "assistant" &&
-    (m.tool_calls ?? []).some(tc => tc.function.name === "MemorySave")
-  );
-}
-```
+- `selectTurnMessagesFromMessages()`：从 `turnStartMessageId` 或最近用户消息开始截取本轮的 source 消息
+- `hasMemorySaveSince()`：检查本轮是否已有 MemorySave 调用（遍历 assistant 消息的 tool_calls）
 
 #### 8.5.2 `runFileMemoryExtractionAgent()` — Fork 子 Agent
 
-```typescript
-// long-term-memory.ts:268
-async function runFileMemoryExtractionAgent(
-  runtime: Runtime,
-  state: State,
-  options: { newMessageCount: number },
-): Promise<void> {
-  const memoryDir = getFileMemoryDir(runtime);
-  const logsDir = getFileMemoryLogsDir(runtime);
-  await mkdir(logsDir, { recursive: true });
+`src/query/long-term-memory.ts:268`。核心流程：
 
-  const prompt = buildFileMemoryExtractionPrompt({
-    memoryDir, logsDir,
-    logPath: getDailyMemoryLogPath(logsDir),
-    newMessageCount: options.newMessageCount,
-  });
-
-  const { runAgentTask } = await import("../Tools/Agent/runner.js");
-  await runAgentTask({
-    parentRuntime: runtime,
-    parentState: state,
-    agentDefinition: createFileMemoryExtractionAgentDefinition(),
-    prompt,
-    description: "Update file-based long-term memory",
-    mode: "fork",                     // 继承父上下文
-    isolation: "none",
-    maxTurns: FILE_MEMORY_EXTRACTION_MAX_TURNS,  // 5
-    recordTaskLifecycle: false,       // 不记录自己的 transcript
-    agentRole: "session",
-    forkContextMessages: state.Messages.map(m => ({ ...m })),
-    canUseTool: createFileMemoryExtractionCanUseTool(logsDir),
-  });
-}
-```
+1. 确保 `logsDir` 目录存在
+2. `buildFileMemoryExtractionPrompt()` 构建 prompt
+3. 动态 import `runAgentTask`，以 fork 模式启动子 agent（`maxTurns: 5`，`recordTaskLifecycle: false`，`isolation: "none"`）
+4. 沙箱通过 `createFileMemoryExtractionCanUseTool(logsDir)` 限制写入
 
 #### 8.5.3 Agent 定义与沙箱
 
-```typescript
-function createFileMemoryExtractionAgentDefinition(): AgentDefinition {
-  return {
-    agentType: "long_term_memory",
-    category: "worker",
-    source: "built-in",
-    whenToUse: "Internal agent used to update file-based long-term memory.",
-    tools: ["Read", "Grep", "Glob", "Edit", "Write"],
-    disallowedTools: [
-      "Agent", "Bash", "MemorySave", "SendMessage",
-      "Plan", "TodoWrite", "WebSearch", "WebFetch", "ReadSkill",
-    ],
-    model: "inherit",
-    permissionMode: "default",
-    maxTurns: FILE_MEMORY_EXTRACTION_MAX_TURNS,
-    getSystemPrompt: () => [
-      "You are a forked long-term memory extraction agent.",
-      "Append durable memory signals to the daily memory log only.",
-      "Do not answer the user and do not modify project files.",
-      "Save only durable cross-session information that is not derivable from the current project state.",
-      "Do not edit MEMORY.md or topic memory files; a separate dream pass consolidates logs later.",
-    ].join("\n"),
-  };
-}
-```
+提取 Agent 的类型为 `"long_term_memory"`，category 为 `"worker"`。允许工具：`Read, Grep, Glob, Edit, Write`。禁止工具：`Agent, Bash, MemorySave, SendMessage, Plan, TodoWrite, WebSearch, WebFetch, ReadSkill`。
 
-**沙箱**（`createFileMemoryExtractionCanUseTool()`）：
+**沙箱规则**：Read/Grep/Glob 不限路径；Write/Edit 只能操作 `logsDir` 下的文件（`isPathInside()` 做路径规范化比较）。
 
-```typescript
-function createFileMemoryExtractionCanUseTool(logsDir: string): CanUseToolFn {
-  const root = normalize(resolve(logsDir));
-  return (tool, input) => {
-    // Read/Grep/Glob → 允许任意路径
-    if (tool.name === "Read" || tool.name === "Grep" || tool.name === "Glob")
-      return { behavior: "allow" };
-    // Write/Edit → 必须 path 在 logsDir 下
-    if ((tool.name === "Write" || tool.name === "Edit") &&
-        typeof input === "object" && input !== null &&
-        "file_path" in input && typeof input.file_path === "string" &&
-        isPathInside(input.file_path, root))
-      return { behavior: "allow" };
-    return { behavior: "deny", message: `...may only write inside ${logsDir}.` };
-  };
-}
+#### 8.5.4 提取 Agent 的 Prompt
 
-function isPathInside(filePath: string, root: string): boolean {
-  const candidate = normalize(resolve(filePath)).toLowerCase();
-  const normalizedRoot = root.toLowerCase();
-  return candidate === normalizedRoot ||
-    candidate.startsWith(`${normalizedRoot}\\`) ||
-    candidate.startsWith(`${normalizedRoot}/`);
-}
-```
+`buildFileMemoryExtractionPrompt()` 产出的 prompt（中文译版）：
 
-#### 8.5.4 提取 Agent 的 Prompt（完整）
-
-`buildFileMemoryExtractionPrompt()` 产出的 prompt：
-
-```
-Analyze the most recent ~N model-visible messages in the inherited conversation
-and append durable memory signals if useful.
-
-Memory directory: <memoryDir>
-Daily logs directory: <logsDir>
-Append-only log file for today: <logPath>
-
-Allowed tools: Read, Grep, Glob, Edit, Write.
-You may only Write/Edit files inside the daily logs directory. Other writes will be denied.
-Do not edit MEMORY.md or topic memory files. A manual/automatic dream pass will
-consolidate logs later.
-If the log file already exists, append new bullets to the end.
-  Do not rewrite or reorganize existing log entries.
-If the log file does not exist, create it and parent directories as needed.
-
-Log format:
-```markdown
-- HH:MM [type] Concise durable memory signal. Include Why/How to apply when useful.
-```
-
-Use current local time when available; otherwise use an approximate timestamp.
-
-Log only information likely to be useful in future conversations:
-
-- user: durable user role, goals, preferences, knowledge background.
-- feedback: corrections or validated preferences about how to work.
-  Include Why and How to apply when the conversation provides them.
-- project: non-obvious project context, motivation, constraints, deadlines,
-  or decisions not derivable from code/git. Convert relative dates to absolute dates.
-- reference: pointers to external systems and where to look for up-to-date information.
-
-What NOT to save:
-
-- Code patterns, conventions, architecture, file paths, or project structure
-- Git history, recent changes, or who changed what
-- Debugging solutions or fix recipes
-- Anything already documented in project files
-- Ephemeral task details: in-progress work, temporary state, current conversation context
-- Plans or task lists for the current conversation
-
-These log entries are raw signal, not official memory. Be conservative:
-if nothing durable appears, do not write anything.
-If nothing should be saved, do not call any writing tools;
-finish with a short note saying no durable memory was needed.
-
-```
+> 分析继承对话中最近 ~N 条模型可见的消息，如有持久价值则追加记忆信号。
+>
+> 记忆目录：`<memoryDir>`
+> 日志目录：`<logsDir>`
+> 今日追加日志文件：`<logPath>`
+>
+> 允许工具：Read, Grep, Glob, Edit, Write。
+> 只能在日志目录内进行写入。其他路径的写入会被拒绝。
+> 不要编辑 MEMORY.md 或 topic 记忆文件——后续的 dream 流程会统一合并。
+> 如果日志文件已存在，在末尾追加新条目，不要重写或重组已有条目。
+> 如果日志文件不存在，按需创建文件及父目录。
+>
+> 日志格式：`- HH:MM [type] 简洁的持久记忆信号。如对话提供了 Why/How，一并记入。`
+> 使用当前本地时间；不可用时使用近似时间戳。
+>
+> **应该记录**（对未来对话有参考价值的信息）：
+> - `user`：用户角色、目标、偏好、背景知识
+> - `feedback`：关于工作方式的修正或已确认的偏好。如对话提供了原因，记录 Why + How
+> - `project`：非代码可推导的项目上下文——动机、约束、截止日期、决策。将相对日期转为绝对日期
+> - `reference`：外部系统指针、何处获取最新信息
+>
+> **不应该记录**：
+> - 代码模式、约定、架构、文件路径、项目结构
+> - Git 历史、最近变更、谁改了什么
+> - Debug 方案或修复配方
+> - 项目文件中已有的任何文档
+> - 临时任务细节：进行中的工作、临时状态、当前对话上下文
+> - 当前对话的 Plan 或 task list
+>
+> 日志条目是原始信号而非正式记忆。保守为上：如果没有持久的信号，不要写任何东西。如果不需要保存，不要调用任何写入工具，直接输出"无需持久记忆"。
 
 #### 8.5.5 日志路径
 
-```typescript
-function getDailyMemoryLogPath(logsDir: string, date = new Date()): string {
-  const year = String(date.getFullYear());
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return resolve(logsDir, year, month, `${year}-${month}-${day}.md`);
-}
-// 例如: ~/.opencat/memory/.../logs/2026/01/2026-01-15.md
-```
+`getDailyMemoryLogPath(logsDir)` 返回 `resolve(logsDir, YYYY, MM, YYYY-MM-DD.md)`。例如：`~/.opencat/memory/.../logs/2026/01/2026-01-15.md`。
 
 ---
 
@@ -839,6 +356,7 @@ function getDailyMemoryLogPath(logsDir: string, date = new Date()): string {
 入口：`runMemoryDream()`（`auto-dream.ts:52`）：
 
 ```
+
 runMemoryDream(runtime, state, { recentSessionLimit?: number })
   │
   ├─ 1. !enabled → skip (reason: "disabled")
@@ -879,141 +397,82 @@ runMemoryDream(runtime, state, { recentSessionLimit?: number })
   │      或 { status: "failed", reason }
   │
   └─ 7. finally: lock.release() → rm .dream.lock
-```
-
-#### 8.6.2 Dream Prompt（完整）
-
-`buildMemoryDreamPrompt()` 产出的完整 prompt：
 
 ```
-# Dream: Memory Consolidation
 
-You are performing a manual dream: a reflective pass over OpenCat's
-file-based long-term memory. Synthesize recently logged memory signal
-into durable, well-organized topic memories so future sessions can
-orient quickly.
+#### 8.6.2 Dream Prompt
 
-Memory directory: <memoryDir>
-Daily logs directory: <logsDir>
-Session transcripts directory: <transcriptDir>
-Entrypoint index: MEMORY.md
-Current date: <YYYY-MM-DD>
+`buildMemoryDreamPrompt()` 产出的 prompt（中文译版）：
 
-You may use Read, Grep, and Glob to inspect memory files.
-You may use Edit/Write only inside the memory directory.
-Read an existing file before editing or overwriting it.
-
-## Existing memory manifest
-<formatFileMemoryManifest 输出, 或 "(No topic memory files were found.)">
-
-## Recent session transcripts
-<formatMemoryDreamTranscriptManifest 输出, 或 "(No recent session transcript files were found.)">
-
-## Phase 1 - Orient
-- Inspect the memory directory and read MEMORY.md if it exists.
-- Skim existing topic files so you update them instead of creating near-duplicates.
-- If logs/ exists, review recent daily log entries. Logs are raw signal, not official memory.
-
-## Phase 2 - Gather recent signal
-Look for new information worth persisting. Sources in priority order:
-1. Daily logs under logs/YYYY/MM/YYYY-MM-DD.md when present.
-2. Existing memories that drifted, contradict newer facts, or need cleanup.
-3. Recent session transcripts listed above, only when logs and topic files
-   do not provide enough context.
-- Look for user preferences, feedback, project context, and external references
-  that will matter in future conversations.
-- Do not exhaustively read transcript JSONL files. Search with narrow terms
-  and inspect only the matching region.
-- Do not preserve temporary task progress from transcripts unless it reveals
-  a durable user preference or project rule.
-
-## Phase 3 - Consolidate
-- Write or update topic memory files at the top level of the memory directory.
-- Use this frontmatter format:
-  ```markdown
-  ---
-  name: {{memory name}}
-  description: {{one-line description used for future relevance selection}}
-  type: {{user | feedback | project | reference}}
-  ---
-
-  {{memory body}}
-```
-
-- Merge new signal into existing topic files rather than creating duplicates.
-- Convert relative dates to absolute dates when possible.
-- If a memory is stale, wrong, or superseded, fix or remove it.
-- Keep feedback/project memories actionable; include Why and How to apply
-  when the source provides them.
-
-## What NOT to save
-
-- Code structure, file paths, architecture facts, or project conventions
-  derivable from the repository.
-- Git history, recent changes, temporary task progress, current plans,
-  or todo lists.
-- Debugging recipes that belong in code, tests, commits, or documentation.
-- Anything already documented in project files unless the user made it a
-  cross-session preference.
-
-## Phase 4 - Prune and index
-
-- Update MEMORY.md as a concise index only.
-- Each index entry should be one line: - [Title](file.md) - one-line hook.
-- Never put full memory bodies in the index.
-- Remove pointers to stale, wrong, deleted, or superseded memories.
-- Keep the index short and useful for future relevance selection.
-
-Return a brief summary of what you consolidated, updated, pruned,
-or why nothing changed.
-
-```
+> # Dream：记忆合并
+>
+> 你现在执行一次手动 dream：对 OpenCat 基于文件的长期记忆进行一次反思。将最近记录的
+> 记忆信号合成为持久、组织良好的 topic 记忆，让后续会话能快速定位。
+>
+> 记忆目录：`memoryDir` / 日志目录：`logsDir` / transcript 目录：`transcriptDir`
+> 索引文件：`MEMORY.md` / 当前日期：`YYYY-MM-DD`
+>
+> 可用 Read、Grep、Glob 查看记忆文件。只能对记忆目录内进行 Edit/Write。编辑前先读取已有文件。
+>
+> ## 已有记忆清单
+> `formatFileMemoryManifest 输出` 或 `"(未找到 topic 记忆文件。)"`
+>
+> ## 最近会话 transcript
+> `formatMemoryDreamTranscriptManifest 输出` 或 `"(未找到近期的 transcript 文件。)"`
+>
+> ## Phase 1 — 定位
+> - 查看记忆目录，读取 MEMORY.md（如存在）
+> - 浏览已有 topic 文件，确保更新而非创建近似重复
+> - 如果 logs/ 存在，查看最近的日志条目（日志是原始信号，非正式记忆）
+>
+> ## Phase 2 — 收集近期信号
+> 寻找值得持久化的新信息。来源优先级：
+> 1. `logs/YYYY/MM/YYYY-MM-DD.md`（如存在）
+> 2. 已有记忆是否偏离、与较新事实矛盾、或需要清理
+> 3. 上述近期 transcript 文件（仅在日志和 topic 文件不足以提供上下文时）
+>
+> - 寻找后续对话中有参考价值的用户偏好、反馈、项目上下文、外部引用
+> - 不要逐行通读 transcript JSONL 文件——用精确关键词搜索，只细读匹配区域
+> - 不要从 transcript 中保留临时任务进度，除非揭示了持久偏好或项目规则
+>
+> ## Phase 3 — 合并
+> - 在记忆目录顶层写入或更新 topic 记忆文件
+> - frontmatter 格式：
+>   ```
+>   ---
+>   name: {记忆名称}
+>   description: {用于后续相关性判断的一行描述}
+>   type: user | feedback | project | reference
+>   ---
+>   {记忆正文}
+>   ```
+> - 将新信号合并到已有 topic 文件，不创建近似重复
+> - 尽可能将相对日期转为绝对日期
+> - 如记忆过时、错误或已被替代，修正或移除
+> - feedback/project 类记忆应可执行：来源提供了 Why/How 时一并记录
+>
+> ## 不应该保存的内容
+> - 代码结构、文件路径、架构事实、项目约定
+> - Git 历史、最近变更、当前任务进度和计划
+> - Debug 方案（属于代码、测试或文档）
+> - 项目文件中已有记录的内容（除非用户将其设为跨会话偏好）
+>
+> ## Phase 4 — 清理与索引
+> - 仅更新 MEMORY.md 为简洁的索引
+> - 每条索引一行：`- [Title](file.md) — 一行摘要`
+> - 从不将完整记忆正文放入索引
+> - 移除指向过时、错误、已删除或被替代记忆的指针
+> - 保持索引简短、对相关性选择有价值
+>
+> 返回合并、更新、清理的简要概述，或说明为何没有变更。
 
 #### 8.6.3 锁机制
 
-```typescript
-async function acquireMemoryDreamLock(memoryDir: string): Promise<
-  | { acquired: true; release(): Promise<void> }
-  | { acquired: false }
-> {
-  const lockPath = resolve(memoryDir, MEMORY_DREAM_LOCK_FILE);  // ".dream.lock"
-  try {
-    await mkdir(memoryDir, { recursive: true });
-    const handle = await open(lockPath, "wx");  // 独占创建, 已存在则抛错
-    await handle.writeFile(JSON.stringify({
-      pid: process.pid,
-      startedAt: new Date().toISOString(),
-    }, null, 2));
-    await handle.close();
-  } catch {
-    return { acquired: false };
-  }
-  return {
-    acquired: true,
-    async release() { await rm(lockPath, { force: true }); },
-  };
-}
-```
+`acquireMemoryDreamLock(memoryDir)` 用 `fs.open(lockPath, "wx")` 独占创建 `.dream.lock` 文件，写入 PID 和 startedAt。已存在则返回 `{ acquired: false }`。`release()` 删除锁文件。防止并发 Dream 运行。
 
 #### 8.6.4 Transcript 目录
 
-```typescript
-function getMemoryDreamTranscriptDir(runtime: Runtime): string {
-  return join(runtime.cwd, ".opencat/transcripts");
-}
-
-function formatMemoryDreamTranscriptManifest(
-  transcripts: readonly MemoryDreamTranscript[],
-  transcriptDir: string,
-): string {
-  if (transcripts.length === 0)
-    return "(No recent session transcript files were found.)";
-  return transcripts.map(t => {
-    const relativePath = relative(transcriptDir, t.path).replace(/\\/g, "/");
-    return `- ${relativePath} (${t.sizeBytes} bytes, modified ${t.modifiedAt})`;
-  }).join("\n");
-}
-```
+Dream 从 `runtime.cwd/.opencat/transcripts/` 读取最近的 `.jsonl` 文件（最多 8 个，按 mtime 降序）。`formatMemoryDreamTranscriptManifest()` 将其渲染为列表供 Agent 参考。
 
 ---
 

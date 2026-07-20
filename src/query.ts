@@ -95,6 +95,7 @@ export async function* _query(
   state: State,
   options: QueryOptions = {},
 ): AsyncGenerator<QueryEvent, void, void> {
+  clearTemporaryCommandAllowRules(runtime);
   const maxTurns = options.maxTurns ?? 100;
   const turnStartMessageId = state.Messages.at(-1)?.id;
   const turnStartedAt = Date.now();
@@ -302,7 +303,27 @@ export async function* _query(
       error: stringifyTelemetryError(error),
     });
     throw error;
+  } finally {
+    clearTemporaryCommandAllowRules(runtime);
   }
+}
+
+function clearTemporaryCommandAllowRules(runtime: Runtime): void {
+  runtime.toolUseContext.setAppState((previous) => {
+    if (!previous.toolPermissionContext.alwaysAllowRules.command?.length) {
+      return previous;
+    }
+
+    const { command: _command, ...remainingAllowRules } =
+      previous.toolPermissionContext.alwaysAllowRules;
+    return {
+      ...previous,
+      toolPermissionContext: {
+        ...previous.toolPermissionContext,
+        alwaysAllowRules: remainingAllowRules,
+      },
+    };
+  });
 }
 
 async function updateSessionMemoryAtSafeBoundary(

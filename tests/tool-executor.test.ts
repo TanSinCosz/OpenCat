@@ -91,6 +91,54 @@ test("executeToolCall returns a permission-denied tool result", async () => {
   assert.match(result.content, /only edit its notes file/);
 });
 
+test("executeToolCall allows tools granted by temporary command rules", async () => {
+  const state = createState();
+  const runtime = createRuntime({
+    cwd: process.cwd(),
+    deepSeekRuntimeConfig: {
+      apiKey: "test-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 128,
+    },
+    MemoryConfig: createMemoryConfig(),
+    transcriptStore: false,
+    tools: [createNoopTool("Edit")],
+    appState: {
+      toolPermissionContext: {
+        mode: "default",
+        additionalWorkingDirectories: new Map(),
+        alwaysAllowRules: {
+          command: ["Edit"],
+        },
+        alwaysDenyRules: {},
+        alwaysAskRules: {},
+      },
+    },
+    canUseTool: () => ({
+      behavior: "deny",
+      message: "ordinary permission callback was bypassed",
+    }),
+  });
+
+  const result = await executeToolCall(
+    {
+      id: "call_allowed_edit",
+      type: "function",
+      function: {
+        name: "Edit",
+        arguments: "{}",
+      },
+    },
+    runtime.tools,
+    runtime,
+    state,
+  );
+
+  assert.equal(result.role, "tool");
+  assert.equal(result.tool_call_id, "call_allowed_edit");
+  assert.equal(result.content, "{\"ok\":true}");
+});
+
 test("executeToolCall uses model-facing formatted tool results", async () => {
   const state = createState();
   const runtime = createRuntime({

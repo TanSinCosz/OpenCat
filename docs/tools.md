@@ -85,7 +85,7 @@ tool_calls 解析
 | 4  | **Bash**        | ✅     | ❌       | 30K               | -                                        |
 | 5  | **Agent**       | ✅     | ❌       | 100K              | alwaysLoad                               |
 | 6  | **MemorySave**  | ✅     | ❌       | 20K               | alwaysLoad                               |
-| 7  | **ReadSkill**   | ✅     | ✅       | 100K              | alwaysLoad                               |
+| 7  | **ReadSkill**   | ✅     | ❌       | 100K              | alwaysLoad                               |
 | 8  | **SendMessage** | ✅     | ❌       | 100K              | alwaysLoad                               |
 | 9  | **Grep**        | ❌     | ✅       | 20K               | -                                        |
 | 10 | **Glob**        | ❌     | ✅       | 100K              | -                                        |
@@ -105,13 +105,13 @@ tool_calls 解析
 | 输入   | `file_path`（绝对路径）、`offset`（起始行号）、`limit`（行数）                                                    |
 | 输出   | `{ filePath, content, numLines, startLine, totalLines }` 或 `file_unchanged`                                        |
 | 格式化 | text 类型：`文件路径 (行范围 / 总行数):\n内容`；file_unchanged 类型：`File has not changed since last read: {path}` |
-| 安全   | 拒绝二进制文件；文件大于 256KB 报错                                                                                     |
+| 安全   | 拒绝二进制文件；全文件读取时（无 offset/limit）文件 > 256KB 报错，需用 offset+limit 分批读取 |
 
 **读缓存机制**：同一文件、相同 offset/limit、mtime 未变 → 返回 `file_unchanged` 标志，调用方跳过输出。缓存使用 LRU（`FileStateCache`），最大 100 条目 / 25MB。
 
 **副作用**：读取成功后调用 `discoverSkillsForReadPath()`，沿目录链扫描 `.claude/skills/` 目录。
 
-**限制**：文件 > 256KB 直接拒绝，内容超过 25000 estimated tokens 报错。仅支持纯文本文件，二进制文件（图片/PDF 等）通过 `hasBinaryExtension()` 直接拒绝。
+**限制**：全文件读取时（无 offset/limit）文件 > 256KB 直接拒绝，需用 offset+limit 分批读取；内容超过 25000 estimated tokens 始终报错。仅支持纯文本文件，二进制文件（图片/PDF 等）通过 `hasBinaryExtension()` 直接拒绝。
 
 #### 3.5.2 Write — 文件写入
 

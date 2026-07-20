@@ -145,10 +145,25 @@ function parseSkillFile(
         name,
         description: frontmatter.description ?? name,
         content: body.trim(),
+        allowedTools: parseFrontmatterList(frontmatter["allowed-tools"]),
+        executionContext: frontmatter.context === "fork" ? "fork" : undefined,
         paths: frontmatter.paths?.split(',').map(p => p.trim()).filter(Boolean),
         skillDir,
         skillPath,
     }
+}
+
+function parseFrontmatterList(value: string | undefined): string[] | undefined {
+    if (!value) {
+        return undefined
+    }
+
+    const parsed = value
+        .split(',')
+        .map(item => item.trim())
+        .filter(Boolean)
+
+    return parsed.length > 0 ? parsed : undefined
 }
 
 function parseFrontmatter(raw: string): {

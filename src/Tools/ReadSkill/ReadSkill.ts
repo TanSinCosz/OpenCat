@@ -1,5 +1,7 @@
 import type { z } from "zod";
 
+import type { AgentDefinition } from "../Agent/definitions.js";
+import { runAgentTask } from "../Agent/runner.js";
 import type { Runtime } from "../../types/runtime.js";
 import type { State } from "../../types/state.js";
 import type { SkillCommand, Tool, ToolUseContext } from "../types.js";
@@ -36,7 +38,7 @@ export class ReadSkill
   }
 
   isConcurrencySafe(): boolean {
-    return true;
+    return false;
   }
 
   formatResult({ output }: { output: ReadSkillOutput }): string {
@@ -44,18 +46,21 @@ export class ReadSkill
       `Skill: ${output.name}`,
       `Description: ${output.description}`,
       ...(output.skillPath ? [`Path: ${output.skillPath}`] : []),
+      ...(output.status === "forked" && output.agentId
+        ? [`Forked agent: ${output.agentId}`]
+        : []),
       ...(output.truncated ? ["Note: content was truncated."] : []),
       "",
       output.content,
     ].join("\n");
   }
 
-  call(
+  async call(
     input: ReadSkillInput,
     context: ToolUseContext,
     runtime: Runtime,
     state: State,
-  ): ReadSkillOutput {
+  ): Promise<ReadSkillOutput> {
     const skill = findDiscoveredSkill(input, context);
     if (!skill) {
       throw new Error(
@@ -69,13 +74,20 @@ export class ReadSkill
       ? `${content.slice(0, MAX_READ_SKILL_CHARS)}\n[ReadSkill content truncated]`
       : content;
 
+    if (skill.executionContext === "fork") {
+      return executeForkedSkill(input, skill, visibleContent, context, runtime, state);
+    }
+
     recordInvokedSkill(state, runtime, skill, visibleContent);
+    activateSkillAllowedTools(context, skill);
 
     return {
       name: skill.name,
       description: skill.description,
       ...(skill.skillDir ? { skillDir: skill.skillDir } : {}),
       ...(skill.skillPath ? { skillPath: skill.skillPath } : {}),
+      ...(skill.allowedTools?.length ? { allowedTools: skill.allowedTools } : {}),
+      status: "inline",
       content: visibleContent,
       truncated,
       note: truncated
@@ -83,6 +95,91 @@ export class ReadSkill
         : undefined,
     };
   }
+}
+
+async function executeForkedSkill(
+  input: ReadSkillInput,
+  skill: SkillCommand,
+  visibleContent: string,
+  context: ToolUseContext,
+  runtime: Runtime,
+  state: State,
+): Promise<ReadSkillOutput> {
+  const restoreAppState = activateSkillAllowedTools(context, skill);
+  try {
+    const output = await runAgentTask({
+      parentRuntime: runtime,
+      parentState: state,
+      agentDefinition: createSkillAgentDefinition(skill),
+      prompt: buildForkedSkillPrompt(input, skill, visibleContent, state),
+      description: `Execute skill: ${skill.name}`,
+      mode: "fork",
+      isolation: "none",
+      maxTurns: 20,
+    });
+    if (output.status !== "completed") {
+      throw new Error(`Forked skill ${skill.name} did not complete.`);
+    }
+
+    return {
+      name: skill.name,
+      description: skill.description,
+      ...(skill.skillDir ? { skillDir: skill.skillDir } : {}),
+      ...(skill.skillPath ? { skillPath: skill.skillPath } : {}),
+      ...(skill.allowedTools?.length ? { allowedTools: skill.allowedTools } : {}),
+      status: "forked",
+      agentId: output.agentId,
+      content: output.result,
+      truncated: false,
+    };
+  } finally {
+    restoreAppState?.();
+  }
+}
+
+function createSkillAgentDefinition(skill: SkillCommand): AgentDefinition {
+  return {
+    agentType: `skill:${skill.name}`,
+    category: "worker",
+    whenToUse: `Execute the ${skill.name} skill.`,
+    getSystemPrompt: () => [
+      `You are executing the ${skill.name} skill in a forked agent.`,
+      "Follow the skill instructions and complete the supplied task.",
+      "Return a concise result for the parent agent, including any blocker or verification result.",
+    ].join("\n"),
+    source: "built-in",
+    tools: skill.allowedTools?.length ? skill.allowedTools : undefined,
+    maxTurns: 20,
+  };
+}
+
+function buildForkedSkillPrompt(
+  input: ReadSkillInput,
+  skill: SkillCommand,
+  visibleContent: string,
+  state: State,
+): string {
+  const task = input.args?.trim() || getLatestUserMessageText(state);
+  return [
+    `<skill name="${skill.name}">`,
+    visibleContent,
+    "</skill>",
+    "",
+    "<task>",
+    task || "Execute this skill for the current user request and report the result.",
+    "</task>",
+  ].join("\n");
+}
+
+function getLatestUserMessageText(state: State): string {
+  for (let index = state.Messages.length - 1; index >= 0; index--) {
+    const message = state.Messages[index];
+    if (message?.role === "user" && typeof message.content === "string") {
+      return message.content;
+    }
+  }
+
+  return "";
 }
 
 function findDiscoveredSkill(
@@ -122,6 +219,36 @@ function describeInput(input: ReadSkillInput): string {
     return `path="${input.path}"`;
   }
   return "(empty input)";
+}
+
+function activateSkillAllowedTools(
+  context: ToolUseContext,
+  skill: SkillCommand,
+): (() => void) | undefined {
+  const allowedTools = skill.allowedTools ?? [];
+  if (allowedTools.length === 0) {
+    return undefined;
+  }
+
+  const previousAppState = context.getAppState();
+  context.setAppState((previous) => {
+    const commandRules =
+      previous.toolPermissionContext.alwaysAllowRules.command ?? [];
+    return {
+      ...previous,
+      toolPermissionContext: {
+        ...previous.toolPermissionContext,
+        alwaysAllowRules: {
+          ...previous.toolPermissionContext.alwaysAllowRules,
+          command: [...new Set([...commandRules, ...allowedTools])],
+        },
+      },
+    };
+  });
+
+  return () => {
+    context.setAppState(() => previousAppState);
+  };
 }
 
 export default ReadSkill;
