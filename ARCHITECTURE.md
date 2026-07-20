@@ -211,7 +211,6 @@ src/
 | 九、多智能体协作 | [docs/agent.md](docs/agent.md) | 三种执行模式（sync/async/fork）、三种隔离模式（none/docker/worktree）、五个内置智能体、父-子通信、工具策略 |
 | 十、消息投影管道 | [docs/projection.md](docs/projection.md) | buildMessagesForQuery() 四级投影管道详解、触发阈值一览、Phase A/B/C 三阶段执行流程、Runtime Context 投影、投影状态管理 |
 | 十一、系统提示词 | [docs/system-prompt.md](docs/system-prompt.md) | 11 段系统提示词逐段详解（中英对照）、System/User Context 额外注入、前缀缓存优化策略 |
-| 十六、评测系统 | [docs/eval.md](docs/eval.md) | SWE-bench Verified 自动化评测：两阶段流程（investigate→fix）、仓库准备、遥测指标、两种评测脚本对比 |
 
 **当前全部阈值常量速查**（详细说明见各文档）：
 
