@@ -41,6 +41,8 @@ vendor/codegraph-main.zip
 tmp/
 temp/
 coverage/
+fix-*.cjs
+_fix_*.cjs
 
 # Local reference/runtime folders
 src/src/
