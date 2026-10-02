@@ -1,6 +1,7 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import * as XLSX from "xlsx";
+import { getAppConfig, getEvaluationConfig, stripConfigCliOptions } from "../src/config/load-config.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -57,8 +58,9 @@ type CaseRecord = {
 };
 
 const workspaceRoot = process.cwd();
-const requestedRun = process.argv[2]?.trim();
-const requestedOutput = process.argv[3]?.trim();
+const exportArgs = stripConfigCliOptions(process.argv.slice(2));
+const requestedRun = exportArgs[0]?.trim();
+const requestedOutput = exportArgs[1]?.trim();
 
 const runPath = await resolveRunPath(requestedRun);
 const rootSummary = await readJson(path.join(runPath, "summary.json"));
@@ -69,7 +71,7 @@ const toolRows: JsonRecord[] = [];
 const contextRows: JsonRecord[] = [];
 const timelineRows: JsonRecord[] = [];
 const validationRows: JsonRecord[] = [];
-const configRows = await readConfigRows(runPath);
+const configRows = await readConfigRows();
 
 for (const caseDirectory of caseDirectories) {
   const caseId = path.basename(caseDirectory);
@@ -225,27 +227,21 @@ async function findCaseDirectories(runDirectory: string): Promise<string[]> {
   return directories;
 }
 
-async function readConfigRows(runDirectory: string): Promise<JsonRecord[]> {
-  const candidates = [path.join(path.dirname(runDirectory), "config.json")];
-
-  for (const candidate of candidates) {
-    const config = await readJson(candidate);
-    if (!config) {
-      continue;
-    }
-
-    return Object.entries(config).map(([parameter, value]) => ({
-      source: candidate,
-      parameter,
-      value: typeof value === "object" ? JSON.stringify(value) : value,
-    }));
-  }
-
-  return [{
-    source: "",
-    parameter: "config",
-    value: "not found",
-  }];
+async function readConfigRows(): Promise<JsonRecord[]> {
+  const config = getAppConfig();
+  // This sheet describes the currently selected YAML, not a historical run snapshot.
+  // Never export model keys, profiles, MCP tokens, or request headers.
+  const parameters = {
+    evaluation: getEvaluationConfig(config),
+    compression: config.compression,
+    reasoning: config.reasoning,
+    model: { provider: config.model.provider, model: config.model.model, maxTokens: config.model.maxTokens },
+  };
+  return Object.entries(parameters).map(([parameter, value]) => ({
+    source: config.configPath ?? "built-in defaults",
+    parameter: `current YAML: ${parameter}`,
+    value: JSON.stringify(value),
+  }));
 }
 
 async function readJson(filePath: string): Promise<JsonRecord | undefined> {

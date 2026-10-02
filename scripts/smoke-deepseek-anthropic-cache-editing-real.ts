@@ -1,3 +1,4 @@
+import { getConfigValue } from "../src/config/load-config.js";
 type AnthropicResponse = {
   id?: string;
   type?: string;
@@ -37,28 +38,28 @@ type EffectVerdict =
   | "rejected"
   | "inconclusive";
 
-const apiKey = process.env.DEEPSEEK_API_KEY?.trim() ??
-  process.env.ANTHROPIC_API_KEY?.trim();
+const apiKey = getConfigValue("model.apiKey")?.trim() ??
+  getConfigValue("tools.webSearch.apiKey")?.trim();
 
 if (!apiKey) {
   throw new Error(
-    "Set DEEPSEEK_API_KEY before running this smoke script.",
+    "Set model.apiKey in your OpenCat YAML config before running this smoke script.",
   );
 }
 
 const baseUrl = (
-  process.env.DEEPSEEK_ANTHROPIC_BASE_URL ??
+  getConfigValue("tools.webSearch.baseUrl") ??
   "https://api.deepseek.com/anthropic"
 ).replace(/\/+$/, "");
-const endpoint = process.env.DEEPSEEK_ANTHROPIC_MESSAGES_URL ??
+const endpoint = getConfigValue("tools.webSearch.messagesUrl") ??
   `${baseUrl}/v1/messages`;
-const model = process.env.DEEPSEEK_ANTHROPIC_MODEL ?? "deepseek-v4-flash";
-const maxTokens = Number(process.env.OPENCAT_CACHE_EDITING_MAX_TOKENS ?? 64);
-const pauseMs = Number(process.env.OPENCAT_CACHE_EDITING_PAUSE_MS ?? 800);
+const model = getConfigValue("tools.webSearch.model") ?? "deepseek-v4-flash";
+const maxTokens = Number(getConfigValue("experiments.cacheEditing.maxTokens") ?? 64);
+const pauseMs = Number(getConfigValue("experiments.cacheEditing.pauseMs") ?? 800);
 const toolResultLines = Number(
-  process.env.OPENCAT_CACHE_EDITING_TOOL_LINES ?? 800,
+  getConfigValue("experiments.cacheEditing.toolLines") ?? 800,
 );
-const runId = process.env.OPENCAT_CACHE_EDITING_RUN_ID ??
+const runId = getConfigValue("experiments.cacheEditing.runId") ??
   `cache_edit_${Date.now().toString(36)}`;
 
 console.log(JSON.stringify({

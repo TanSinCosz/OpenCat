@@ -3,6 +3,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { stringify } from "yaml";
+import { loadAppConfig } from "../src/config/load-config.js";
 
 import { loadMcpConfig } from "../src/mcp/config.js";
 
@@ -15,22 +17,21 @@ test("loadMcpConfig reads local stdio server config", async () => {
   const opencatDir = join(cwd, ".opencat");
   await mkdir(opencatDir, { recursive: true });
   await writeFile(
-    join(opencatDir, "mcp.json"),
-    JSON.stringify({
-      mcpServers: {
-        codegraph: {
+    join(opencatDir, "config.yaml"),
+    stringify({
+      mcp: { stdio: [{
+          name: "codegraph",
           command: "node",
           args: ["vendor/codegraph/dist/bin/codegraph.js", "serve", "--mcp"],
           env: {
             CODEGRAPH_TELEMETRY: "0",
           },
-        },
-      },
+      }] },
     }),
     "utf8",
   );
 
-  const config = loadMcpConfig(cwd);
+  const config = loadMcpConfig(cwd, loadAppConfig({ cwd }));
 
   assert.equal(config.stdio.length, 1);
   assert.equal(config.stdio[0]?.name, "codegraph");

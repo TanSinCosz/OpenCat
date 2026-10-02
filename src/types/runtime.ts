@@ -35,6 +35,7 @@ import {
 import type { ContextProjectionState, ToolResultBudgetState } from "./context.js";
 import type { RunObserver } from "../telemetry/observer.js";
 import type { Message } from "./messages.js";
+import { getAppConfig, type AppConfig } from "../config/load-config.js";
 
 export type MainAgentId = "main";
 export type SubAgentId = `agent_${string}`;
@@ -66,6 +67,7 @@ export interface Runtime {
 
   // Runtime capabilities and configuration.
   cwd: string;
+  appConfig: AppConfig;
   modelRuntimeConfig: ModelRuntimeSettings;
   modelClient: OpenAICompatibleClient;
   systemPrompt?: string;
@@ -104,6 +106,7 @@ export interface CreateRuntimeOptions {
   parentAgentId?: Runtime["parentAgentId"];
   agentType?: Runtime["agentType"];
   cwd?: string;
+  appConfig?: AppConfig;
   modelRuntimeConfig?: ModelRuntimeSettings;
   modelClient?: OpenAICompatibleClient;
   systemPrompt?: string;
@@ -141,6 +144,7 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
   const agentDefinitions = options.agentDefinitions ?? createAgentDefinitions();
   const tools = options.tools ?? createDefaultTools({ agentDefinitions });
   const cwd = options.cwd ?? process.cwd();
+  const appConfig = options.appConfig ?? getAppConfig();
   const requestedModelConfig = options.modelRuntimeConfig;
   if (!requestedModelConfig) {
     throw new Error("createRuntime requires modelRuntimeConfig");
@@ -168,6 +172,7 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
     parentAgentId: options.parentAgentId,
     agentType: options.agentType,
     cwd,
+    appConfig,
     modelRuntimeConfig,
     modelClient,
     systemPrompt: options.systemPrompt,
@@ -181,7 +186,10 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
     MemoryConfig: options.MemoryConfig,
     longTermMemory: options.longTermMemory,
     longTermMemoryConfig: createLongTermMemoryRuntimeConfig(
-      options.longTermMemoryConfig,
+      {
+        ...(options.appConfig ? { ...appConfig.memory, fileMemoryDirectory: appConfig.memory.directory } : {}),
+        ...options.longTermMemoryConfig,
+      },
       { sessionId, agentId },
     ),
     transcriptStore,

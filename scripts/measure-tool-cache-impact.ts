@@ -144,7 +144,6 @@ async function snapshot(
     transcriptStore: false,
     tools,
     systemPrompt,
-    messages: state.Messages,
   });
   const messagesForQuery = await buildMessagesForQuery(runtime, state);
   const request = await createStreamRequest(runtime, messagesForQuery.messages);

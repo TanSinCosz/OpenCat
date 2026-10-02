@@ -33,7 +33,7 @@
 └── .dream.lock                             ← Dream 并发锁（任务结束后移除）
 ```
 
-`project-key` 由 `cwd` 路径通过 `createProjectMemoryKey()` 转换得来：将绝对路径中的盘符、分隔符替换为可读的 key 名。例如 `C:\Users\Administrator\Desktop\opencat-typescirpt` → `C-Users-Administrator-Desktop-opencat-typescirpt-854479bd`（末尾 8 位是路径 hash 的截断）。如果配置了 `fileMemoryDirectory` 环境变量，则直接使用该路径，不推导 project key。
+`project-key` 由 `cwd` 路径通过 `createProjectMemoryKey()` 转换得来：将绝对路径中的盘符、分隔符替换为可读的 key 名。例如 `C:\Users\Administrator\Desktop\opencat-typescirpt` → `C-Users-Administrator-Desktop-opencat-typescirpt-854479bd`（末尾 8 位是路径 hash 的截断）。如果配置了 YAML 的 `memory.directory`，则直接使用该路径，不推导 project key。
 
 #### 8.1.2 基础常量（`file-memory.ts`）
 
@@ -220,7 +220,7 @@ conversation transcript，也不会完整注入主模型上下文。每次召回
 | `agentId`              | `string`  | —                 | Agent 标识                                   |
 | `runId`                | `string`  | —                 | 运行标识                                     |
 
-`createLongTermMemoryRuntimeConfig()` 从 options 和 identity 中合并默认值。运行时工厂默认 `autoInject: false`、`autoExtract: false`；当前 `cli.ts` 和 `web-cli.ts` 会显式设置二者为 `true`。因此是否启用自动注入和自动提取取决于宿主入口的配置，不能只看 runtime 工厂默认值。
+`createLongTermMemoryRuntimeConfig()` 从 options 和 identity 中合并默认值。运行时工厂默认 `autoInject: false`、`autoExtract: false`；当前 `cli.ts` 和 `web-cli.ts` 从统一 YAML 的 `memory.autoInject`、`memory.autoExtract` 读取这两个值。因此是否启用自动注入和自动提取取决于宿主入口的配置，不能只看 runtime 工厂默认值。
 
 ---
 

@@ -149,7 +149,7 @@ applyAutoCompression(runtime, state, options)
 **触发条件**（`query.ts:828` 中的 `getAutoCompressionRequest()`）：
 
 1. `canRuntimeAutoCompress()` — `agentRole !== "session"` 且 `agentType !== "session_memory"`
-2. `estimateMessagesForQueryTokens(messagesForQuery) ≥ getAutoCompressTriggerTokens()`（默认 180K，可通过 `OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS` 环境变量覆盖）
+2. `estimateMessagesForQueryTokens(messagesForQuery) ≥ getAutoCompressTriggerTokens()`（默认 180K，可通过 `compression.autoCompressTriggerTokens` YAML 字段设置）
 
 **主 agent 路径**（`applyMainSessionMemoryCompression`）——**不 fork 子 agent，直接使用已有的 Session Memory 内容**：
 
@@ -223,7 +223,7 @@ The original result was persisted once and was not re-executed.
 **候选选择**（`createBulkyToolCompactionsWithStats()`）：
 
 - 从 `collectBulkyToolResultCandidates()` 收集所有 bulky 工具的非 tool_result
-- 保护尾部候选（`calculateProjectionRecentTailStart()` 之后的，或通过 `OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT` 环境变量指定保留最近 N 个）
+- 保护尾部候选（`calculateProjectionRecentTailStart()` 之后的，或通过 `compression.bulkyToolResultKeepRecent` YAML 字段指定保留最近 N 个）
 - 余下的按最旧优先处理，跳过 size ≤ 1K tokens 的结果
 - 已达 context target (80K) 后停止
 

@@ -1,11 +1,12 @@
+import { getConfigValue } from "../src/config/load-config.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
+const apiKey = getConfigValue("model.apiKey")?.trim();
 
 if (!apiKey) {
-  throw new Error("Missing DEEPSEEK_API_KEY environment variable.");
+  throw new Error("Missing model.apiKey in the OpenCat YAML config.");
 }
 
 const [{ query }, { createRuntime }, { createState }, { createMessage }] =
@@ -43,9 +44,9 @@ const runtime = createRuntime({
   cwd: await mkdtemp(join(tmpdir(), "opencat-real-auto-compress-")),
   modelRuntimeConfig: {
     apiKey,
-    baseUrl: process.env.DEEPSEEK_BASE_URL,
-    model: process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash",
-    maxTokens: Number(process.env.DEEPSEEK_MAX_TOKENS ?? 2048),
+    baseUrl: getConfigValue("model.baseUrl"),
+    model: getConfigValue("model.model") ?? "deepseek-v4-flash",
+    maxTokens: Number(getConfigValue("model.maxTokens") ?? 2048),
   },
   MemoryConfig: {
     embedder: {
@@ -80,7 +81,7 @@ for await (const event of query(runtime, state, { maxTurns: 1 })) {
           hasSessionMemorySummary: event.messages.some(
             (message) =>
               message.role === "user" &&
-              message.content.includes("<session_memory>"),
+              typeof message.content === "string" && message.content.includes("<session_memory>"),
           ),
         }),
       );
@@ -116,7 +117,7 @@ console.log(
       autoCompressSummaryCount: state.autoCompress.summaries.length,
       activeSummaryId: state.autoCompress.summaries.at(-1)?.id,
       snippedContentTriggerTokens:
-        process.env.OPENCAT_SNIPPED_CONTENT_AUTO_COMPRESS_TRIGGER_TOKENS,
+        getConfigValue("compression.snippedContentAutoCompressTriggerTokens"),
     },
     null,
     2,

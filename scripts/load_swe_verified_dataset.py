@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -22,7 +21,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--source",
-        default=os.getenv("SWE_VERIFIED_DATASET_SOURCE", DEFAULT_SOURCE),
+        default=DEFAULT_SOURCE,
         help=(
             "Local JSON/JSONL file or HuggingFace dataset name. "
             f"Defaults to {DEFAULT_SOURCE}."
@@ -30,7 +29,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--split",
-        default=os.getenv("SWE_VERIFIED_DATASET_SPLIT", DEFAULT_SPLIT),
+        default=DEFAULT_SPLIT,
         help=f"HuggingFace dataset split. Defaults to {DEFAULT_SPLIT}.",
     )
     parser.add_argument(
@@ -41,7 +40,7 @@ def main() -> None:
     parser.add_argument(
         "--limit",
         type=positive_int,
-        default=int(os.getenv("SWE_VERIFIED_LIMIT", "5")),
+        default=5,
         help="Maximum number of instances to write.",
     )
     parser.add_argument(

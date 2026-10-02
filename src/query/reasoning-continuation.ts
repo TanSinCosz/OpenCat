@@ -1,3 +1,4 @@
+import { getConfigValue } from "../config/load-config.js";
 import type { OpenAICompatibleClient } from "../openai-compatible/model-client.js";
 import type {
   ModelAssistantMessage,
@@ -362,28 +363,28 @@ function isSyntheticNoFinalAnswerContent(content: string): boolean {
 
 function getReasoningContinuationOptions(): ReasoningContinuationOptions {
   return {
-    maxContinuationRounds: readPositiveIntegerEnv(
-      "OPENCAT_REASONING_CONTINUATION_ROUNDS",
+    maxContinuationRounds: readPositiveIntegerConfig(
+      "reasoning.continuationRounds",
       DEFAULT_REASONING_CONTINUATION_ROUNDS,
     ),
   };
 }
 
 function getContinuationMaxTokens(runtime: Runtime): number {
-  return readPositiveIntegerEnv(
-    "OPENCAT_REASONING_CONTINUATION_MAX_TOKENS",
+  return readPositiveIntegerConfig(
+    "reasoning.continuationMaxTokens",
     runtime.modelRuntimeConfig.maxTokens,
   );
 }
 
 function getFinalAnswerMaxTokens(runtime: Runtime): number {
-  return readPositiveIntegerEnv(
-    "OPENCAT_REASONING_FINAL_MAX_TOKENS",
+  return readPositiveIntegerConfig(
+    "reasoning.finalMaxTokens",
     runtime.modelRuntimeConfig.maxTokens,
   );
 }
 
-function readPositiveIntegerEnv(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
+function readPositiveIntegerConfig(name: string, fallback: number): number {
+  const value = Number(getConfigValue(name));
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }

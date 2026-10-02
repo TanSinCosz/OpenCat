@@ -454,6 +454,7 @@ function createChildAgentRuntime(
     parentAgentId: parent.agentId,
     agentType: options.agentDefinition.agentType,
     cwd: worktree?.worktreePath ?? parent.cwd,
+    appConfig: parent.appConfig,
     modelRuntimeConfig: {
       ...parent.modelRuntimeConfig,
       model: options.mode === "fork"

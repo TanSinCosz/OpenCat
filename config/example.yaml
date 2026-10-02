@@ -1,0 +1,135 @@
+# Copy to .opencat/config.yaml (git-ignored), then fill in apiKey.
+# All application settings come from this one YAML file. No env overrides.
+model:
+  provider: deepseek
+  apiKey: ""
+  baseUrl: https://api.deepseek.com
+  model: deepseek-v4-pro
+  maxTokens: 32768
+  reasoningEffort: max
+  # userId: cache-worker-1
+  # headers: { X-Project: opencat }
+
+memory:
+  enabled: true
+  autoInject: true
+  autoExtract: true
+  autoInjectTopK: 6
+  searchThreshold: 0.1
+  maxInjectedChars: 40000
+  userId: default-user
+  dreamRecentSessions: 8
+  # directory: .opencat/memory/files
+  # The following settings are only used by the legacy vector-memory API.
+  embedding: {}
+  # embedding:
+  #   apiKey: ""
+  #   baseUrl: https://embedding.example/v1
+  #   model: text-embedding-3-small
+  #   dimensions: 1536
+  llm: {} # Inherits the selected main model unless configured explicitly.
+  vectorStore: {}
+  # vectorStore: { dbPath: .opencat/memory/vector_store.db, dimensions: 1536 }
+
+compression:
+  autoCompressTriggerTokens: 180000
+  historySnipTargetTokens: 80000
+  historySnipCancelContextTokens: 120000
+  bulkyToolResultCompactContextTokens: 180000
+  bulkyToolResultCompactTargetContextTokens: 80000
+  recentTailTargetTokens: 30000
+  recentTailMaxTokens: 40000
+  recentTailMinApiMessages: 12
+  recentTailMinUserContentMessages: 3
+  # Legacy optional tail policies; omit to keep the current projection policy.
+  # historySnipMinRecentMessages: 4
+  # bulkyToolResultKeepRecent: 0
+  # snippedContentAutoCompressTriggerTokens: 180000
+
+reasoning:
+  continuationRounds: 2
+  # continuationMaxTokens: 32768
+  # finalMaxTokens: 32768
+
+session:
+  resume: true
+  transcriptHydrate: auto
+  # id: session_example
+
+web:
+  port: 5177
+  url: http://localhost:5177
+
+tools:
+  # ripgrepPath: /usr/bin/rg
+  webSearch: {} # Defaults to the main model's key/model and derived Anthropic URL.
+  # webSearch:
+  #   apiKey: ""
+  #   model: deepseek-v4-pro
+  #   baseUrl: https://api.deepseek.com/anthropic
+  #   messagesUrl: https://api.deepseek.com/anthropic/v1/messages
+
+workspace: {}
+# workspace:
+#   patchSnapshotDir: .opencat/patches
+#   sweWorkspaceDir: /absolute/path/to/swe-workspaces
+#   sweRepoCacheDir: /absolute/path/to/swe-repos
+
+mcp:
+  stdio: []
+  http: []
+  # stdio:
+  #   - name: codegraph
+  #     command: node
+  #     args: [vendor/codegraph/dist/bin/codegraph.js, serve, --mcp]
+  #     env: { CODEGRAPH_TELEMETRY: "0" }
+  # http:
+  #   - name: remote-tools
+  #     url: https://mcp.example.com/mcp
+  #     auth: { type: bearer, token: "" }
+
+evaluation:
+  active: serial # Which settings the dashboard and Web SWE sessions use.
+  dashboardPort: 5188
+  # directory: .opencat/evals/swe-lite
+  # patchDirectory: .opencat/evals/swe-lite/patches
+  serial:
+    limit: 100
+    concurrency: 1
+    phases: [investigate, fix]
+    allowNetworkClone: false
+    allowWebTools: false
+    allowDirtyWorkspaces: false
+    # datasetPath: .opencat/evals/swe-lite/dataset.jsonl
+    # outputDir: .opencat/evals/swe-lite
+    # runId: my-run
+    # runPrefix: swe_serial
+    # model: deepseek-v4-pro
+    # reposDir: /absolute/path/to/repos
+    # workspaceRoot: /absolute/path/to/swe-workspaces
+    # repoCacheRoot: /absolute/path/to/swe-repos
+    # workspaceNamespace: swe-lite
+    # contextCompression: { enableProjection: true, autoCompressTriggerTokens: 180000 }
+  verified:
+    limit: 5
+    userRounds: 1
+    version: v1
+    allowNetworkClone: false
+    allowWebTools: false
+    # autoPrepareDataset: false
+    # datasetPath: .opencat/evals/swe-verified-cache/dataset.jsonl
+    # datasetSource: princeton-nlp/SWE-bench_Verified
+    # datasetSplit: test
+    # python: python3
+    # outputDir: .opencat/evals/swe-verified-cache
+
+# Real API smoke probes share model.apiKey and have optional per-probe budgets.
+experiments:
+  # betaBaseUrl: https://api.deepseek.com/beta
+  abaCache: {} # maxTokens, pauseMs, prefixLines, runId
+  agentCache: {} # model, maxTokens, pauseMs, runId
+  cacheEditing: {} # maxTokens, pauseMs, toolLines, runId
+  cacheField: {} # pauseMs, runId
+  cacheOrder: {} # rounds, pauseMs, toolChoice, runId
+  prefixReasoning: {} # model, firstMaxTokens, secondMaxTokens
+  userIdCache: {} # maxTokens

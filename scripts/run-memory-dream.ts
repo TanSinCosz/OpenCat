@@ -1,3 +1,4 @@
+import { getAppConfig, getConfigValue } from "../src/config/load-config.js";
 import { runMemoryDream } from "../src/Memory/auto-dream.js";
 import { loadConfig } from "../src/config/load-config.js";
 import { createRuntime } from "../src/types/runtime.js";
@@ -27,6 +28,8 @@ const runtime = createRuntime({
     },
   },
   longTermMemoryConfig: {
+    ...getAppConfig().memory,
+    fileMemoryDirectory: getAppConfig().memory.directory,
     enabled: true,
     autoInject: false,
     autoExtract: false,
@@ -34,7 +37,7 @@ const runtime = createRuntime({
 });
 
 const recentSessionLimit = Number(
-  process.env.OPENCAT_MEMORY_DREAM_RECENT_SESSIONS ?? 8,
+  getConfigValue("memory.dreamRecentSessions") ?? 8,
 );
 
 const result = await runMemoryDream(runtime, createState(), {

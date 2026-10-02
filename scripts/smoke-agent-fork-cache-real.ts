@@ -1,3 +1,4 @@
+import { getConfigValue } from "../src/config/load-config.js";
 import { createOpenAICompatibleClient } from "../src/openai-compatible/model-client.js";
 import type {
   ModelStreamRequest,
@@ -10,23 +11,23 @@ import { createMessage, type Message } from "../src/types/messages.js";
 import { createRuntime, type RuntimeAgentId } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 
-const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
+const apiKey = getConfigValue("model.apiKey")?.trim();
 
 if (!apiKey) {
-  throw new Error("Set DEEPSEEK_API_KEY before running this smoke script.");
+  throw new Error("Set model.apiKey in your OpenCat YAML config before running this smoke script.");
 }
 
 const deepSeekApiKey = apiKey;
-const model = process.env.OPENCAT_AGENT_CACHE_MODEL ?? "deepseek-v4-pro";
-const maxTokens = Number(process.env.OPENCAT_AGENT_CACHE_MAX_TOKENS ?? 1);
-const pauseMs = Number(process.env.OPENCAT_AGENT_CACHE_PAUSE_MS ?? 1200);
-const runId = process.env.OPENCAT_AGENT_CACHE_RUN_ID ??
+const model = getConfigValue("experiments.agentCache.model") ?? "deepseek-v4-pro";
+const maxTokens = Number(getConfigValue("experiments.agentCache.maxTokens") ?? 1);
+const pauseMs = Number(getConfigValue("experiments.agentCache.pauseMs") ?? 1200);
+const runId = getConfigValue("experiments.agentCache.runId") ??
   `agent_cache_${Date.now().toString(36)}`;
 
 const client = createOpenAICompatibleClient({
   config: {
     apiKey: deepSeekApiKey,
-    baseUrl: process.env.DEEPSEEK_BASE_URL,
+    baseUrl: getConfigValue("model.baseUrl"),
     model,
     maxTokens,
     reasoningEffort: "max",
@@ -114,7 +115,7 @@ async function createMeasuredRequest(options: {
     agentType: options.agentRole === "main" ? undefined : "worker",
     modelRuntimeConfig: {
       apiKey: deepSeekApiKey,
-      baseUrl: process.env.DEEPSEEK_BASE_URL,
+      baseUrl: getConfigValue("model.baseUrl"),
       model,
       maxTokens,
       reasoningEffort: "max",
@@ -123,7 +124,6 @@ async function createMeasuredRequest(options: {
     MemoryConfig: createMemoryConfig(),
     tools,
     systemPrompt: options.systemPrompt,
-    messages: state.Messages,
     transcriptStore: false,
   });
   const messagesForQuery = await buildMessagesForQuery(runtime, state);

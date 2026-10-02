@@ -1,15 +1,17 @@
 import OpenAI from "openai";
 import { LLM, LLMResponse } from "./type.js";
 import { LLMConfig, Message } from "../type.js";
+import { createOpenAICompatibleSdkClient } from "../../openai-compatible/transport.js";
 
 export class OpenAIStructuredLLM implements LLM {
   private openai: OpenAI;
   private model: string;
 
   constructor(config: LLMConfig) {
-    this.openai = new OpenAI({
-      apiKey: config.apiKey,
-      baseURL: config.baseURL,
+    this.openai = createOpenAICompatibleSdkClient({
+      provider: "openai-compatible",
+      apiKey: config.apiKey ?? "",
+      baseUrl: config.baseURL,
       ...(config.timeout != null && { timeout: config.timeout }),
     });
     this.model = config.model || "gpt-5-mini";

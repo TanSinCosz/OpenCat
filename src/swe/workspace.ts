@@ -1,3 +1,4 @@
+import { getConfigValue } from "../config/load-config.js";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -121,7 +122,7 @@ export function resolveSweWorkspaceRoot(
 ): string {
   return path.resolve(
     options.workspaceRoot?.trim() ||
-      process.env.OPENCAT_SWE_WORKSPACE_DIR?.trim() ||
+      getConfigValue("workspace.sweWorkspaceDir")?.trim() ||
       path.join(os.homedir(), ".opencat/swe-workspaces"),
   );
 }
@@ -131,7 +132,7 @@ export function resolveSweRepoCacheRoot(
 ): string {
   return path.resolve(
     options.repoCacheRoot?.trim() ||
-      process.env.OPENCAT_SWE_REPO_CACHE_DIR?.trim() ||
+      getConfigValue("workspace.sweRepoCacheDir")?.trim() ||
       path.join(os.homedir(), ".opencat/swe-repos"),
   );
 }

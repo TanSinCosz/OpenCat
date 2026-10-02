@@ -1,3 +1,4 @@
+import { getConfigValue, withAppConfig } from "../config/load-config.js";
 import { randomUUID } from "node:crypto";
 import type { ModelMessage } from "../openai-compatible/types.js";
 import { applyAutoCompressSummary } from "../auto-compress/index.js";
@@ -53,6 +54,13 @@ export type SnippedContentOnlyStats = {
 };
 
 export async function buildMessagesForQuery(
+  runtime: Runtime,
+  state: State,
+): Promise<MessagesForQuery> {
+  return withAppConfig(runtime.appConfig, () => buildMessagesForQueryInScope(runtime, state));
+}
+
+async function buildMessagesForQueryInScope(
   runtime: Runtime,
   state: State,
 ): Promise<MessagesForQuery> {
@@ -1206,8 +1214,8 @@ function createHistorySnipId(): HistorySnipId {
 }
 
 function getHistorySnipTargetTokens(): number {
-  return getPositiveIntegerEnv(
-    "OPENCAT_HISTORY_SNIP_TARGET_TOKENS",
+  return getPositiveIntegerConfig(
+    "compression.historySnipTargetTokens",
     DEFAULT_HISTORY_SNIP_TARGET_TOKENS,
   );
 }
@@ -1217,55 +1225,55 @@ function getDesiredHistorySnipTokens(): number {
 }
 
 function getProjectionRecentTailTargetTokens(): number {
-  return getPositiveIntegerEnv(
-    "OPENCAT_PROJECTION_RECENT_TAIL_TARGET_TOKENS",
+  return getPositiveIntegerConfig(
+    "compression.recentTailTargetTokens",
     DEFAULT_PROJECTION_RECENT_TAIL_TARGET_TOKENS,
   );
 }
 
 function getProjectionRecentTailMaxTokens(): number {
-  return getPositiveIntegerEnv(
-    "OPENCAT_PROJECTION_RECENT_TAIL_MAX_TOKENS",
+  return getPositiveIntegerConfig(
+    "compression.recentTailMaxTokens",
     DEFAULT_PROJECTION_RECENT_TAIL_MAX_TOKENS,
   );
 }
 
 function getProjectionRecentTailMinApiMessages(): number {
-  return getNonNegativeIntegerEnv(
-    "OPENCAT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES",
+  return getNonNegativeIntegerConfig(
+    "compression.recentTailMinApiMessages",
     DEFAULT_PROJECTION_RECENT_TAIL_MIN_API_MESSAGES,
   );
 }
 
 function getProjectionRecentTailMinUserContentMessages(): number {
-  const configured = getOptionalNonNegativeIntegerEnv(
-    "OPENCAT_PROJECTION_RECENT_TAIL_MIN_USER_CONTENT_MESSAGES",
+  const configured = getOptionalNonNegativeIntegerConfig(
+    "compression.recentTailMinUserContentMessages",
   );
 
   if (configured !== null) {
     return configured;
   }
 
-  return getNonNegativeIntegerEnv(
-    "OPENCAT_PROJECTION_RECENT_TAIL_MIN_TEXT_MESSAGES",
+  return getNonNegativeIntegerConfig(
+    "compression.recentTailMinUserContentMessages",
     DEFAULT_PROJECTION_RECENT_TAIL_MIN_USER_CONTENT_MESSAGES,
   );
 }
 
 function getLegacyHistorySnipMinRecentMessages(): number | null {
-  return getOptionalNonNegativeIntegerEnv(
-    "OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES",
+  return getOptionalNonNegativeIntegerConfig(
+    "compression.historySnipMinRecentMessages",
   );
 }
 
 function getLegacyBulkyToolResultKeepRecentCount(): number | null {
-  return getOptionalNonNegativeIntegerEnv(
-    "OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT",
+  return getOptionalNonNegativeIntegerConfig(
+    "compression.bulkyToolResultKeepRecent",
   );
 }
 
-function getPositiveIntegerEnv(name: string, fallback: number): number {
-  const configured = Number(process.env[name]);
+function getPositiveIntegerConfig(name: string, fallback: number): number {
+  const configured = Number(getConfigValue(name));
 
   if (Number.isFinite(configured) && configured > 0) {
     return Math.floor(configured);
@@ -1274,12 +1282,12 @@ function getPositiveIntegerEnv(name: string, fallback: number): number {
   return fallback;
 }
 
-function getOptionalNonNegativeIntegerEnv(name: string): number | null {
-  if (!(name in process.env)) {
+function getOptionalNonNegativeIntegerConfig(name: string): number | null {
+  if (getConfigValue(name) === undefined) {
     return null;
   }
 
-  const configured = Number(process.env[name]);
+  const configured = Number(getConfigValue(name));
 
   if (Number.isFinite(configured) && configured >= 0) {
     return Math.floor(configured);
@@ -1288,8 +1296,8 @@ function getOptionalNonNegativeIntegerEnv(name: string): number | null {
   return null;
 }
 
-function getNonNegativeIntegerEnv(name: string, fallback: number): number {
-  const configured = Number(process.env[name]);
+function getNonNegativeIntegerConfig(name: string, fallback: number): number {
+  const configured = Number(getConfigValue(name));
 
   if (Number.isFinite(configured) && configured >= 0) {
     return Math.floor(configured);
@@ -1429,22 +1437,22 @@ function isProjectedContextOverBulkyCompactThreshold(
 }
 
 function getBulkyToolResultCompactContextTokens(): number {
-  return getPositiveIntegerEnv(
-    "OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS",
+  return getPositiveIntegerConfig(
+    "compression.bulkyToolResultCompactContextTokens",
     DEFAULT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS,
   );
 }
 
 function getBulkyToolResultCompactTargetContextTokens(): number {
-  return getPositiveIntegerEnv(
-    "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+  return getPositiveIntegerConfig(
+    "compression.bulkyToolResultCompactTargetContextTokens",
     DEFAULT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS,
   );
 }
 
 function getHistorySnipCancelContextTokens(): number {
-  return getPositiveIntegerEnv(
-    "OPENCAT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS",
+  return getPositiveIntegerConfig(
+    "compression.historySnipCancelContextTokens",
     DEFAULT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS,
   );
 }

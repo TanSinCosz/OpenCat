@@ -1,7 +1,8 @@
-apiKeyEnvVar: ANTHROPIC_API_KEY
-baseUrl: https://api.anthropic.com/v1
-model: claude-sonnet-4-20250514
-maxTokens: 4096
-# systemPrompt: You are a helpful assistant.
-headers:
-  anthropic-version: "2023-06-01"
+# Main-model requests use Chat Completions. Use a compatible gateway for Claude.
+# Copy to a private YAML and fill in the gateway URL and API key.
+model:
+  provider: openai-compatible
+  apiKey: ""
+  baseUrl: https://gateway.example/v1
+  model: claude-sonnet-4-20250514
+  maxTokens: 4096

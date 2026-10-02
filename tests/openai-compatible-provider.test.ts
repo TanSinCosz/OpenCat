@@ -9,6 +9,47 @@ import {
 import { createOpenAICompatibleClient } from "../src/openai-compatible/model-client.js";
 import { normalizeModelRuntimeSettings } from "../src/types/config.js";
 import type { ModelCreateRequest } from "../src/openai-compatible/types.js";
+import { createOpenAICompatibleSdkClient } from "../src/openai-compatible/transport.js";
+
+test("SDK configuration does not inherit environment base URL or account headers", () => {
+  const keys = ["OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"] as const;
+  const previous = keys.map((key) => process.env[key]);
+  try {
+    process.env.OPENAI_BASE_URL = "https://environment.example/v1";
+    process.env.OPENAI_ORG_ID = "environment-org";
+    process.env.OPENAI_PROJECT_ID = "environment-project";
+    const client = createOpenAICompatibleSdkClient({ provider: "openai-compatible", apiKey: "yaml-key" });
+    assert.equal(client.baseURL, "https://api.openai.com/v1");
+    assert.equal(client.organization, null);
+    assert.equal(client.project, null);
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
+});
+
+test("SDK request headers come from explicit configuration rather than environment", async () => {
+  const previous = process.env.OPENAI_CUSTOM_HEADERS;
+  let headers: Headers | undefined;
+  try {
+    process.env.OPENAI_CUSTOM_HEADERS = "X-Environment: unexpected";
+    const client = createOpenAICompatibleClient({
+      config: { provider: "openai-compatible", apiKey: "yaml-key", model: "model", maxTokens: 32, headers: { "X-Yaml": "configured" } },
+      fetchImpl: async (_input, init) => {
+        headers = new Headers(init?.headers);
+        return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }] }), { headers: { "Content-Type": "application/json" } });
+      },
+    });
+    await client.create({ model: "model", messages: [{ role: "user", content: "hello" }] });
+    assert.equal(headers?.get("X-Yaml"), "configured");
+    assert.equal(headers?.get("X-Environment"), null);
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_CUSTOM_HEADERS;
+    else process.env.OPENAI_CUSTOM_HEADERS = previous;
+  }
+});
 
 test("DeepSeek profile preserves documented DeepSeek request extensions", async () => {
   const capture = createFetchCapture();
@@ -222,7 +263,7 @@ test("DeepSeek profile rejects image input before sending the request", async ()
   assert.equal(capture.url, "");
 });
 
-test("missing credentials report the provider-specific environment variable", async () => {
+test("missing credentials identify the unified YAML API key field", async () => {
   const client = createOpenAICompatibleClient({
     config: {
       provider: "volcengine",
@@ -237,7 +278,7 @@ test("missing credentials report the provider-specific environment variable", as
       model: "deepseek-v4-pro",
       messages: [{ role: "user", content: "hello" }],
     }),
-    /Missing Volcengine Ark credentials.*ARK_API_KEY/,
+    /Missing Volcengine Ark credentials.*model.apiKey/,
   );
 });
 

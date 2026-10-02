@@ -1,3 +1,5 @@
+import { getAppConfig } from "../src/config/load-config.js";
+import { createYamlConfigValues } from "./yaml-config-fixture.js";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +19,8 @@ import { query } from "../src/query.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 import { createMessage } from "../src/types/messages.js";
+
+const configValues = createYamlConfigValues();
 
 test("query auto-compresses oversized projected context", async () => {
   const createRequests: ModelCreateRequest[] = [];
@@ -205,7 +209,7 @@ test("auto-compress clears bulky compact state but preserves recent group budget
 
 test("query compacts visible snip content-only history after session memory covers it", async () => {
   const originalAutoCompressTrigger =
-    process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS;
+    configValues["compression.autoCompressTriggerTokens"];
   const streamRequests: ModelStreamRequest[] = [];
   const client: OpenAICompatibleClient = {
     async create() {
@@ -269,14 +273,15 @@ test("query compacts visible snip content-only history after session memory cove
   });
 
   try {
-    process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS = "10";
+    configValues["compression.autoCompressTriggerTokens"] = "10";
+    runtime.appConfig = getAppConfig();
 
     for await (const _event of query(runtime, state, { maxTurns: 1 })) {
       // Drain the query stream.
     }
   } finally {
-    restoreEnv(
-      "OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS",
+    restoreConfigValue(
+      "compression.autoCompressTriggerTokens",
       originalAutoCompressTrigger,
     );
   }
@@ -617,11 +622,11 @@ function createMemoryConfig() {
   };
 }
 
-function restoreEnv(name: string, value: string | undefined): void {
+function restoreConfigValue(name: string, value: string | undefined): void {
   if (value === undefined) {
-    delete process.env[name];
+    delete configValues[name];
     return;
   }
 
-  process.env[name] = value;
+  configValues[name] = value;
 }

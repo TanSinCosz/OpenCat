@@ -14,7 +14,7 @@ export type ModelProvider = "deepseek" | "volcengine" | "openai-compatible";
 export interface ProviderProfile {
   name: ModelProvider;
   displayName: string;
-  apiKeyEnvironmentVariable: string;
+  apiKeyConfigField: string;
   defaultBaseUrl?: string;
   /** Provider-only fields accepted in assistant history messages. */
   assistantMessageExtensions: ReadonlySet<"prefix" | "reasoning_content">;
@@ -34,7 +34,7 @@ export interface ProviderSettings {
 const DEEPSEEK_PROFILE: ProviderProfile = {
   name: "deepseek",
   displayName: "DeepSeek",
-  apiKeyEnvironmentVariable: "DEEPSEEK_API_KEY",
+  apiKeyConfigField: "model.apiKey",
   defaultBaseUrl: "https://api.deepseek.com",
   assistantMessageExtensions: new Set(["prefix", "reasoning_content"]),
   requestExtensions: new Set(["user_id", "thinking", "reasoning_effort"]),
@@ -44,7 +44,7 @@ const DEEPSEEK_PROFILE: ProviderProfile = {
 const VOLCENGINE_PROFILE: ProviderProfile = {
   name: "volcengine",
   displayName: "Volcengine Ark",
-  apiKeyEnvironmentVariable: "ARK_API_KEY",
+  apiKeyConfigField: "model.apiKey",
   defaultBaseUrl: "https://ark.cn-beijing.volces.com/api/v3",
   assistantMessageExtensions: new Set(),
   requestExtensions: new Set(),
@@ -54,7 +54,7 @@ const VOLCENGINE_PROFILE: ProviderProfile = {
 const OPENAI_COMPATIBLE_PROFILE: ProviderProfile = {
   name: "openai-compatible",
   displayName: "OpenAI-compatible provider",
-  apiKeyEnvironmentVariable: "OPENAI_API_KEY",
+  apiKeyConfigField: "model.apiKey",
   assistantMessageExtensions: new Set(),
   requestExtensions: new Set(["reasoning_effort"]),
   userContentParts: new Set(["text", "image_url"]),

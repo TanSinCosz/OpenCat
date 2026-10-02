@@ -1,3 +1,4 @@
+import { getConfigValue } from "../../config/load-config.js";
 import { spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import os from "node:os";
@@ -18,8 +19,7 @@ export async function resolveRipgrepCommand(): Promise<string> {
     }
 
     const candidates = unique([
-        process.env.OPENCAT_RG_PATH,
-        process.env.RIPGREP_PATH,
+        getConfigValue("tools.ripgrepPath"),
         "rg",
         ...wellKnownRipgrepCandidates(),
         ...(await discoverVsCodeExtensionRipgrepCandidates()),
@@ -33,7 +33,7 @@ export async function resolveRipgrepCommand(): Promise<string> {
     }
 
     throw new Error(
-        "ripgrep executable not found. Install rg, add it to PATH before starting OpenCat, or set OPENCAT_RG_PATH to rg.exe.",
+        "ripgrep executable not found. Install rg, add it to PATH before starting OpenCat, or set tools.ripgrepPath in YAML to rg.exe.",
     );
 }
 

@@ -1,3 +1,4 @@
+import { createYamlConfigValues } from "./yaml-config-fixture.js";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,9 +15,11 @@ import { createMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 
+const configValues = createYamlConfigValues();
+
 test("query recovers output truncation with ordinary chat messages", async () => {
-  const previousRounds = process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS;
-  process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS = "2";
+  const previousRounds = configValues["reasoning.continuationRounds"];
+  configValues["reasoning.continuationRounds"] = "2";
 
   try {
     const streamRequests: ModelStreamRequest[] = [];
@@ -109,16 +112,16 @@ test("query recovers output truncation with ordinary chat messages", async () =>
     );
   } finally {
     if (previousRounds === undefined) {
-      delete process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS;
+      delete configValues["reasoning.continuationRounds"];
     } else {
-      process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS = previousRounds;
+      configValues["reasoning.continuationRounds"] = previousRounds;
     }
   }
 });
 
 test("query preserves visible partial content when recovering output truncation", async () => {
-  const previousRounds = process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS;
-  process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS = "1";
+  const previousRounds = configValues["reasoning.continuationRounds"];
+  configValues["reasoning.continuationRounds"] = "1";
 
   try {
     const streamRequests: ModelStreamRequest[] = [];
@@ -183,9 +186,9 @@ test("query preserves visible partial content when recovering output truncation"
     assert.equal(finalMessage.content, "partial answer\ncontinued answer");
   } finally {
     if (previousRounds === undefined) {
-      delete process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS;
+      delete configValues["reasoning.continuationRounds"];
     } else {
-      process.env.OPENCAT_REASONING_CONTINUATION_ROUNDS = previousRounds;
+      configValues["reasoning.continuationRounds"] = previousRounds;
     }
   }
 });

@@ -1,3 +1,4 @@
+import { getAppConfig, getConfigValue, getEvaluationConfig } from "./config/load-config.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -5,7 +6,6 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, parse } from "node:path";
 import { promisify } from "node:util";
 
-import { loadConfig } from "./config/load-config.js";
 import { createMemoryConfig } from "./Memory/config.js";
 import { closeMcpConnections } from "./mcp/index.js";
 import { createToolsWithConfiguredMcp } from "./mcp/config.js";
@@ -129,6 +129,7 @@ interface CreateWebCliSessionOptions {
 async function createWebCliSession(
   options: CreateWebCliSessionOptions,
 ): Promise<WebCliSession> {
+  const config = getAppConfig();
   const sessionId = options.sessionId ?? createSessionId();
   const sweDatasetDir = resolveSweDatasetDirectoryForSession(
     process.cwd(),
@@ -138,7 +139,7 @@ async function createWebCliSession(
   const runtimeCwd = options.cwd ??
     await resolveSessionRuntimeCwd(sessionId, sweDatasetDir) ??
     process.cwd();
-  const { tools, mcpConnections } = await createToolsWithConfiguredMcp(runtimeCwd);
+  const { tools, mcpConnections } = await createToolsWithConfiguredMcp(runtimeCwd, config);
   const transcriptStore = createTranscriptStore({
     cwd: runtimeCwd,
     sessionId,
@@ -149,11 +150,12 @@ async function createWebCliSession(
   const runtime = createRuntime({
     cwd: runtimeCwd,
     sessionId,
-    modelRuntimeConfig: loadConfig(),
-    MemoryConfig: createMemoryConfig({ cwd: runtimeCwd }),
+    appConfig: config,
+    modelRuntimeConfig: config.model,
+    MemoryConfig: createMemoryConfig({ cwd: runtimeCwd, config }),
     longTermMemoryConfig: {
-      autoInject: true,
-      autoExtract: true,
+      ...config.memory,
+      fileMemoryDirectory: config.memory.directory,
     },
     transcriptStore,
     tools,
@@ -211,13 +213,13 @@ async function resolveSessionRuntimeCwd(
 }
 
 async function resolveInitialSessionId(cwd: string): Promise<string | undefined> {
-  const configured = process.env.OPENCAT_SESSION_ID?.trim();
+  const configured = getConfigValue("session.id")?.trim();
   if (configured) {
     return configured;
   }
 
-  if (process.env.OPENCAT_RESUME_SESSION === "0" ||
-    process.env.OPENCAT_RESUME_SESSION === "false") {
+  if (getConfigValue("session.resume") === "0" ||
+    getConfigValue("session.resume") === "false") {
     return undefined;
   }
 
@@ -327,9 +329,7 @@ async function loadSweBenchInstances(
   sweDatasetDir?: string,
 ): Promise<SweBenchInstance[]> {
   const evalDirectory = resolveSweEvalDirectory(cwd, sweDatasetDir);
-  const config = await readJsonFile<Record<string, unknown>>(
-    join(evalDirectory, "config.json"),
-  );
+  const config = getEvaluationConfig();
   const configuredDatasetPath = typeof config?.datasetPath === "string"
     ? config.datasetPath
     : "";
@@ -346,7 +346,7 @@ async function loadSweBenchInstances(
 
 function resolveSweEvalDirectory(cwd: string, configured?: string): string {
   const requested = configured?.trim() ||
-    process.env.OPENCAT_SWE_EVAL_DIR?.trim() ||
+    getConfigValue("evaluation.directory")?.trim() ||
     SWE_EVAL_DIR;
   const resolved = isAbsolute(requested) ? requested : join(cwd, requested);
   const evalRoot = join(cwd, ".opencat", "evals");
@@ -371,27 +371,15 @@ async function createSweWorkspaceOptions(
   datasetDir?: string,
 ): Promise<SweWorkspaceOptions> {
   const evalDirectory = resolveSweEvalDirectory(cwd, datasetDir);
-  const config = await readJsonFile<Record<string, unknown>>(
-    join(evalDirectory, "config.json"),
-  );
+  const config = getEvaluationConfig();
   return {
     projectRoot: cwd,
     reposDir: typeof config?.reposDir === "string" ? config.reposDir.trim() : undefined,
-    allowNetworkClone: config?.allowNetworkClone === true ||
-      config?.allowNetworkClone === "true" ||
-      config?.allowNetworkClone === "1",
+    allowNetworkClone: config.allowNetworkClone === true,
     workspaceNamespace: typeof config?.workspaceNamespace === "string"
       ? config.workspaceNamespace.trim() || undefined
       : undefined,
   };
-}
-
-async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
-  try {
-    return JSON.parse(await readFile(filePath, "utf8")) as T;
-  } catch {
-    return undefined;
-  }
 }
 
 async function readJsonlOrArray<T>(filePath: string): Promise<T[]> {
@@ -522,7 +510,7 @@ async function saveSwePatchFile(
 }
 
 function resolveSwePatchDirectory(datasetDir?: string): string {
-  const configured = process.env.OPENCAT_SWE_PATCH_DIR?.trim();
+  const configured = getConfigValue("evaluation.patchDirectory")?.trim();
   if (!configured) {
     return join(
       resolveSweEvalDirectory(process.cwd(), datasetDir),
@@ -608,7 +596,7 @@ function firstLine(value: string): string {
 }
 
 function getTranscriptHydrationMode(): TranscriptHydrationMode {
-  return process.env.OPENCAT_TRANSCRIPT_HYDRATE === "full" ? "full" : "auto";
+  return getConfigValue("session.transcriptHydrate") === "full" ? "full" : "auto";
 }
 
 const server = createServer(async (request, response) => {
@@ -857,7 +845,7 @@ const server = createServer(async (request, response) => {
   }
 });
 
-const port = Number(process.env.OPENCAT_WEB_PORT ?? DEFAULT_PORT);
+const port = Number(getConfigValue("web.port") ?? DEFAULT_PORT);
 server.listen(port, () => {
   console.log(`OpenCat debug web CLI: http://localhost:${port}`);
   console.log(`Session: ${session.runtime.sessionId}`);

@@ -4,11 +4,8 @@ import {
   type ModelProvider,
 } from "../openai-compatible/provider.js";
 
-export interface AgentConfig {
-  model: string;
-  apiBaseUrl: string;
-  apiKeyEnvVar: string;
-}
+/** @deprecated Use ModelRuntimeSettings from the unified YAML configuration. */
+export type AgentConfig = ModelRuntimeSettings;
 
 export interface ModelRuntimeSettings {
   /** Named profile selected from ~/.opencat/config.yaml, when configured. */

@@ -1,4 +1,6 @@
 import { runCli } from "./cli.js";
+import { getConfigCliOptions, initializeAppConfig, stripConfigCliOptions } from "./config/load-config.js";
 
 // entry point
-await runCli(process.argv.slice(2));
+initializeAppConfig(getConfigCliOptions());
+await runCli(stripConfigCliOptions(process.argv.slice(2)));

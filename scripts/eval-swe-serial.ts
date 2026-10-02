@@ -1,10 +1,10 @@
+import { getAppConfig, type AppConfig } from "../src/config/load-config.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { loadConfig } from "../src/config/load-config.js";
 import { createMemoryConfig } from "../src/Memory/config.js";
 import { query } from "../src/query.js";
 import { prepareSweWorkspace } from "../src/swe/workspace.js";
@@ -29,25 +29,7 @@ type SweBenchInstance = {
   test_patch?: string;
 };
 
-type SerialEvalConfig = {
-  runId?: string;
-  runPrefix?: string;
-  datasetPath?: string;
-  outputDir?: string;
-  reposDir?: string;
-  workspaceRoot?: string;
-  repoCacheRoot?: string;
-  limit?: number;
-  model?: string;
-  allowNetworkClone?: boolean;
-  allowWebTools?: boolean;
-  allowDirtyWorkspaces?: boolean;
-  workspaceNamespace?: string;
-  /** Number of independent SWE items that may run at once. */
-  concurrency?: number;
-  phases?: Array<"investigate" | "fix">;
-  contextCompression?: ContextCompressionConfig;
-};
+type SerialEvalConfig = AppConfig["evaluation"]["serial"];
 
 type PhaseName = "investigate" | "fix";
 
@@ -78,63 +60,34 @@ type InstanceSummary = {
   error?: string;
 };
 
-const modelRuntimeConfig = loadConfig();
+const appConfig = getAppConfig();
+const modelRuntimeConfig = appConfig.model;
 if (!modelRuntimeConfig.apiKey.trim()) {
   throw new Error(
     "Set the selected provider API key before running SWE serial eval.",
   );
 }
 
-const config = await loadSerialConfig(
-  path.resolve(
-    process.env.SWE_SERIAL_CONFIG?.trim() ??
-      getCliArgument("--config") ??
-      ".opencat/evals/swe-serial/config.json",
-  ),
-);
+const config: SerialEvalConfig = appConfig.evaluation.serial;
 const runPrefix = config.runPrefix?.trim() || "swe_serial";
-const runId = process.env.SWE_SERIAL_RUN_ID?.trim() ||
-  config.runId?.trim() ||
+const runId = config.runId?.trim() ||
   `${runPrefix}_${new Date().toISOString().replace(/[:.]/g, "-")}`;
 const outputRoot = path.resolve(
-  process.env.SWE_SERIAL_OUTPUT_DIR?.trim() ||
-    config.outputDir?.trim() ||
+  config.outputDir?.trim() ||
     ".opencat/evals/swe-serial",
   runId,
 );
-const limit = readPositiveIntegerSetting("SWE_SERIAL_LIMIT", config.limit, 100);
-const model = process.env.OPENCAT_MODEL?.trim() ||
-  process.env.ARK_MODEL?.trim() ||
-  process.env.DEEPSEEK_MODEL?.trim() ||
-  config.model?.trim() ||
-  modelRuntimeConfig.model;
-const allowNetworkClone = readBooleanSetting(
-  "SWE_SERIAL_ALLOW_NETWORK_CLONE",
-  config.allowNetworkClone,
-  false,
-);
-const allowWebTools = readBooleanSetting(
-  "SWE_SERIAL_ALLOW_WEB_TOOLS",
-  config.allowWebTools,
-  false,
-);
-const allowDirtyWorkspaces = readBooleanSetting(
-  "SWE_SERIAL_ALLOW_DIRTY_WORKSPACES",
-  config.allowDirtyWorkspaces,
-  false,
-);
-const phases = parsePhases(process.env.SWE_SERIAL_PHASES, config.phases);
-const concurrency = readPositiveIntegerSetting(
-  "SWE_SERIAL_CONCURRENCY",
-  config.concurrency,
-  1,
-);
+const limit = (config.limit ?? 100);
+const model = config.model?.trim() || modelRuntimeConfig.model;
+const allowNetworkClone = (config.allowNetworkClone ?? false);
+const allowWebTools = (config.allowWebTools ?? false);
+const allowDirtyWorkspaces = (config.allowDirtyWorkspaces ?? false);
+const phases: PhaseName[] = config.phases?.length ? config.phases : ["investigate", "fix"];
+const concurrency = (config.concurrency ?? 1);
 const workspaceOptions: SweWorkspaceOptions = {
-  reposDir: process.env.SWE_SERIAL_REPOS_DIR?.trim() || config.reposDir,
-  workspaceRoot: process.env.OPENCAT_SWE_WORKSPACE_DIR?.trim() ||
-    config.workspaceRoot,
-  repoCacheRoot: process.env.OPENCAT_SWE_REPO_CACHE_DIR?.trim() ||
-    config.repoCacheRoot,
+  reposDir: config.reposDir,
+  workspaceRoot: config.workspaceRoot ?? appConfig.workspace.sweWorkspaceDir,
+  repoCacheRoot: config.repoCacheRoot ?? appConfig.workspace.sweRepoCacheDir,
   allowNetworkClone,
   projectRoot: process.cwd(),
   workspaceNamespace: config.workspaceNamespace,
@@ -244,7 +197,8 @@ async function runInstance(instance: SweBenchInstance): Promise<InstanceSummary>
         userId: createEvalUserId(instance),
         model,
       },
-      MemoryConfig: createMemoryConfig({ cwd: workspace.path }),
+      appConfig,
+      MemoryConfig: createMemoryConfig({ cwd: workspace.path, config: appConfig }),
       contextCompressionConfig: config.contextCompression,
       observer: {
         async emit(event) {
@@ -349,13 +303,13 @@ function renderPrompt(instance: SweBenchInstance, phase: PhaseName): string {
 }
 
 async function resolveDatasetPath(config: SerialEvalConfig): Promise<string> {
-  const configured = process.env.SWE_SERIAL_DATASET?.trim() ||
-    config.datasetPath?.trim();
+  const configured = config.datasetPath?.trim();
   if (configured) {
     return path.resolve(configured);
   }
 
   const candidates = [
+    path.join(appConfig.evaluation.directory ?? config.outputDir ?? ".opencat/evals/swe-serial", "dataset.jsonl"),
     ".opencat/evals/swe-verified-cache/swe_verified_full.jsonl",
     ".opencat/evals/swe-verified-cache/dataset.jsonl",
   ].map((candidate) => path.resolve(candidate));
@@ -367,7 +321,7 @@ async function resolveDatasetPath(config: SerialEvalConfig): Promise<string> {
   }
 
   throw new Error(
-    "Missing SWE dataset. Set SWE_SERIAL_DATASET or generate .opencat/evals/swe-verified-cache/swe_verified_full.jsonl first.",
+    "Missing SWE dataset. Set evaluation.serial.datasetPath in YAML or run npm run eval:swe:prepare first.",
   );
 }
 
@@ -542,19 +496,6 @@ function summarizeTotals(results: readonly InstanceSummary[]) {
   };
 }
 
-async function loadSerialConfig(filePath: string): Promise<SerialEvalConfig> {
-  try {
-    const parsed = JSON.parse(await readFile(filePath, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as SerialEvalConfig
-      : {};
-  } catch (error) {
-    if (isFileNotFoundError(error)) {
-      return {};
-    }
-    throw error;
-  }
-}
 
 async function git(args: readonly string[], cwd?: string): Promise<string> {
   const { stdout } = await execFileAsync("git", [
@@ -575,53 +516,9 @@ function parseChangedFiles(status: string): string[] {
     .map((line) => line.slice(3).trim());
 }
 
-function parsePhases(
-  envValue: string | undefined,
-  configValue: SerialEvalConfig["phases"],
-): PhaseName[] {
-  const raw = envValue
-    ? envValue.split(",").map((value) => value.trim())
-    : configValue;
-  const phases = (raw && raw.length > 0 ? raw : ["investigate", "fix"])
-    .filter((value): value is PhaseName =>
-      value === "investigate" || value === "fix"
-    );
-  return phases.length > 0 ? phases : ["investigate", "fix"];
-}
 
-function readPositiveIntegerSetting(
-  envName: string,
-  configValue: number | undefined,
-  fallback: number,
-): number {
-  const envValue = Number(process.env[envName]);
-  if (Number.isInteger(envValue) && envValue > 0) {
-    return envValue;
-  }
-  return typeof configValue === "number" &&
-      Number.isInteger(configValue) &&
-      configValue > 0
-    ? configValue
-    : fallback;
-}
 
-function readBooleanSetting(
-  envName: string,
-  configValue: boolean | undefined,
-  fallback: boolean,
-): boolean {
-  const envValue = process.env[envName];
-  if (envValue !== undefined) {
-    return envValue === "1" || envValue.toLowerCase() === "true";
-  }
-  return configValue ?? fallback;
-}
 
-function getCliArgument(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  const value = index >= 0 ? process.argv[index + 1] : undefined;
-  return value && !value.startsWith("-") ? value : undefined;
-}
 
 function computeCacheHitRate(hit: number, miss: number): number {
   const denominator = hit + miss;
@@ -660,14 +557,6 @@ async function isFile(filePath: string): Promise<boolean> {
   }
 }
 
-function isFileNotFoundError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT"
-  );
-}
 
 function sanitizePath(value: string): string {
   return value.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 128) || "instance";

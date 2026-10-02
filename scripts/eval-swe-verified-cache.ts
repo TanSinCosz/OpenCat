@@ -1,10 +1,10 @@
+import { getAppConfig, type AppConfig } from "../src/config/load-config.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { loadConfig } from "../src/config/load-config.js";
 import { createMemoryConfig } from "../src/Memory/config.js";
 import { createDefaultTools } from "../src/Tools/index.js";
 import type { Tools } from "../src/Tools/types.js";
@@ -26,23 +26,7 @@ type SweBenchInstance = {
   test_patch?: string;
 };
 
-type EvalConfig = {
-  version?: string;
-  runPrefix?: string;
-  evalVersion?: string;
-  runId?: string;
-  datasetPath?: string;
-  datasetSource?: string;
-  datasetSplit?: string;
-  outputDir?: string;
-  reposDir?: string;
-  limit?: number;
-  userRounds?: number;
-  model?: string;
-  allowWebTools?: boolean;
-  allowNetworkClone?: boolean;
-  python?: string;
-};
+type EvalConfig = AppConfig["evaluation"]["verified"];
 
 type EvalSummary = {
   version: string;
@@ -98,59 +82,35 @@ type InstanceSummary = {
   error?: string;
 };
 
-const modelRuntimeConfig = loadConfig();
+const appConfig = getAppConfig();
+const modelRuntimeConfig = appConfig.model;
 if (!modelRuntimeConfig.apiKey.trim()) {
   throw new Error(
     "Set the selected provider API key before running SWE-bench eval.",
   );
 }
 
-const configPath = path.resolve(
-  process.env.SWE_VERIFIED_CONFIG?.trim() ??
-    getCliArgument("--config") ??
-    ".opencat/evals/swe-verified-cache/config.json",
-);
-const evalConfig = await loadEvalConfig(configPath);
+const evalConfig: EvalConfig = appConfig.evaluation.verified;
 const runPrefix = stringSetting(evalConfig.runPrefix) ?? "swe_verified_cache";
-const runId = process.env.SWE_VERIFIED_RUN_ID?.trim() ||
-  stringSetting(evalConfig.runId) ||
+const runId = stringSetting(evalConfig.runId) ||
   `${runPrefix}_${new Date().toISOString().replace(/[:.]/g, "-")}`;
-const evalVersion = process.env.SWE_VERIFIED_VERSION?.trim() ||
-  stringSetting(evalConfig.evalVersion) ||
+const evalVersion = stringSetting(evalConfig.evalVersion) ||
   stringSetting(evalConfig.version) ||
   "v1";
 const outputRoot = path.resolve(
-  process.env.SWE_VERIFIED_OUTPUT_DIR ??
-    stringSetting(evalConfig.outputDir) ??
+  stringSetting(evalConfig.outputDir) ??
     ".opencat/evals/swe-verified-cache",
   runId,
 );
-const reposDirSetting = process.env.SWE_VERIFIED_REPOS_DIR ??
-  stringSetting(evalConfig.reposDir);
+const reposDirSetting = stringSetting(evalConfig.reposDir);
 const reposDir = reposDirSetting
   ? path.resolve(reposDirSetting)
   : undefined;
-const limit = readPositiveIntegerSetting("SWE_VERIFIED_LIMIT", evalConfig.limit, 5);
-const userRounds = readPositiveIntegerSetting(
-  "SWE_VERIFIED_USER_ROUNDS",
-  evalConfig.userRounds,
-  1,
-);
-const model = process.env.OPENCAT_MODEL ??
-  process.env.ARK_MODEL ??
-  process.env.DEEPSEEK_MODEL ??
-  stringSetting(evalConfig.model) ??
-  modelRuntimeConfig.model;
-const allowNetworkClone = readBooleanSetting(
-  "SWE_VERIFIED_ALLOW_NETWORK_CLONE",
-  evalConfig.allowNetworkClone,
-  false,
-);
-const allowWebTools = readBooleanSetting(
-  "SWE_VERIFIED_ALLOW_WEB_TOOLS",
-  evalConfig.allowWebTools,
-  false,
-);
+const limit = (evalConfig.limit ?? 5);
+const userRounds = (evalConfig.userRounds ?? 1);
+const model = stringSetting(evalConfig.model) ?? modelRuntimeConfig.model;
+const allowNetworkClone = (evalConfig.allowNetworkClone ?? false);
+const allowWebTools = (evalConfig.allowWebTools ?? false);
 
 await mkdir(outputRoot, { recursive: true });
 const datasetPath = await resolveDatasetPath();
@@ -208,7 +168,8 @@ async function runInstance(instance: SweBenchInstance): Promise<InstanceSummary>
         ...modelRuntimeConfig,
         model,
       },
-      MemoryConfig: createMemoryConfig({ cwd: worktreePath }),
+      appConfig,
+      MemoryConfig: createMemoryConfig({ cwd: worktreePath, config: appConfig }),
       observer: {
         async emit(event) {
           events.push(event);
@@ -276,7 +237,7 @@ async function prepareRepository(
     await git(["clone", `https://github.com/${instance.repo}.git`, worktreePath]);
   } else {
     throw new Error(
-      `Missing local repo for ${instance.repo}. Set SWE_VERIFIED_REPOS_DIR or SWE_VERIFIED_ALLOW_NETWORK_CLONE=1.`,
+      `Missing local repo for ${instance.repo}. Set evaluation.verified.reposDir or evaluation.verified.allowNetworkClone in YAML.`,
     );
   }
 
@@ -377,15 +338,14 @@ async function loadInstances(filePath: string): Promise<SweBenchInstance[]> {
     : trimmed.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 
   if (!Array.isArray(parsed)) {
-    throw new Error("SWE_VERIFIED_DATASET must be a JSON array or JSONL file.");
+    throw new Error("evaluation.verified.datasetPath must reference a JSON array or JSONL file.");
   }
 
   return parsed.map(normalizeInstance);
 }
 
 async function resolveDatasetPath(): Promise<string> {
-  const providedPath = process.env.SWE_VERIFIED_DATASET?.trim() ||
-    stringSetting(evalConfig.datasetPath);
+  const providedPath = stringSetting(evalConfig.datasetPath);
   if (providedPath) {
     return path.resolve(providedPath);
   }
@@ -400,14 +360,12 @@ async function resolveDatasetPath(): Promise<string> {
     String(limit),
   ];
 
-  const source = process.env.SWE_VERIFIED_DATASET_SOURCE?.trim() ||
-    stringSetting(evalConfig.datasetSource);
+  const source = stringSetting(evalConfig.datasetSource);
   if (source) {
     args.push("--source", source);
   }
 
-  const split = process.env.SWE_VERIFIED_DATASET_SPLIT?.trim() ||
-    stringSetting(evalConfig.datasetSplit);
+  const split = stringSetting(evalConfig.datasetSplit);
   if (split) {
     args.push("--split", split);
   }
@@ -418,8 +376,7 @@ async function resolveDatasetPath(): Promise<string> {
 }
 
 async function runPythonDatasetLoader(args: string[]): Promise<string> {
-  const configuredPython = process.env.SWE_VERIFIED_PYTHON?.trim() ||
-    stringSetting(evalConfig.python);
+  const configuredPython = stringSetting(evalConfig.python);
   const candidates = configuredPython
     ? [{ command: configuredPython, argsPrefix: [] as string[] }]
     : [
@@ -447,11 +404,6 @@ async function runPythonDatasetLoader(args: string[]): Promise<string> {
   throw new Error(`Failed to run Python SWE-bench loader.\n${errors.join("\n")}`);
 }
 
-function getCliArgument(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  const value = index >= 0 ? process.argv[index + 1] : undefined;
-  return value?.trim() || undefined;
-}
 
 function normalizeInstance(value: unknown): SweBenchInstance {
   const record = value as Record<string, unknown>;
@@ -687,65 +639,14 @@ function optionalStringField(
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-async function loadEvalConfig(filePath: string): Promise<EvalConfig> {
-  try {
-    const parsed = JSON.parse(await readFile(filePath, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("SWE eval config must be a JSON object.");
-    }
-    return parsed as EvalConfig;
-  } catch (error) {
-    if (isFileNotFoundError(error)) {
-      return {};
-    }
-    throw error;
-  }
-}
 
-function readPositiveIntegerSetting(
-  envName: string,
-  configValue: number | undefined,
-  fallback: number,
-): number {
-  const envValue = Number(process.env[envName]);
-  if (Number.isInteger(envValue) && envValue > 0) {
-    return envValue;
-  }
-  return typeof configValue === "number" &&
-      Number.isInteger(configValue) &&
-      configValue > 0
-    ? configValue
-    : fallback;
-}
 
-function readBooleanSetting(
-  envName: string,
-  configValue: boolean | undefined,
-  fallback: boolean,
-): boolean {
-  const envValue = process.env[envName];
-  if (envValue !== undefined) {
-    return isTruthy(envValue);
-  }
-  return configValue ?? fallback;
-}
 
 function stringSetting(value: string | undefined): string | undefined {
   return value?.trim() || undefined;
 }
 
-function isFileNotFoundError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT"
-  );
-}
 
-function isTruthy(value: string | undefined): boolean {
-  return value === "1" || value?.toLowerCase() === "true";
-}
 
 function sanitizePath(value: string): string {
   return value.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 128) || "instance";

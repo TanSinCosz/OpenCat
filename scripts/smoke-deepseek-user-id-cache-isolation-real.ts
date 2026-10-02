@@ -1,3 +1,4 @@
+import { getConfigValue } from "../src/config/load-config.js";
 type Usage = {
   prompt_tokens?: number;
   prompt_cache_hit_tokens?: number;
@@ -15,19 +16,19 @@ type ProbeResult = {
   error?: string;
 };
 
-const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
+const apiKey = getConfigValue("model.apiKey")?.trim();
 if (!apiKey) {
-  throw new Error("Set DEEPSEEK_API_KEY before running this smoke test.");
+  throw new Error("Set model.apiKey in your OpenCat YAML config before running this smoke test.");
 }
 
 const baseUrl = (
-  process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com"
+  getConfigValue("model.baseUrl") ?? "https://api.deepseek.com"
 ).replace(/\/+$/, "");
 const endpoint = baseUrl.endsWith("/chat/completions")
   ? baseUrl
   : `${baseUrl}/chat/completions`;
-const model = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-pro";
-const maxTokens = Number(process.env.DEEPSEEK_USER_ID_CACHE_MAX_TOKENS ?? 16);
+const model = getConfigValue("model.model") ?? "deepseek-v4-pro";
+const maxTokens = Number(getConfigValue("experiments.userIdCache.maxTokens") ?? 16);
 const runId = `opencat-kv-${Date.now().toString(36)}`;
 const userA = `${runId}-a`;
 const userB = `${runId}-b`;

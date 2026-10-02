@@ -85,7 +85,7 @@ function normalizeAssistantMessage(message: ModelAssistantMessage): void {
       : message.reasoning_content
       ? [
         "The model returned internal reasoning but did not produce a final answer.",
-        "This usually means the response token budget was exhausted before final text was generated. Try again with a higher OPENCAT_MAX_TOKENS value or a lower reasoning effort.",
+        "This usually means the response token budget was exhausted before final text was generated. Try again with a higher model.maxTokens value in YAML or a lower reasoning effort.",
       ].join(" ")
       : "";
   }

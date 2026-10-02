@@ -274,23 +274,32 @@ cache 版本额外记录：`hardHistorySnipCount`、`toolResultBudgetReplacement
 
 ### 16.7 配置
 
-两个脚本通过环境变量或 `config.json` 配置。以 serial 版为例：
+两个脚本从统一应用 YAML 读取配置：serial 使用 `evaluation.serial`，
+cache/verified 使用 `evaluation.verified`。主模型凭据来自 `model` 或选中的 profile。
+启动参数 `--config` 指定整份应用 YAML，旧环境变量和评测 `config.json` 不再加载。
 
-| 环境变量                              | `config.json` 字段     | 默认值                                                        | 说明                       |
-| ------------------------------------- | ------------------------ | ------------------------------------------------------------- | -------------------------- |
-| `DEEPSEEK_API_KEY`                  | —                       | 必填                                                          | API Key                    |
-| `SWE_SERIAL_CONFIG`                 | —                       | `.opencat/evals/swe-serial/config.json`                     | 配置文件路径               |
-| `SWE_SERIAL_RUN_ID`                 | `runId`                | `swe_serial_<timestamp>`                                    | 运行标识                   |
-| `SWE_SERIAL_DATASET`                | `datasetPath`          | `.opencat/evals/swe-verified-cache/swe_verified_full.jsonl` | 数据集路径                 |
-| `SWE_SERIAL_LIMIT`                  | `limit`                | 100                                                           | 最多评测几个 instance      |
-| `DEEPSEEK_MODEL`                    | `model`                | `deepseek-v4-pro`                                           | 模型选择                   |
-| `SWE_SERIAL_OUTPUT_DIR`             | `outputDir`            | `.opencat/evals/swe-serial/<runId>/`                        | 输出目录                   |
-| `SWE_SERIAL_PHASES`                 | `phases`               | `["investigate", "fix"]`                                    | 执行哪些阶段               |
-| `SWE_SERIAL_ALLOW_NETWORK_CLONE`    | `allowNetworkClone`    | `false`                                                     | 允许从 GitHub 在线 clone？ |
-| `SWE_SERIAL_ALLOW_WEB_TOOLS`        | `allowWebTools`        | `false`                                                     | 允许 WebSearch/WebFetch？  |
-| `SWE_SERIAL_ALLOW_DIRTY_WORKSPACES` | `allowDirtyWorkspaces` | `false`                                                     | 允许复用脏工作区？         |
-| `OPENCAT_SWE_WORKSPACE_DIR`         | `workspaceRoot`        | `~/.opencat/swe-workspaces`                                 | worktree 根目录            |
-| `OPENCAT_SWE_REPO_CACHE_DIR`        | `repoCacheRoot`        | `~/.opencat/swe-repos`                                      | bare clone 缓存根目录      |
+```yaml
+evaluation:
+  active: serial
+  serial:
+    datasetPath: .opencat/evals/swe-lite/dataset.jsonl
+    outputDir: .opencat/evals/swe-lite
+    limit: 100
+    concurrency: 1
+    phases: [investigate, fix]
+    allowNetworkClone: false
+    allowWebTools: false
+    allowDirtyWorkspaces: false
+```
+
+```bash
+npm run eval:swe-serial -- --config .opencat/config.yaml
+```
+
+`evaluation.active` 控制仪表盘和 Web SWE 会话使用哪组参数。
+`workspace.sweWorkspaceDir` 与 `workspace.sweRepoCacheDir` 提供公共路径；
+serial 也可以使用自己的 `workspaceRoot` / `repoCacheRoot`。
+完整字段见 [统一配置](configuration.md) 与 [示例 YAML](../config/example.yaml)。
 
 ---
 

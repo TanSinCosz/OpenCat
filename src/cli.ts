@@ -2,7 +2,7 @@
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 
-import { loadConfig } from "./config/load-config.js";
+import { getAppConfig } from "./config/load-config.js";
 import { createMemoryConfig } from "./Memory/config.js";
 import { closeMcpConnections } from "./mcp/index.js";
 import { formatOpenAICompatibleErrorForUser } from "./openai-compatible/errors.js";
@@ -16,14 +16,16 @@ import { createState, type State } from "./types/state.js";
 import type { Runtime } from "./types/runtime.js";
 
 export async function runCli(args: string[]): Promise<void> {
-  const { tools, mcpConnections } = await createToolsWithConfiguredMcp(process.cwd());
+  const config = getAppConfig();
+  const { tools, mcpConnections } = await createToolsWithConfiguredMcp(process.cwd(), config);
   const runtime = createRuntime({
     cwd: process.cwd(),
-    modelRuntimeConfig: loadConfig(),
-    MemoryConfig: createMemoryConfig({ cwd: process.cwd() }),
+    appConfig: config,
+    modelRuntimeConfig: config.model,
+    MemoryConfig: createMemoryConfig({ cwd: process.cwd(), config }),
     longTermMemoryConfig: {
-      autoInject: true,
-      autoExtract: true,
+      ...config.memory,
+      fileMemoryDirectory: config.memory.directory,
     },
     tools,
     mcpConnections,
@@ -32,6 +34,7 @@ export async function runCli(args: string[]): Promise<void> {
   const firstPrompt = args.join(" ").trim();
 
   console.log(`Session: ${runtime.sessionId}`);
+  console.log(`Config: ${config.configPath ?? "built-in defaults"}`);
   console.log(`Model: ${runtime.modelRuntimeConfig.model ?? "default"}`);
   console.log(`Tools: ${runtime.tools.map((tool) => tool.name).join(", ")}`);
   console.log("Type /exit to quit.");

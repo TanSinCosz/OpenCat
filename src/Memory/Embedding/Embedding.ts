@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { EmbeddingConfig } from "../type.js";
 import { Embedder } from "./base.js"
+import { createOpenAICompatibleSdkClient } from "../../openai-compatible/transport.js";
 
 export class OpenAIEmbedder implements Embedder{
   private openai: OpenAI;
@@ -8,9 +9,10 @@ export class OpenAIEmbedder implements Embedder{
   private embeddingDims: number | undefined;
 
   constructor(config: EmbeddingConfig) {
-    this.openai = new OpenAI({
-      apiKey: config.apiKey,
-      baseURL: config.baseURL || config.url,
+    this.openai = createOpenAICompatibleSdkClient({
+      provider: "openai-compatible",
+      apiKey: config.apiKey ?? "",
+      baseUrl: config.baseURL || config.url,
     });
     this.model = config.model || "text-embedding-3-small";
     this.embeddingDims = config.embeddingDims;

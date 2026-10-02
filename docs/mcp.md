@@ -7,7 +7,7 @@
 | 文件                        | 职责                                                       |
 | --------------------------- | ---------------------------------------------------------- |
 | `src/mcp/types.ts`        | JSON-RPC 2.0 类型定义、服务器配置、工具定义                |
-| `src/mcp/config.ts`       | 配置加载（`.opencat/mcp.json`）、连接创建、工具合并      |
+| `src/mcp/config.ts`       | 配置加载（`.opencat/config.yaml (mcp 分组)`）、连接创建、工具合并      |
 | `src/mcp/stdio-client.ts` | Stdio 传输：子进程 + 行分隔 JSON-RPC                       |
 | `src/mcp/http-client.ts`  | HTTP 传输：fetch + 会话管理 + SSE                          |
 | `src/mcp/tool-adapter.ts` | `McpToolAdapter`：将 ==MCP== 工具伪装成 OpenCat Tool |
@@ -16,7 +16,7 @@
 ### 4.1 整体架构
 
 ```
-.opencat/mcp.json          ← 用户配置（服务器列表）
+.opencat/config.yaml (mcp 分组)          ← 用户配置（服务器列表）
         │
         ▼
 src/mcp/config.ts          ← 解析配置，发起连接
@@ -122,18 +122,16 @@ class McpToolAdapter implements Tool {
 
 ### 4.6 配置与工具合并
 
-配置文件 `.opencat/mcp.json`（可通过 `OPENCAT_MCP_CONFIG` 环境变量重写）：
+服务器配置在统一 YAML 的 `mcp` 分组中；使用 `--config` 指定文件。环境变量不再选择另一份配置。
 
-```json
-{
-  "mcpServers": {
-    "codegraph": {
-      "command": "node",
-      "args": ["vendor/codegraph/dist/bin/codegraph.js", "serve", "--mcp"],
-      "env": { "CODEGRAPH_MCP_TOOLS": "explore,status,files" }
-    }
-  }
-}
+```yaml
+mcp:
+  stdio:
+    - name: codegraph
+      command: node
+      args: [vendor/codegraph/dist/bin/codegraph.js, serve, --mcp]
+      env: { CODEGRAPH_MCP_TOOLS: "explore,status,files" }
+  http: []
 ```
 
 `createToolsWithConfiguredMcp()` 将 ==MCP== 工具与内置工具合并：
@@ -147,7 +145,7 @@ class McpToolAdapter implements Tool {
 | 待实现                               | 说明                                                                                                                                                           | 影响                                   |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
 | `notifications/tools/list_changed` | ==MCP== 协议允许服务端通知客户端工具列表变更，但 Stdio 客户端的`handleLine` 只处理带 `id` 的响应（通知无 `id`，被丢弃），HTTP 客户端无长连接接收推送 | 工具列表只在连接时获取一次，运行时不变 |
-| `.opencat/mcp.json` 热加载         | 配置文件只在启动时读取一次                                                                                                                                     | 运行时修改配置不生效                   |
+| `.opencat/config.yaml (mcp 分组)` 热加载         | 配置文件只在启动时读取一次                                                                                                                                     | 运行时修改配置不生效                   |
 | 子进程崩溃自动重连                   | `process.once("exit")` 后将 `this.process` 设为 `undefined`，但不自动重新 spawn                                                                          | 崩溃后下次请求直接报错                 |
 | 服务端能力检查                       | `initialize` 返回值中的 `capabilities` 被丢弃                                                                                                              | 当前无影响（只用 tools），未来需补     |
 | HTTP SSE 实时流式消费                | 当前使用`response.text()` 一次性读完再解析                                                                                                                   | 无法实时展示长时间工具调用的中间进度   |

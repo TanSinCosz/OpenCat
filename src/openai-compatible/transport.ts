@@ -19,6 +19,15 @@ export interface OpenAICompatibleTransportConfig {
   headers?: Record<string, string>;
   provider?: ModelRuntimeSettings["provider"];
   fetchImpl?: typeof fetch;
+  timeout?: number;
+}
+
+/** The SDK otherwise merges OPENAI_CUSTOM_HEADERS into explicitly configured clients. */
+class ConfiguredOpenAI extends OpenAI {
+  constructor(options: ClientOptions) {
+    super({ ...options, logLevel: "warn" });
+    this._options.defaultHeaders = options.defaultHeaders;
+  }
 }
 
 export function createOpenAICompatibleSdkClient(
@@ -27,18 +36,23 @@ export function createOpenAICompatibleSdkClient(
   const profile = getProviderProfile(config);
   if (!config.apiKey.trim()) {
     throw new Error(
-      `Missing ${profile.displayName} credentials. Set the ${profile.apiKeyEnvironmentVariable} environment variable or pass apiKey explicitly.`,
+      `Missing ${profile.displayName} credentials. Set ${profile.apiKeyConfigField} in the OpenCat YAML config.`,
     );
   }
 
   const options: ClientOptions = {
     apiKey: config.apiKey,
-    baseURL: getProviderBaseUrl(config),
+    baseURL: getProviderBaseUrl(config) ?? "https://api.openai.com/v1",
+    organization: null,
+    project: null,
+    adminAPIKey: null,
+    webhookSecret: null,
     defaultHeaders: config.headers,
     fetch: config.fetchImpl,
+    ...(config.timeout !== undefined && { timeout: config.timeout }),
   };
 
-  return new OpenAI(options);
+  return new ConfiguredOpenAI(options);
 }
 
 export async function sendOpenAICompatibleRequest(

@@ -33,49 +33,26 @@ npm install
 
 ### 配置
 
-通过环境变量或 `.opencat/` 下的配置文件设置：
+所有应用配置统一从 YAML 读取，完整示例见 [config/example.yaml](config/example.yaml)。
 
 ```bash
-export DEEPSEEK_API_KEY=sk-your-key-here
-```
-
-可选配置：
-
-```bash
-export DEEPSEEK_MODEL=deepseek-v4-pro          # 模型选择
-export DEEPSEEK_BASE_URL=https://api.deepseek.com
-export OPENCAT_MAX_TOKENS=32000                 # 单次最大输出 token
-```
-
-### 运行
-
-```bash
-# 启动交互式 CLI
+mkdir -p .opencat
+cp config/example.yaml .opencat/config.yaml
+# 编辑 .opencat/config.yaml，填写 model.apiKey
+npm run build
 npm start
 ```
 
-### MCP Server 集成
+默认先找启动目录的 `.opencat/config.yaml`，再找 `~/.opencat/config.yaml`；
+也可以使用 `--config` 指定一份文件。环境变量不再覆盖配置。
 
-在 `.opencat/mcp.json` 中配置：
-
-```json
-{
-  "servers": [
-    {
-      "name": "codegraph",
-      "type": "stdio",
-      "command": "node",
-      "args": ["path/to/codegraph-mcp.js"]
-    },
-    {
-      "name": "remote-tools",
-      "type": "http",
-      "url": "https://mcp.example.com/mcp",
-      "headers": { "Authorization": "Bearer your-token" }
-    }
-  ]
-}
+```bash
+npm run web -- --config .opencat/config.yaml
+npm run eval:swe-serial -- --config .opencat/config.yaml
 ```
+
+MCP 服务器也配置在同一 YAML 的 `mcp.stdio` / `mcp.http` 中，
+不再单独读取 `mcp.json`。详细字段与迁移说明见 [统一配置](docs/configuration.md)。
 
 ---
 

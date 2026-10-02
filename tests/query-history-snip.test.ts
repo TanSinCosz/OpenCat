@@ -1,3 +1,4 @@
+import { createYamlConfigValues } from "./yaml-config-fixture.js";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,6 +8,8 @@ import { buildMessagesForQuery } from "../src/query/messages.js";
 import { createMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
+
+const configValues = createYamlConfigValues();
 
 test("no-projection benchmark leaves persisted projection state unapplied", async () => {
   const oldMessage = createMessage({
@@ -171,19 +174,19 @@ test("buildMessagesForQuery preserves an assistant/tool pair from an old removed
 });
 
 test("buildMessagesForQuery does not snip business messages when bulky compact misses target", async () => {
-  const originalTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
-  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
-  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalTargetTokens = configValues["compression.historySnipTargetTokens"];
+  const originalMinRecent = configValues["compression.historySnipMinRecentMessages"];
+  const originalBulkyTargetTokens = configValues["compression.bulkyToolResultCompactContextTokens"];
   const originalBulkyCompactTargetTokens =
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
-  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"];
+  const originalKeepRecent = configValues["compression.bulkyToolResultKeepRecent"];
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "800";
-    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "2000";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
+    configValues["compression.historySnipTargetTokens"] = "800";
+    configValues["compression.historySnipMinRecentMessages"] = "4";
+    configValues["compression.bulkyToolResultCompactContextTokens"] = "500";
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"] = "2000";
+    configValues["compression.bulkyToolResultKeepRecent"] = "0";
 
     const state = createState({
       messages: [
@@ -245,24 +248,24 @@ test("buildMessagesForQuery does not snip business messages when bulky compact m
 
     assert.equal(state.historySnips.length, 0);
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalTargetTokens);
-    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
-    restoreEnv(
-      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+    restoreConfigValue("compression.historySnipTargetTokens", originalTargetTokens);
+    restoreConfigValue("compression.historySnipMinRecentMessages", originalMinRecent);
+    restoreConfigValue("compression.bulkyToolResultCompactContextTokens", originalBulkyTargetTokens);
+    restoreConfigValue(
+      "compression.bulkyToolResultCompactTargetContextTokens",
       originalBulkyCompactTargetTokens,
     );
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+    restoreConfigValue("compression.bulkyToolResultKeepRecent", originalKeepRecent);
   }
 });
 
 test("buildMessagesForQuery does not mark snipped Read cache entries as partial views", async () => {
-  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
+  const originalMinRecent = configValues["compression.historySnipMinRecentMessages"];
   const cwd = await mkdtemp(join(tmpdir(), "opencat-snip-read-"));
   const filePath = join(cwd, "old.ts");
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
+    configValues["compression.historySnipMinRecentMessages"] = "4";
 
     const state = createState({
       messages: [
@@ -319,27 +322,27 @@ test("buildMessagesForQuery does not mark snipped Read cache entries as partial 
       undefined,
     );
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
+    restoreConfigValue("compression.historySnipMinRecentMessages", originalMinRecent);
   }
 });
 
 test("buildMessagesForQuery keeps business messages after repeated bulky compact misses", async () => {
-  const originalTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
-  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
-  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalTargetTokens = configValues["compression.historySnipTargetTokens"];
+  const originalMinRecent = configValues["compression.historySnipMinRecentMessages"];
+  const originalBulkyTargetTokens = configValues["compression.bulkyToolResultCompactContextTokens"];
   const originalBulkyCompactTargetTokens =
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
-  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"];
+  const originalKeepRecent = configValues["compression.bulkyToolResultKeepRecent"];
 
   try {
     // Use a target low enough that bulky compact alone cannot satisfy the
     // removal target. The snip is still recorded as a durable boundary so
     // subsequent turns keep the same prefix shape.
-    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "500";
-    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "2000";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
+    configValues["compression.historySnipTargetTokens"] = "500";
+    configValues["compression.historySnipMinRecentMessages"] = "4";
+    configValues["compression.bulkyToolResultCompactContextTokens"] = "500";
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"] = "2000";
+    configValues["compression.bulkyToolResultKeepRecent"] = "0";
 
     const state = createState({
       messages: [
@@ -405,25 +408,25 @@ test("buildMessagesForQuery keeps business messages after repeated bulky compact
       true,
     );
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalTargetTokens);
-    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
-    restoreEnv(
-      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+    restoreConfigValue("compression.historySnipTargetTokens", originalTargetTokens);
+    restoreConfigValue("compression.historySnipMinRecentMessages", originalMinRecent);
+    restoreConfigValue("compression.bulkyToolResultCompactContextTokens", originalBulkyTargetTokens);
+    restoreConfigValue(
+      "compression.bulkyToolResultCompactTargetContextTokens",
       originalBulkyCompactTargetTokens,
     );
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+    restoreConfigValue("compression.bulkyToolResultKeepRecent", originalKeepRecent);
   }
 });
 
 
 test("buildMessagesForQuery records durable snip boundaries for old attachment context", async () => {
-  const originalTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
-  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
-  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalTargetTokens = configValues["compression.historySnipTargetTokens"];
+  const originalMinRecent = configValues["compression.historySnipMinRecentMessages"];
+  const originalBulkyTargetTokens = configValues["compression.bulkyToolResultCompactContextTokens"];
   const originalBulkyCompactTargetTokens =
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
-  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"];
+  const originalKeepRecent = configValues["compression.bulkyToolResultKeepRecent"];
   const attachmentSources = [
     "runtime",
     "long_term_memory",
@@ -432,11 +435,11 @@ test("buildMessagesForQuery records durable snip boundaries for old attachment c
   ] as const;
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "800";
-    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "4";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "4000";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
+    configValues["compression.historySnipTargetTokens"] = "800";
+    configValues["compression.historySnipMinRecentMessages"] = "4";
+    configValues["compression.bulkyToolResultCompactContextTokens"] = "500";
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"] = "4000";
+    configValues["compression.bulkyToolResultKeepRecent"] = "0";
 
     for (const source of attachmentSources) {
       const attachment = createMessage({
@@ -495,31 +498,31 @@ test("buildMessagesForQuery records durable snip boundaries for old attachment c
       assert.doesNotMatch(JSON.stringify(first.messages), /old attachment/);
     }
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalTargetTokens);
-    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
-    restoreEnv(
-      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+    restoreConfigValue("compression.historySnipTargetTokens", originalTargetTokens);
+    restoreConfigValue("compression.historySnipMinRecentMessages", originalMinRecent);
+    restoreConfigValue("compression.bulkyToolResultCompactContextTokens", originalBulkyTargetTokens);
+    restoreConfigValue(
+      "compression.bulkyToolResultCompactTargetContextTokens",
       originalBulkyCompactTargetTokens,
     );
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+    restoreConfigValue("compression.bulkyToolResultKeepRecent", originalKeepRecent);
   }
 });
 
 test("buildMessagesForQuery keeps old user and assistant messages intact", async () => {
-  const originalTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
-  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
-  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalTargetTokens = configValues["compression.historySnipTargetTokens"];
+  const originalMinRecent = configValues["compression.historySnipMinRecentMessages"];
+  const originalBulkyTargetTokens = configValues["compression.bulkyToolResultCompactContextTokens"];
   const originalBulkyCompactTargetTokens =
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
-  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"];
+  const originalKeepRecent = configValues["compression.bulkyToolResultKeepRecent"];
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "800";
-    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "5";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "1200";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
+    configValues["compression.historySnipTargetTokens"] = "800";
+    configValues["compression.historySnipMinRecentMessages"] = "5";
+    configValues["compression.bulkyToolResultCompactContextTokens"] = "500";
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"] = "1200";
+    configValues["compression.bulkyToolResultKeepRecent"] = "0";
 
     const oldUser = createMessage({
       role: "user",
@@ -586,29 +589,29 @@ test("buildMessagesForQuery keeps old user and assistant messages intact", async
 
     assert.equal(state.historySnips.length, 0);
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalTargetTokens);
-    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
-    restoreEnv(
-      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+    restoreConfigValue("compression.historySnipTargetTokens", originalTargetTokens);
+    restoreConfigValue("compression.historySnipMinRecentMessages", originalMinRecent);
+    restoreConfigValue("compression.bulkyToolResultCompactContextTokens", originalBulkyTargetTokens);
+    restoreConfigValue(
+      "compression.bulkyToolResultCompactTargetContextTokens",
       originalBulkyCompactTargetTokens,
     );
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+    restoreConfigValue("compression.bulkyToolResultKeepRecent", originalKeepRecent);
   }
 });
 
 test("buildMessagesForQuery skips history snip when bulky compact reaches the target", async () => {
-  const originalHistoryTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
-  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalHistoryTargetTokens = configValues["compression.historySnipTargetTokens"];
+  const originalBulkyTargetTokens = configValues["compression.bulkyToolResultCompactContextTokens"];
   const originalBulkyCompactTargetTokens =
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
-  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"];
+  const originalKeepRecent = configValues["compression.bulkyToolResultKeepRecent"];
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "5000";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "5000";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
+    configValues["compression.historySnipTargetTokens"] = "5000";
+    configValues["compression.bulkyToolResultCompactContextTokens"] = "500";
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"] = "5000";
+    configValues["compression.bulkyToolResultKeepRecent"] = "0";
 
     const state = createState({
       messages: [
@@ -660,32 +663,32 @@ test("buildMessagesForQuery skips history snip when bulky compact reaches the ta
     assert.match(serialized, /<tool-result-compact>/);
     assert.doesNotMatch(serialized, /x{5000}/);
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalHistoryTargetTokens);
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
-    restoreEnv(
-      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+    restoreConfigValue("compression.historySnipTargetTokens", originalHistoryTargetTokens);
+    restoreConfigValue("compression.bulkyToolResultCompactContextTokens", originalBulkyTargetTokens);
+    restoreConfigValue(
+      "compression.bulkyToolResultCompactTargetContextTokens",
       originalBulkyCompactTargetTokens,
     );
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+    restoreConfigValue("compression.bulkyToolResultKeepRecent", originalKeepRecent);
   }
 });
 
 test("buildMessagesForQuery keeps bulky compaction when no snip candidate is removable", async () => {
-  const originalHistoryTargetTokens = process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS;
-  const originalMinRecent = process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES;
-  const originalBulkyTargetTokens = process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS;
+  const originalHistoryTargetTokens = configValues["compression.historySnipTargetTokens"];
+  const originalMinRecent = configValues["compression.historySnipMinRecentMessages"];
+  const originalBulkyTargetTokens = configValues["compression.bulkyToolResultCompactContextTokens"];
   const originalBulkyCompactTargetTokens =
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS;
-  const originalCancelTokens = process.env.OPENCAT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS;
-  const originalKeepRecent = process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT;
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"];
+  const originalCancelTokens = configValues["compression.historySnipCancelContextTokens"];
+  const originalKeepRecent = configValues["compression.bulkyToolResultKeepRecent"];
 
   try {
-    process.env.OPENCAT_HISTORY_SNIP_TARGET_TOKENS = "80";
-    process.env.OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES = "0";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS = "500";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS = "80";
-    process.env.OPENCAT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS = "1";
-    process.env.OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT = "0";
+    configValues["compression.historySnipTargetTokens"] = "80";
+    configValues["compression.historySnipMinRecentMessages"] = "0";
+    configValues["compression.bulkyToolResultCompactContextTokens"] = "500";
+    configValues["compression.bulkyToolResultCompactTargetContextTokens"] = "80";
+    configValues["compression.historySnipCancelContextTokens"] = "1";
+    configValues["compression.bulkyToolResultKeepRecent"] = "0";
 
     const state = createState({
       messages: [
@@ -734,25 +737,25 @@ test("buildMessagesForQuery keeps bulky compaction when no snip candidate is rem
     assert.ok(state.toolResultBudgetState.replacements.size > 0);
     assert.equal(hasCompactedToolResult, true);
   } finally {
-    restoreEnv("OPENCAT_HISTORY_SNIP_TARGET_TOKENS", originalHistoryTargetTokens);
-    restoreEnv("OPENCAT_HISTORY_SNIP_MIN_RECENT_MESSAGES", originalMinRecent);
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_COMPACT_CONTEXT_TOKENS", originalBulkyTargetTokens);
-    restoreEnv(
-      "OPENCAT_BULKY_TOOL_RESULT_COMPACT_TARGET_CONTEXT_TOKENS",
+    restoreConfigValue("compression.historySnipTargetTokens", originalHistoryTargetTokens);
+    restoreConfigValue("compression.historySnipMinRecentMessages", originalMinRecent);
+    restoreConfigValue("compression.bulkyToolResultCompactContextTokens", originalBulkyTargetTokens);
+    restoreConfigValue(
+      "compression.bulkyToolResultCompactTargetContextTokens",
       originalBulkyCompactTargetTokens,
     );
-    restoreEnv("OPENCAT_HISTORY_SNIP_CANCEL_CONTEXT_TOKENS", originalCancelTokens);
-    restoreEnv("OPENCAT_BULKY_TOOL_RESULT_KEEP_RECENT", originalKeepRecent);
+    restoreConfigValue("compression.historySnipCancelContextTokens", originalCancelTokens);
+    restoreConfigValue("compression.bulkyToolResultKeepRecent", originalKeepRecent);
   }
 });
 
-function restoreEnv(name: string, value: string | undefined): void {
+function restoreConfigValue(name: string, value: string | undefined): void {
   if (value === undefined) {
-    delete process.env[name];
+    delete configValues[name];
     return;
   }
 
-  process.env[name] = value;
+  configValues[name] = value;
 }
 
 function createMemoryConfig() {
@@ -771,5 +774,3 @@ function createMemoryConfig() {
     },
   };
 }
-
-

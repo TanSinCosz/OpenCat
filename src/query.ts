@@ -1,3 +1,4 @@
+import { getConfigValue, withAppConfig } from "./config/load-config.js";
 import { randomUUID } from "node:crypto";
 import {
   createPermissionDeniedToolCallResult,
@@ -91,7 +92,17 @@ export async function* query(
   state: State,
   options: QueryOptions = {},
 ): AsyncGenerator<QueryEvent, void, void> {
-  yield* _query(runtime, state, options);
+  // Each generator step runs in the owning runtime's configuration scope.
+  const iterator = _query(runtime, state, options);
+  try {
+    while (true) {
+      const result = await withAppConfig(runtime.appConfig, () => iterator.next());
+      if (result.done === true) return;
+      yield result.value;
+    }
+  } finally {
+    await withAppConfig(runtime.appConfig, () => iterator.return());
+  }
 }
 
 export async function* _query(
@@ -1097,7 +1108,7 @@ function getAutoCompressTriggerTokens(runtime: Runtime): number {
   }
 
   const configured = Number(
-    process.env.OPENCAT_AUTO_COMPRESS_TRIGGER_TOKENS,
+    getConfigValue("compression.autoCompressTriggerTokens"),
   );
 
   if (Number.isFinite(configured) && configured > 0) {

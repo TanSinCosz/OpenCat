@@ -1,3 +1,4 @@
+import { getConfigValue } from "../config/load-config.js";
 import { execFile, spawn } from "node:child_process";
 import { copyFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -751,7 +752,7 @@ async function isGitWorkspace(cwd: string): Promise<boolean> {
 }
 
 function resolvePatchSnapshotDirectory(runtime: Runtime): string {
-  const configured = process.env.OPENCAT_PATCH_SNAPSHOT_DIR?.trim();
+  const configured = getConfigValue("workspace.patchSnapshotDir", runtime.appConfig)?.trim();
   const root = configured
     ? (isAbsolute(configured) ? configured : join(runtime.cwd, configured))
     : join(runtime.cwd, ".opencat", "patches");

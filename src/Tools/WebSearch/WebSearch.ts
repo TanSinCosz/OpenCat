@@ -88,9 +88,9 @@ export class WebSearch
     runtime: Runtime,
     _state: State,
   ): Promise<WebSearchOutput> {
-    const apiKey = runtime.modelRuntimeConfig.apiKey.trim();
+    const apiKey = (runtime.appConfig.tools.webSearch.apiKey ?? runtime.modelRuntimeConfig.apiKey).trim();
     if (!apiKey) {
-      throw new Error("WebSearch requires DEEPSEEK_API_KEY.");
+      throw new Error("WebSearch requires tools.webSearch.apiKey or model.apiKey in YAML.");
     }
 
     const startedAt = performance.now();
@@ -156,7 +156,7 @@ export class WebSearch
 function createRequestBody(input: WebSearchInput, runtime: Runtime): unknown {
   return {
     model:
-      process.env.OPENCAT_WEB_SEARCH_MODEL?.trim() ||
+      runtime.appConfig.tools.webSearch.model ||
       runtime.modelRuntimeConfig.model,
     max_tokens: 2_048,
     system:
@@ -188,9 +188,8 @@ function createRequestBody(input: WebSearchInput, runtime: Runtime): unknown {
 }
 
 function resolveMessagesUrl(runtime: Runtime): string {
-  const explicit =
-    process.env.DEEPSEEK_ANTHROPIC_BASE_URL?.trim() ||
-    process.env.ANTHROPIC_BASE_URL?.trim();
+  if (runtime.appConfig.tools.webSearch.messagesUrl) return runtime.appConfig.tools.webSearch.messagesUrl;
+  const explicit = runtime.appConfig.tools.webSearch.baseUrl;
   const base = explicit || deriveAnthropicBaseUrl(
     runtime.modelRuntimeConfig.baseUrl,
   );

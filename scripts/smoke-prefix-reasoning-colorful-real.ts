@@ -1,3 +1,4 @@
+import { getConfigValue } from "../src/config/load-config.js";
 type ChatCompletionResponse = {
   id?: string;
   choices?: Array<{
@@ -59,16 +60,16 @@ Output:
 
 Solve this problem and eventually provide a C++17 solution.`;
 
-const apiKey = process.env.DEEPSEEK_API_KEY ?? process.env.OPENAI_API_KEY;
+const apiKey = getConfigValue("model.apiKey");
 if (!apiKey) {
-  throw new Error("Set DEEPSEEK_API_KEY before running this smoke script.");
+  throw new Error("Set model.apiKey in your OpenCat YAML config before running this smoke script.");
 }
 
-const baseUrl = (process.env.DEEPSEEK_BETA_BASE_URL ??
+const baseUrl = (getConfigValue("experiments.betaBaseUrl") ??
   "https://api.deepseek.com/beta").replace(/\/+$/, "");
-const model = process.env.OPENCAT_PREFIX_SMOKE_MODEL ?? "deepseek-v4-pro";
-const firstMaxTokens = Number(process.env.OPENCAT_PREFIX_FIRST_MAX_TOKENS ?? 768);
-const secondMaxTokens = Number(process.env.OPENCAT_PREFIX_SECOND_MAX_TOKENS ?? 1536);
+const model = getConfigValue("experiments.prefixReasoning.model") ?? "deepseek-v4-pro";
+const firstMaxTokens = Number(getConfigValue("experiments.prefixReasoning.firstMaxTokens") ?? 768);
+const secondMaxTokens = Number(getConfigValue("experiments.prefixReasoning.secondMaxTokens") ?? 1536);
 
 const first = await createChatCompletion({
   model,

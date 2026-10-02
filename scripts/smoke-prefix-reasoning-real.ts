@@ -1,3 +1,4 @@
+import { getConfigValue } from "../src/config/load-config.js";
 type ChatCompletionResponse = {
   id?: string;
   choices?: Array<{
@@ -22,14 +23,14 @@ type ChatCompletionResponse = {
   };
 };
 
-const apiKey = process.env.DEEPSEEK_API_KEY ?? process.env.OPENAI_API_KEY;
+const apiKey = getConfigValue("model.apiKey");
 if (!apiKey) {
-  throw new Error("Set DEEPSEEK_API_KEY before running this smoke script.");
+  throw new Error("Set model.apiKey in your OpenCat YAML config before running this smoke script.");
 }
 
-const baseUrl = (process.env.DEEPSEEK_BETA_BASE_URL ??
+const baseUrl = (getConfigValue("experiments.betaBaseUrl") ??
   "https://api.deepseek.com/beta").replace(/\/+$/, "");
-const model = process.env.OPENCAT_PREFIX_SMOKE_MODEL ?? "deepseek-v4-pro";
+const model = getConfigValue("experiments.prefixReasoning.model") ?? "deepseek-v4-pro";
 
 const response = await fetch(`${baseUrl}/chat/completions`, {
   method: "POST",

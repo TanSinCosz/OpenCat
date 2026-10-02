@@ -1,3 +1,4 @@
+import { getConfigValue, getEvaluationConfig } from "./config/load-config.js";
 import http from "node:http";
 import { execFile } from "node:child_process";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -108,12 +109,12 @@ type ConversationMessage = {
 
 const workspaceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const evalRoot = path.resolve(
-  process.env.OPENCAT_SWE_EVAL_DIR?.trim() ||
+  getConfigValue("evaluation.directory")?.trim() ||
     getCliArgument("--dataset") ||
     path.join(workspaceRoot, ".opencat/evals/swe-verified-cache"),
 );
 const evalRootIsExplicit = Boolean(
-  process.env.OPENCAT_SWE_EVAL_DIR?.trim() || getCliArgument("--dataset"),
+  getConfigValue("evaluation.directory")?.trim() || getCliArgument("--dataset"),
 );
 const evalRoots = evalRootIsExplicit
   ? [evalRoot]
@@ -123,7 +124,7 @@ const evalRoots = evalRootIsExplicit
     path.join(workspaceRoot, ".opencat/evals/swe-lite-baseline"),
   ];
 const DATASET_ONLY_RUN_NAME = "__dataset__";
-const webChatUrl = (process.env.OPENCAT_WEB_URL?.trim() || "http://localhost:5177")
+const webChatUrl = (getConfigValue("web.url")?.trim() || "http://localhost:5177")
   .replace(/\/+$/, "");
 const port = readPort();
 const MAX_PATCH_BYTES = 50 * 1024 * 1024;
@@ -235,7 +236,7 @@ async function listRuns(): Promise<RunListItem[]> {
 }
 
 async function listRunsInRoot(root: string): Promise<RunListItem[]> {
-  const config = await readJson(path.join(root, "config.json"));
+  const config = getEvaluationConfig();
   await ensureDatasetAvailable(root, config);
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
   const runs = await Promise.all(entries
@@ -244,8 +245,7 @@ async function listRunsInRoot(root: string): Promise<RunListItem[]> {
       const runPath = path.join(root, entry.name);
       const info = await stat(runPath);
       const summary = await readJson(path.join(runPath, "summary.json"));
-      const config = await readJson(path.join(runPath, "config.json")) ??
-        await readJson(path.join(root, "config.json"));
+      const config = getEvaluationConfig();
       return {
         name: entry.name,
         path: runPath,
@@ -558,8 +558,7 @@ function resolveEvalVersion(
 }
 
 async function readEvalConfig(run: RunListItem): Promise<JsonRecord | undefined> {
-  return await readJson(path.join(run.path, "config.json")) ??
-    await readJson(path.join(run.evalRoot, "config.json"));
+  return getEvaluationConfig();
 }
 
 async function loadDatasetItems(
@@ -671,7 +670,7 @@ async function loadDashboardDatasetRecords(
   datasetDir?: string,
 ): Promise<JsonRecord[]> {
   const root = resolveEvalRoot(datasetDir);
-  const config = await readJson(path.join(root, "config.json"));
+  const config = getEvaluationConfig();
   const datasetPath = await resolveDashboardDatasetPath(config, root);
   return await readDatasetRecords(datasetPath);
 }
@@ -784,7 +783,7 @@ async function saveSwePatchFile(
 }
 
 function resolveSwePatchDirectory(datasetDir?: string): string {
-  const configured = process.env.OPENCAT_SWE_PATCH_DIR?.trim();
+  const configured = getConfigValue("evaluation.patchDirectory")?.trim();
   if (!configured) {
     return path.join(resolveEvalRoot(datasetDir), "patches");
   }
@@ -804,13 +803,12 @@ async function createSweWorkspaceOptions(
   datasetDir?: string,
 ): Promise<SweWorkspaceOptions> {
   const root = resolveEvalRoot(datasetDir);
-  const config = await readJson(path.join(root, "config.json"));
-  const value = process.env.SWE_VERIFIED_ALLOW_NETWORK_CLONE ??
-    config?.allowNetworkClone;
+  const config = getEvaluationConfig();
+  const value = config.allowNetworkClone;
   return {
     projectRoot: workspaceRoot,
     reposDir: stringValue(config?.reposDir)?.trim(),
-    allowNetworkClone: value === true || value === "true" || value === "1",
+    allowNetworkClone: value === true,
     workspaceNamespace: stringValue(config?.workspaceNamespace)?.trim(),
   };
 }
@@ -2103,7 +2101,7 @@ function getCliArgument(name: string): string | undefined {
 }
 
 function readPort(): number {
-  const value = Number(process.env.OPENCAT_SWE_DASHBOARD_PORT ?? 5188);
+  const value = Number(getConfigValue("evaluation.dashboardPort") ?? 5188);
   return Number.isInteger(value) && value > 0 && value < 65536 ? value : 5188;
 }
 

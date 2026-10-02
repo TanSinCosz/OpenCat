@@ -1,254 +1,130 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { stringify } from "yaml";
+import {
+  getAppConfig, getConfigCliOptions, getConfigValue, loadAppConfig, loadConfig,
+  parseAppConfig, stripConfigCliOptions, withAppConfig,
+} from "../src/config/load-config.js";
 
-import { getUserConfigPath, loadConfig } from "../src/config/load-config.js";
-
-const MODEL_ENV_KEYS = [
-  "OPENCAT_CONFIG_PATH",
-  "OPENCAT_MODEL_PROFILE",
-  "OPENCAT_MODEL_PROVIDER",
-  "OPENCAT_API_PROVIDER",
-  "OPENCAT_API_KEY",
-  "OPENCAT_API_BASE_URL",
-  "OPENCAT_MODEL",
-  "OPENCAT_MAX_TOKENS",
-  "OPENCAT_REASONING_EFFORT",
-  "ARK_API_KEY",
-  "ARK_BASE_URL",
-  "ARK_MODEL",
-  "DEEPSEEK_API_KEY",
-  "DEEPSEEK_BASE_URL",
-  "DEEPSEEK_MODEL",
-  "DEEPSEEK_USER_ID",
-  "OPENAI_API_KEY",
-  "OPENAI_BASE_URL",
-  "OPENAI_MODEL",
-  "TEST_ARK_KEY",
-] as const;
-
-test("loadConfig reads the user YAML model configuration", () => {
-  withModelEnvironment({ TEST_ARK_KEY: "ark-secret" }, (directory) => {
-    const configPath = path.join(directory, "config.yaml");
-    writeFileSync(configPath, [
-      "model:",
-      "  provider: ark",
-      "  apiKeyEnv: TEST_ARK_KEY",
-      "  baseUrl: https://ark.example/api/v3",
-      "  model: endpoint-id",
-      "  maxTokens: 24576",
-      "  reasoningEffort: high",
-      "  headers:",
-      "    X-Project: opencat",
-      "",
-    ].join("\n"));
-    process.env.OPENCAT_CONFIG_PATH = configPath;
-
-    const config = loadConfig();
-
-    assert.equal(getUserConfigPath(), configPath);
-    assert.equal(config.provider, "volcengine");
-    assert.equal(config.apiKey, "ark-secret");
-    assert.equal(config.baseUrl, "https://ark.example/api/v3");
-    assert.equal(config.model, "endpoint-id");
-    assert.equal(config.maxTokens, 24_576);
-    assert.equal(config.reasoningEffort, "high");
-    assert.deepEqual(config.headers, { "X-Project": "opencat" });
-  });
-});
-
-test("loadConfig accepts a direct key in the private user YAML", () => {
-  withModelEnvironment({}, (directory) => {
-    const configPath = path.join(directory, "config.yaml");
-    writeFileSync(configPath, [
-      "model:",
-      "  provider: volcengine",
-      "  apiKey: local-ark-secret",
-      "  baseUrl: https://ark.example/api/coding/v3",
-      "  model: deepseek-v4-pro",
-      "",
-    ].join("\n"));
-    process.env.OPENCAT_CONFIG_PATH = configPath;
-
-    const config = loadConfig();
-
-    assert.equal(config.apiKey, "local-ark-secret");
-    assert.equal(config.provider, "volcengine");
-  });
-});
-
-test("loadConfig selects a named model profile", () => {
-  withModelEnvironment({ TEST_ARK_KEY: "ark-secret" }, (directory) => {
-    const configPath = path.join(directory, "config.yaml");
-    writeFileSync(configPath, [
-      "activeProfile: ark-coding",
-      "profiles:",
-      "  ark-coding:",
-      "    provider: volcengine",
-      "    apiKeyEnv: TEST_ARK_KEY",
-      "    baseUrl: https://ark.example/api/coding/v3",
-      "    model: deepseek-v4-pro",
-      "  deepseek:",
-      "    provider: deepseek",
-      "    apiKey: deepseek-secret",
-      "    model: deepseek-v4-pro",
-      "",
-    ].join("\n"));
-    process.env.OPENCAT_CONFIG_PATH = configPath;
-
-    const config = loadConfig();
-
-    assert.equal(config.profileName, "ark-coding");
-    assert.equal(config.provider, "volcengine");
-    assert.equal(config.apiKey, "ark-secret");
-    assert.equal(config.baseUrl, "https://ark.example/api/coding/v3");
-  });
-});
-
-test("OPENCAT_MODEL_PROFILE switches profiles without editing YAML", () => {
-  withModelEnvironment({
-    OPENCAT_MODEL_PROFILE: "custom",
-    OPENAI_API_KEY: "openai-compatible-secret",
-  }, (directory) => {
-    const configPath = path.join(directory, "config.yaml");
-    writeFileSync(configPath, [
-      "activeProfile: deepseek",
-      "profiles:",
-      "  deepseek:",
-      "    provider: deepseek",
-      "    apiKey: deepseek-secret",
-      "    model: deepseek-v4-pro",
-      "  custom:",
-      "    provider: openai-compatible",
-      "    apiKeyEnv: OPENAI_API_KEY",
-      "    baseUrl: https://gateway.example/v1",
-      "    model: custom-model",
-      "",
-    ].join("\n"));
-    process.env.OPENCAT_CONFIG_PATH = configPath;
-
-    const config = loadConfig();
-
-    assert.equal(config.profileName, "custom");
-    assert.equal(config.provider, "openai-compatible");
-    assert.equal(config.apiKey, "openai-compatible-secret");
-    assert.equal(config.baseUrl, "https://gateway.example/v1");
-    assert.equal(config.model, "custom-model");
-  });
-});
-
-test("model environment variables override YAML values", () => {
-  withModelEnvironment({
-    OPENCAT_MODEL_PROVIDER: "deepseek",
-    OPENCAT_API_KEY: "override-key",
-    OPENCAT_API_BASE_URL: "https://gateway.example/v1",
-    OPENCAT_MODEL: "deepseek-custom",
-    OPENCAT_MAX_TOKENS: "16384",
-    OPENCAT_REASONING_EFFORT: "low",
-    DEEPSEEK_USER_ID: "worker-7",
-  }, (directory) => {
-    const configPath = path.join(directory, "config.yaml");
-    writeFileSync(configPath, [
-      "model:",
-      "  provider: volcengine",
-      "  apiKeyEnv: TEST_ARK_KEY",
-      "  model: yaml-model",
-      "  maxTokens: 1000",
-      "",
-    ].join("\n"));
-    process.env.OPENCAT_CONFIG_PATH = configPath;
-
-    const config = loadConfig();
-
-    assert.equal(config.provider, "deepseek");
-    assert.equal(config.apiKey, "override-key");
-    assert.equal(config.baseUrl, "https://gateway.example/v1");
-    assert.equal(config.model, "deepseek-custom");
-    assert.equal(config.maxTokens, 16_384);
-    assert.equal(config.reasoningEffort, "low");
-    assert.equal(config.userId, "worker-7");
-  });
-});
-
-test("loadConfig keeps DeepSeek defaults when the YAML file is absent", () => {
-  withModelEnvironment({ DEEPSEEK_API_KEY: "deepseek-secret" }, (directory) => {
-    process.env.OPENCAT_CONFIG_PATH = path.join(directory, "missing.yaml");
-
-    const config = loadConfig();
-
-    assert.equal(config.provider, "deepseek");
-    assert.equal(config.apiKey, "deepseek-secret");
-    assert.equal(config.model, "deepseek-v4-pro");
-    assert.equal(config.maxTokens, 32_768);
-    assert.equal(config.reasoningEffort, "max");
-  });
-});
-
-test("loadConfig rejects invalid YAML model settings", () => {
-  withModelEnvironment({}, (directory) => {
-    const configPath = path.join(directory, "config.yaml");
-    writeFileSync(configPath, [
-      "model:",
-      "  provider: unsupported-provider",
-      "  maxTokens: -1",
-      "",
-    ].join("\n"));
-    process.env.OPENCAT_CONFIG_PATH = configPath;
-
-    assert.throws(
-      () => loadConfig(),
-      /Unsupported model provider 'unsupported-provider'/,
-    );
-  });
-});
-
-test("loadConfig rejects an API key value used as apiKeyEnv", () => {
-  withModelEnvironment({}, (directory) => {
-    const configPath = path.join(directory, "config.yaml");
-    writeFileSync(configPath, [
-      "model:",
-      "  provider: volcengine",
-      "  apiKeyEnv: ark-secret-value",
-      "  model: endpoint-id",
-      "",
-    ].join("\n"));
-    process.env.OPENCAT_CONFIG_PATH = configPath;
-
-    assert.throws(
-      () => loadConfig(),
-      /apiKeyEnv must be an environment variable name such as ARK_API_KEY/,
-    );
-  });
-});
-
-function withModelEnvironment(
-  values: Partial<Record<(typeof MODEL_ENV_KEYS)[number], string>>,
-  run: (directory: string) => void,
-): void {
-  const previous = new Map<string, string | undefined>();
-  for (const key of MODEL_ENV_KEYS) {
-    previous.set(key, process.env[key]);
-    delete process.env[key];
-  }
-  for (const [key, value] of Object.entries(values)) {
-    if (value !== undefined) {
-      process.env[key] = value;
-    }
-  }
-
-  const directory = mkdtempSync(path.join(tmpdir(), "opencat-model-config-"));
-  try {
-    run(directory);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    for (const [key, value] of previous) {
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-  }
+function withYaml(document: unknown, action: (configPath: string, cwd: string) => void): void {
+  const cwd = mkdtempSync(path.join(tmpdir(), "opencat-yaml-"));
+  const configPath = path.join(cwd, "config.yaml");
+  try { writeFileSync(configPath, stringify(document)); action(configPath, cwd); }
+  finally { rmSync(cwd, { recursive: true, force: true }); }
 }
+
+test("one YAML loads model, memory, compression, web, workspace, and evaluation settings", () => {
+  withYaml({
+    model: { provider: "ark", apiKey: "yaml-secret", model: "endpoint-id", headers: { "X-Project": "opencat" } },
+    memory: { autoExtract: false, directory: "memory", embedding: { model: "text-embedding-v4", dimensions: 1024 } },
+    compression: { autoCompressTriggerTokens: 4096, bulkyToolResultKeepRecent: 0 },
+    reasoning: { continuationRounds: 3 }, web: { port: 6000 }, session: { resume: false },
+    tools: { ripgrepPath: "/usr/bin/rg", webSearch: { baseUrl: "https://search.example" } },
+    workspace: { sweWorkspaceDir: "worktrees" },
+    evaluation: { active: "serial", serial: { limit: 5, phases: ["fix"], allowNetworkClone: false } },
+  }, (configPath) => {
+    const config = loadAppConfig({ configPath });
+    assert.equal(config.model.provider, "volcengine");
+    assert.equal(config.model.apiKey, "yaml-secret");
+    assert.equal(config.model.maxTokens, 32768);
+    assert.deepEqual(config.model.headers, { "X-Project": "opencat" });
+    assert.equal(config.memory.autoExtract, false);
+    assert.equal(config.compression.autoCompressTriggerTokens, 4096);
+    assert.equal(getConfigValue("compression.bulkyToolResultKeepRecent", config), "0");
+    assert.equal(getConfigValue("session.resume", config), "false");
+    assert.equal(getConfigValue("evaluation.serial.phases", config), "fix");
+    assert.equal(config.web.port, 6000);
+    assert.equal(config.configPath, configPath);
+  });
+});
+
+test("application environment variables do not override YAML", () => {
+  const saved = { key: process.env.DEEPSEEK_API_KEY, model: process.env.OPENCAT_MODEL, port: process.env.OPENCAT_WEB_PORT, profile: process.env.OPENCAT_MODEL_PROFILE };
+  try {
+    process.env.DEEPSEEK_API_KEY = "environment-secret";
+    process.env.OPENCAT_MODEL = "environment-model";
+    process.env.OPENCAT_WEB_PORT = "9999";
+    process.env.OPENCAT_MODEL_PROFILE = "missing-profile";
+    withYaml({ model: { apiKey: "yaml-key", model: "yaml-model" }, web: { port: 6001 } }, (configPath) => {
+      const config = loadAppConfig({ configPath });
+      assert.equal(config.model.apiKey, "yaml-key");
+      assert.equal(config.model.model, "yaml-model");
+      assert.equal(config.web.port, 6001);
+    });
+  } finally {
+    for (const [name, value] of Object.entries({
+      DEEPSEEK_API_KEY: saved.key, OPENCAT_MODEL: saved.model, OPENCAT_WEB_PORT: saved.port, OPENCAT_MODEL_PROFILE: saved.profile,
+    })) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
+});
+
+test("named profiles are selected from YAML or explicit arguments", () => {
+  withYaml({ activeProfile: "deepseek", profiles: {
+    deepseek: { provider: "deepseek", apiKey: "deepseek-key" },
+    ark: { provider: "ark", apiKey: "ark-key", model: "endpoint" },
+  } }, (configPath) => {
+    assert.equal(loadAppConfig({ configPath }).model.profileName, "deepseek");
+    assert.equal(loadConfig({ configPath, profile: "ark" }).apiKey, "ark-key");
+    assert.equal(loadConfig({ configPath, profile: "ark" }).provider, "volcengine");
+  });
+});
+
+test("a single named profile is selected automatically", () => {
+  assert.equal(parseAppConfig({ profiles: { custom: { provider: "openai-compatible", apiKey: "key", model: "custom" } } }).model.profileName, "custom");
+});
+
+test("project YAML is discovered and explicit paths are relative to startup cwd", () => {
+  withYaml({ model: { model: "explicit" } }, (configPath, cwd) => {
+    mkdirSync(path.join(cwd, ".opencat"));
+    writeFileSync(path.join(cwd, ".opencat", "config.yaml"), "model:\n  model: project\n");
+    assert.equal(loadAppConfig({ cwd }).model.model, "project");
+    assert.equal(loadAppConfig({ cwd, configPath: "config.yaml" }).model.model, "explicit");
+    assert.equal(loadAppConfig({ cwd, configPath: "config.yaml" }).configPath, configPath);
+  });
+});
+
+test("explicit missing YAML files and malformed YAML fail clearly", () => {
+  withYaml({}, (configPath, cwd) => {
+    assert.throws(() => loadAppConfig({ cwd, configPath: "missing.yaml" }), /Unable to load OpenCat YAML config/);
+    writeFileSync(configPath, "model: [broken");
+    assert.throws(() => loadAppConfig({ configPath }), /Unable to load OpenCat YAML config/);
+  });
+});
+
+test("invalid and unknown YAML fields fail with their field path", () => {
+  for (const [document, expected] of [
+    [{ web: { port: "5177" } }, /web.port/],
+    [{ web: { port: 65536 } }, /web.port/],
+    [{ memory: { autoExtract: "false" } }, /memory.autoExtract/],
+    [{ compression: { autoCompressTriggerTokens: -1 } }, /compression.autoCompressTriggerTokens/],
+    [{ model: { maxTokens: 1.5 } }, /model.maxTokens/],
+    [{ model: { apiKeyEnv: "DEEPSEEK_API_KEY" } }, /apiKeyEnv/],
+    [{ memory: { embedding: { dimensions: 0 } } }, /dimensions/],
+    [{ reasoning: { continuatonRounds: 2 } }, /continuatonRounds/],
+  ] as const) assert.throws(() => parseAppConfig(document), expected);
+});
+
+test("ambiguous profiles and unknown profile selections fail", () => {
+  assert.throws(() => parseAppConfig({ profiles: { a: {}, b: {} } }), /activeProfile/);
+  assert.throws(() => parseAppConfig({ model: {}, profiles: { a: {} } }), /either model or profiles/);
+  assert.throws(() => parseAppConfig({ activeProfile: "missing", profiles: { a: {} } }), /Unknown model profile/);
+});
+
+test("CLI config selectors support both syntaxes and are removed from the prompt", () => {
+  assert.deepEqual(getConfigCliOptions(["--config", "local.yaml", "--profile=ark"]), { configPath: "local.yaml", profile: "ark" });
+  assert.deepEqual(stripConfigCliOptions(["--config=local.yaml", "--profile", "ark", "fix", "bug"]), ["fix", "bug"]);
+  assert.throws(() => getConfigCliOptions(["--config"]), /requires a value/);
+});
+
+test("concurrent configuration scopes do not leak between runs", async () => {
+  const a = parseAppConfig({ web: { port: 6001 } });
+  const b = parseAppConfig({ web: { port: 6002 } });
+  const results = await Promise.all([
+    withAppConfig(a, async () => { await new Promise((resolve) => setTimeout(resolve, 5)); return getAppConfig().web.port; }),
+    withAppConfig(b, async () => { await Promise.resolve(); return getAppConfig().web.port; }),
+  ]);
+  assert.deepEqual(results, [6001, 6002]);
+});

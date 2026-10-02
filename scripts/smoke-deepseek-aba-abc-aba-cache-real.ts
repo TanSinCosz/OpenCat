@@ -1,3 +1,4 @@
+import { getConfigValue } from "../src/config/load-config.js";
 type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
@@ -36,23 +37,23 @@ type TurnResult = {
   assistantReply: string;
 };
 
-const apiKey = process.env.DEEPSEEK_API_KEY?.trim()
-  ?? process.env.OPENAI_API_KEY?.trim();
+const apiKey = getConfigValue("model.apiKey")?.trim()
+  ?? getConfigValue("model.apiKey")?.trim();
 if (!apiKey) {
-  throw new Error("Set DEEPSEEK_API_KEY before running this smoke test.");
+  throw new Error("Set model.apiKey in your OpenCat YAML config before running this smoke test.");
 }
 
 const baseUrl = (
-  process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com"
+  getConfigValue("model.baseUrl") ?? "https://api.deepseek.com"
 ).replace(/\/+$/, "");
 const endpoint = baseUrl.endsWith("/chat/completions")
   ? baseUrl
   : `${baseUrl}/chat/completions`;
-const model = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
-const maxTokens = readNonNegativeInteger("DEEPSEEK_ABA_MAX_TOKENS", 8);
-const pauseMs = readNonNegativeInteger("DEEPSEEK_ABA_PAUSE_MS", 800);
-const prefixLines = readNonNegativeInteger("DEEPSEEK_ABA_PREFIX_LINES", 128);
-const runId = process.env.DEEPSEEK_ABA_RUN_ID?.trim()
+const model = getConfigValue("model.model") ?? "deepseek-v4-flash";
+const maxTokens = readNonNegativeInteger("experiments.abaCache.maxTokens", 8);
+const pauseMs = readNonNegativeInteger("experiments.abaCache.pauseMs", 800);
+const prefixLines = readNonNegativeInteger("experiments.abaCache.prefixLines", 128);
+const runId = getConfigValue("experiments.abaCache.runId")?.trim()
   || `aba-cache-${Date.now().toString(36)}`;
 const userMessages = ["ABA", "ABC", "ABA"] as const;
 
@@ -189,7 +190,7 @@ function createCacheableSystemPrefix(
 }
 
 function readNonNegativeInteger(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
+  const raw = getConfigValue(name)?.trim();
   if (!raw) {
     return fallback;
   }

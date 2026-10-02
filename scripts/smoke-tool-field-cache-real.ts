@@ -1,21 +1,21 @@
-import OpenAI from "openai";
+import { getConfigValue } from "../src/config/load-config.js";
+import { createOpenAICompatibleSdkClient } from "../src/openai-compatible/transport.js";
 
-const apiKey = process.env.DEEPSEEK_API_KEY?.trim() ??
-  process.env.OPENAI_API_KEY?.trim();
+const apiKey = getConfigValue("model.apiKey")?.trim();
 
 if (!apiKey) {
-  throw new Error("Set DEEPSEEK_API_KEY before running this smoke script.");
+  throw new Error("Set model.apiKey in your OpenCat YAML config before running this smoke script.");
 }
 
-const baseURL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
-const model = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
-const pauseMs = Number(process.env.OPENCAT_CACHE_FIELD_PAUSE_MS ?? 800);
-const runId = process.env.OPENCAT_CACHE_FIELD_RUN_ID ??
+const baseURL = getConfigValue("model.baseUrl") ?? "https://api.deepseek.com";
+const model = getConfigValue("model.model") ?? "deepseek-v4-flash";
+const pauseMs = Number(getConfigValue("experiments.cacheField.pauseMs") ?? 800);
+const runId = getConfigValue("experiments.cacheField.runId") ??
   `field_${Date.now().toString(36)}`;
 
-const client = new OpenAI({
+const client = createOpenAICompatibleSdkClient({
   apiKey,
-  baseURL,
+  baseUrl: baseURL,
 });
 
 type Usage = {
