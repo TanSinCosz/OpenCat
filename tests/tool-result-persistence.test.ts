@@ -29,7 +29,6 @@ test("large tool results stay inline until group budget selects them", async () 
       maxTokens: 1024,
     },
     modelClient: createToolCallClient(streamRequests),
-    MemoryConfig: createMemoryConfig(),
     tools: [createLargeOutputTool(largeOutput)],
   });
   const state = createState();
@@ -65,7 +64,6 @@ test("tool results exceeding per-tool max are persisted immediately", async () =
       maxTokens: 1024,
     },
     modelClient: createToolCallClient(streamRequests),
-    MemoryConfig: createMemoryConfig(),
     tools: [createLargeOutputTool(largeOutput, 1_000)],
   });
   const state = createState();
@@ -205,22 +203,5 @@ function doneChunk(): ModelStreamEnvelope {
     chunk: null,
     raw: "[DONE]",
     done: true,
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
-    },
   };
 }

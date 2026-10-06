@@ -28,7 +28,6 @@ test("ReadSkill reads only discovered skills and records invoked skill state", a
       maxTokens: 1024,
     },
     modelClient: createUnusedClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   runtime.toolUseContext.skillRuntime.dynamicSkills.set("repo-style", {
     name: "repo-style",
@@ -92,7 +91,6 @@ test("ReadSkill activates allowed-tools as temporary command allow rules", async
       maxTokens: 1024,
     },
     modelClient: createUnusedClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   await addSkillDirectories([skillRoot], runtime.toolUseContext.skillRuntime);
 
@@ -114,8 +112,7 @@ test("ReadSkill activates allowed-tools as temporary command allow rules", async
   );
   assert.deepEqual(
     runtime.toolUseContext
-      .getAppState()
-      .toolPermissionContext
+      .permissionContext
       .alwaysAllowRules
       .command,
     ["Read", "Grep", "Bash(git status:*)"],
@@ -150,7 +147,6 @@ test("ReadSkill executes context: fork skills in a forked agent", async () => {
       maxTokens: 1024,
     },
     modelClient: createTextClient("fork skill done", streamRequests),
-    MemoryConfig: createMemoryConfig(),
   });
   await addSkillDirectories([skillRoot], runtime.toolUseContext.skillRuntime);
 
@@ -210,7 +206,6 @@ test("post auto-compress restore reattaches invoked skills once", async () => {
       maxTokens: 1024,
     },
     modelClient: createUnusedClient(),
-    MemoryConfig: createMemoryConfig(),
   });
 
   const result = restoreInvokedSkillsAfterAutoCompress(
@@ -294,23 +289,6 @@ function createTextClient(
     },
     async collectStream(): Promise<never> {
       throw new Error("collectStream is not used in this test");
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

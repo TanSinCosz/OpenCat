@@ -9,8 +9,8 @@ import { startBackgroundBashTask } from "./background.js";
 import { BASH_TOOL_NAME, DESCRIPTION, getMaxTimeoutMs, getSimplePrompt } from "./prompt.js";
 import { inputSchema, outputSchema } from "./type.js";
 
-type typeInput = z.infer<ReturnType<typeof inputSchema>>;
-type typeOutput = z.infer<ReturnType<typeof outputSchema>>;
+type BashInput = z.infer<ReturnType<typeof inputSchema>>;
+type BashOutput = z.infer<ReturnType<typeof outputSchema>>;
 
 type ValidationResult =
     | { result: true }
@@ -39,9 +39,8 @@ const DANGEROUS_COMMANDS = [
     /^uv\s+add(?:\s|$)/i,
 ];
 
-export class Bash implements Tool<typeInput, typeOutput, typeof inputSchema, typeof outputSchema> {
+export class Bash implements Tool<BashInput, BashOutput, typeof inputSchema, typeof outputSchema> {
     name = BASH_TOOL_NAME;
-    searchHint = "execute shell commands";
     maxResultSizeChars = MAX_BUFFER_CHARS;
     strict = true;
     inputSchema = inputSchema;
@@ -59,7 +58,7 @@ export class Bash implements Tool<typeInput, typeOutput, typeof inputSchema, typ
         return false;
     }
 
-    formatResult({ output }: { output: typeOutput }): string {
+    formatResult({ output }: { output: BashOutput }): string {
         if (output.backgroundTaskId) {
             return [
                 `Command is running in the background. Task id: ${output.backgroundTaskId}`,
@@ -94,7 +93,7 @@ export class Bash implements Tool<typeInput, typeOutput, typeof inputSchema, typ
             : "Command completed with no output.";
     }
 
-    async validateInput(input: typeInput, _context?: ToolUseContext): Promise<ValidationResult> {
+    async validateInput(input: BashInput, _context?: ToolUseContext): Promise<ValidationResult> {
         const command = input.command.trim();
 
         if (!command) {
@@ -134,11 +133,11 @@ export class Bash implements Tool<typeInput, typeOutput, typeof inputSchema, typ
     }
 
     async call(
-        input: typeInput,
+        input: BashInput,
         context: ToolUseContext,
         runtime: Runtime,
         state: State,
-    ): Promise<typeOutput> {
+    ): Promise<BashOutput> {
         const validation = await this.validateInput(input, context);
         if (validation.result === false) {
             throw new Error(validation.message);
@@ -213,7 +212,7 @@ function runShellCommand(
     command: string,
     timeout: number,
     context: ToolUseContext,
-): Promise<typeOutput> {
+): Promise<BashOutput> {
     return new Promise((resolve, reject) => {
         let stdout = "";
         let stderr = "";
@@ -227,7 +226,7 @@ function runShellCommand(
             stdio: ["ignore", "pipe", "pipe"],
         });
 
-        const finish = (result: typeOutput) => {
+        const finish = (result: BashOutput) => {
             if (settled) return;
             settled = true;
             clearTimeout(timeoutId);

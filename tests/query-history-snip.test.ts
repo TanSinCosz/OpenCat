@@ -37,7 +37,6 @@ test("no-projection benchmark leaves persisted projection state unapplied", asyn
       model: "deepseek-v4-flash",
       maxTokens: 1024,
     },
-    MemoryConfig: createMemoryConfig(),
     contextCompressionConfig: { enableProjection: false },
     transcriptStore: false,
     tools: [],
@@ -98,7 +97,6 @@ test("buildMessagesForQuery preserves an assistant/tool pair from an old content
       model: "deepseek-v4-flash",
       maxTokens: 1024,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [],
   });
@@ -157,7 +155,6 @@ test("buildMessagesForQuery preserves an assistant/tool pair from an old removed
       model: "deepseek-v4-flash",
       maxTokens: 1024,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [],
   });
@@ -224,7 +221,6 @@ test("buildMessagesForQuery does not snip business messages when bulky compact m
         model: "deepseek-v4-flash",
         maxTokens: 1024,
       },
-      MemoryConfig: createMemoryConfig(),
       transcriptStore: false,
       tools: [],
     });
@@ -304,7 +300,6 @@ test("buildMessagesForQuery does not mark snipped Read cache entries as partial 
         model: "deepseek-v4-flash",
         maxTokens: 1024,
       },
-      MemoryConfig: createMemoryConfig(),
       transcriptStore: false,
       tools: [],
     });
@@ -380,7 +375,6 @@ test("buildMessagesForQuery keeps business messages after repeated bulky compact
         model: "deepseek-v4-flash",
         maxTokens: 1024,
       },
-      MemoryConfig: createMemoryConfig(),
       transcriptStore: false,
       tools: [],
     });
@@ -418,7 +412,6 @@ test("buildMessagesForQuery keeps business messages after repeated bulky compact
     restoreConfigValue("compression.bulkyToolResultKeepRecent", originalKeepRecent);
   }
 });
-
 
 test("buildMessagesForQuery records durable snip boundaries for old attachment context", async () => {
   const originalTargetTokens = configValues["compression.historySnipTargetTokens"];
@@ -483,7 +476,6 @@ test("buildMessagesForQuery records durable snip boundaries for old attachment c
           model: "deepseek-v4-flash",
           maxTokens: 1024,
         },
-        MemoryConfig: createMemoryConfig(),
         transcriptStore: false,
         tools: [],
       });
@@ -566,7 +558,6 @@ test("buildMessagesForQuery keeps old user and assistant messages intact", async
         model: "deepseek-v4-flash",
         maxTokens: 1024,
       },
-      MemoryConfig: createMemoryConfig(),
       transcriptStore: false,
       tools: [],
     });
@@ -649,7 +640,6 @@ test("buildMessagesForQuery skips history snip when bulky compact reaches the ta
         model: "deepseek-v4-flash",
         maxTokens: 1024,
       },
-      MemoryConfig: createMemoryConfig(),
       transcriptStore: false,
       tools: [],
     });
@@ -721,7 +711,6 @@ test("buildMessagesForQuery keeps bulky compaction when no snip candidate is rem
         model: "deepseek-v4-flash",
         maxTokens: 1024,
       },
-      MemoryConfig: createMemoryConfig(),
       transcriptStore: false,
       tools: [],
     });
@@ -756,21 +745,4 @@ function restoreConfigValue(name: string, value: string | undefined): void {
   }
 
   configValues[name] = value;
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
-    },
-  };
 }

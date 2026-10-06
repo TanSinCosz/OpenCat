@@ -22,11 +22,6 @@ function createTestRuntime(cwd: string) {
       model: "deepseek-v4-flash",
       maxTokens: 128,
     },
-    MemoryConfig: {
-      embedder: { provider: "test", config: {} },
-      vectorStore: { provider: "test", config: {} },
-      llm: { provider: "test", config: {} },
-    },
     transcriptStore: false,
   });
 }

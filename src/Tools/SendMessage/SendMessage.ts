@@ -21,9 +21,6 @@ export class SendMessage
   outputSchema = outputSchema;
   strict = true;
   maxResultSizeChars = 100_000;
-  searchHint = "send an instruction to a running subagent";
-  shouldDefer = false;
-  alwaysLoad = true;
 
   description(): string {
     return DESCRIPTION;

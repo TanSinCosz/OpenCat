@@ -44,6 +44,7 @@ export const appConfigSchema = z.strictObject({
   activeProfile: text.optional(), profiles: z.record(z.string(), modelSchema).optional(), model: modelSchema.optional(),
   memory: section({
     enabled: z.boolean().default(true), autoInject: z.boolean().default(true), autoExtract: z.boolean().default(true),
+    // Accept old YAML files; autoInjectTopK has never controlled file-memory selection.
     autoInjectTopK: positive.default(6), searchThreshold: z.number().min(0).max(1).default(0.1),
     maxInjectedChars: positive.default(40_000), directory: text.optional(), userId: text.default("default-user"),
     dreamRecentSessions: positive.default(8), embedding: service.prefault({}), llm: service.prefault({}),

@@ -48,20 +48,6 @@ const runtime = createRuntime({
     model: getConfigValue("model.model") ?? "deepseek-v4-flash",
     maxTokens: Number(getConfigValue("model.maxTokens") ?? 2048),
   },
-  MemoryConfig: {
-    embedder: {
-      provider: "smoke",
-      config: {},
-    },
-    vectorStore: {
-      provider: "smoke",
-      config: {},
-    },
-    llm: {
-      provider: "smoke",
-      config: {},
-    },
-  },
 });
 
 let contextReadyCount = 0;

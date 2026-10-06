@@ -121,7 +121,6 @@ async function createMeasuredRequest(options: {
       reasoningEffort: "max",
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
     tools,
     systemPrompt: options.systemPrompt,
     transcriptStore: false,
@@ -314,21 +313,4 @@ function formatPercent(value: number): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
-    },
-  };
 }

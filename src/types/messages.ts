@@ -10,7 +10,6 @@ import type {
 import { estimateTokensFromText } from "../utils/size-estimate.js";
 
 export type MessageId = `msg_${string}`;
-export type ToolResultId = `tool_result_${string}`;
 
 export type MessageSource =
   | "user"
@@ -74,7 +73,6 @@ export type UserMessage = ModelUserMessage & MessageMeta;
 export type AssistantMessage = ModelAssistantMessage & MessageMeta;
 export type ToolMessage = ModelToolMessage & MessageMeta & {
   toolName?: string;
-  toolResultId?: ToolResultId;
   persistedToolResult?: PersistedToolResult;
 };
 
@@ -152,10 +150,11 @@ export function toModelMessage(message: Message): ModelMessage {
         usage: _usage,
         contextTokenCount: _contextTokenCount,
         toolName: _toolName,
-        toolResultId: _toolResultId,
+        // 旧日志可能带有已废弃的字段，恢复时保留日志，但不传给模型 API。
+        toolResultId: _legacyToolResultId,
         persistedToolResult: _persistedToolResult,
         ...modelMessage
-      } = message;
+      } = message as ToolMessage & { toolResultId?: unknown };
       return modelMessage;
     }
   }

@@ -11,10 +11,6 @@ export const DESCRIPTION = "Execute shell commands";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 
-export function getDefaultTimeoutMs(): number {
-    return DEFAULT_TIMEOUT_MS;
-}
-
 export function getMaxTimeoutMs(): number {
     return MAX_TIMEOUT_MS;
 }

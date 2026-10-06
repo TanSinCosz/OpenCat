@@ -1,0 +1,9 @@
+# 本地回归测试配置：不读取开发者配置，也不连接真实模型或 MCP 服务。
+model:
+  provider: deepseek
+  apiKey: test-key
+  model: deepseek-v4-flash
+memory:
+  enabled: false
+  autoInject: false
+  autoExtract: false

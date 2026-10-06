@@ -20,7 +20,6 @@ import {
 } from "../../types/runtime.js";
 import { createState, type State } from "../../types/state.js";
 import type {
-  AppState,
   CanUseToolFn,
   FileStateCache,
   PermissionMode,
@@ -194,7 +193,6 @@ async function runAgentSynchronously(
   );
   const childRuntime = createChildAgentRuntime(
     options,
-    childState,
     agentId,
     worktree,
     resolvedAgentTools,
@@ -321,7 +319,6 @@ async function runAgentSynchronously(
     await killBackgroundTasksForAgent(
       childRuntime.sessionId,
       childRuntime.agentId,
-      childState,
     );
   }
 }
@@ -436,7 +433,6 @@ function filterIncompleteToolCallMessages(
 
 function createChildAgentRuntime(
   options: RunAgentOptions,
-  childState: State,
   agentId: SubAgentId,
   worktree: AgentWorktreeSession | undefined,
   resolvedAgentTools: ResolvedAgentTools,
@@ -465,12 +461,11 @@ function createChildAgentRuntime(
         ),
     },
     modelClient: parent.modelClient,
-    contextProjectionState: parent.contextProjectionState,
     toolResultBudgetState: parent.toolResultBudgetState,
     contextCompressionConfig: parent.contextCompressionConfig,
     enforceCanUseToolBeforeTemporaryRules: options.mode === "fork",
-    MemoryConfig: parent.MemoryConfig,
-    longTermMemory: parent.longTermMemory,
+    legacyMemoryConfig: parent.legacyMemoryConfig,
+    legacyMemory: parent.legacyMemory,
     longTermMemoryConfig: {
       ...parent.longTermMemoryConfig,
       agentId,
@@ -478,12 +473,8 @@ function createChildAgentRuntime(
     tools: childTools,
     observer: parent.observer,
     usage: parent.usage,
-    tokenizer: parent.toolUseContext.tokenizer,
-    isNonInteractiveSession: parent.toolUseContext.options.isNonInteractiveSession,
-    mainLoopModel: parent.modelRuntimeConfig.model,
-    agentDefinitions: parent.toolUseContext.options.agentDefinitions,
-    thinkingConfig: parent.toolUseContext.options.thinkingConfig,
-    appState: deriveChildAppState(options),
+    agentDefinitions: parent.toolUseContext.agentDefinitions,
+    permissionContext: deriveChildPermissionContext(options),
     systemPrompt: options.mode === "fork" ? parent.systemPrompt : undefined,
     systemContext: options.mode === "fork" ? parent.systemContext : undefined,
     userContext: options.mode === "fork" ? parent.userContext : undefined,
@@ -535,31 +526,16 @@ function createChildCanUseTool(
   };
 }
 
-function deriveChildAppState(options: RunAgentOptions): AppState {
-  const parentAppState = options.parentRuntime.toolUseContext.getAppState();
-
-  return {
-    ...parentAppState,
-    toolPermissionContext: deriveChildPermissionContext(
-      parentAppState.toolPermissionContext,
-      options,
-    ),
-  };
-}
-
 function deriveChildPermissionContext(
-  parent: ToolPermissionContext,
   options: RunAgentOptions,
 ): ToolPermissionContext {
+  const parent = options.parentRuntime.toolUseContext.permissionContext;
   const mode = resolveChildPermissionMode(parent.mode, options);
 
   return {
     ...parent,
     mode,
-    additionalWorkingDirectories: new Map(parent.additionalWorkingDirectories),
     alwaysAllowRules: clonePermissionRules(parent.alwaysAllowRules),
-    alwaysDenyRules: clonePermissionRules(parent.alwaysDenyRules),
-    alwaysAskRules: clonePermissionRules(parent.alwaysAskRules),
   };
 }
 

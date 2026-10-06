@@ -36,7 +36,6 @@ test("MCP stdio server tools are listed, exposed, and callable", async () => {
         model: "deepseek-v4-flash",
         maxTokens: 1024,
       },
-      MemoryConfig: createMemoryConfig(),
       tools: connection.tools,
       mcpConnections: [connection],
     });
@@ -150,21 +149,4 @@ rl.on("line", line => {
   });
 });
 `;
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
-    },
-  };
 }

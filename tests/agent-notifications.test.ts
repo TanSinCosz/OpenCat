@@ -26,7 +26,6 @@ test("loadRuntimeContextForQuery moves notifications into runtime context", asyn
       maxTokens: 1024,
     },
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState({
     messages: [
@@ -89,7 +88,6 @@ test("subagent runtime does not flush main agent notifications", async () => {
       maxTokens: 1024,
     },
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
 
   const flushed = await loadRuntimeContextForQuery(
@@ -113,7 +111,6 @@ test("buildMessagesForQuery does not inject unmaterialized runtime context", asy
       maxTokens: 1024,
     },
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState({
     messages: [
@@ -171,7 +168,6 @@ test("buildMessagesForQuery prepends project instruction context", async () => {
       maxTokens: 1024,
     },
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState({
     messages: [
@@ -207,7 +203,6 @@ test("query materializes runtime context into durable messages", async () => {
       maxTokens: 1024,
     },
     modelClient: createTextClient("OK"),
-    MemoryConfig: createMemoryConfig(),
     longTermMemoryConfig: {
       enabled: false,
     },
@@ -299,23 +294,6 @@ function createTextClient(content: string): OpenAICompatibleClient {
     },
     async collectStream(): Promise<never> {
       throw new Error("collectStream is not used in this test");
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

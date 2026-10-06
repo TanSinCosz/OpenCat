@@ -43,7 +43,6 @@ test("MCP streamable HTTP server supports bearer auth", async () => {
         model: "deepseek-v4-flash",
         maxTokens: 1024,
       },
-      MemoryConfig: createMemoryConfig(),
       tools: connection.tools,
       mcpConnections: [connection],
     });
@@ -188,21 +187,4 @@ function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   });
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
-    },
-  };
 }

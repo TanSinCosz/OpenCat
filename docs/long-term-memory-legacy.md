@@ -28,9 +28,10 @@ topic memory、daily log、selector 按需召回，以及手动 AutoDream。
 | `src/Memory/Memory.ts`     | `MemoryTool` 的写入、提取、检索和删除逻辑  |
 | `src/Memory/Embedding/`    | 调用 embedding API 生成向量                  |
 | `src/Memory/VectorStore/`  | 保存向量、payload 和 BM25 关键词数据         |
-| `src/Memory/HistoryStore/` | SQLite 历史存储辅助逻辑                      |
-| `src/Memory/runtime.ts`    | 懒加载旧 MemoryTool、scope filter 和检索配置 |
-| `src/Tools/MemorySearch/`  | 暴露给模型的旧版主动搜索工具                 |
+| `src/Memory/runtime.ts`    | 记忆开关、预算和身份配置                     |
+| `src/Tools/MemorySearch/`  | 旧版主动搜索、向量服务延迟初始化和范围过滤   |
+
+旧 `HistoryStore/` 曾提供独立的历史辅助存储，但没有接入现存调用链，已删除。保留的 VectorStore 实现有自己的 SQLite 表。没有加载方的中文旧提示词 `promptCN.ts` 也已删除。
 
 ## 2. 旧版写入流程
 

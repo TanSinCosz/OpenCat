@@ -2,8 +2,6 @@ import { z } from "zod";
 import { lazySchema } from "../utils/lazySchema.js";
 import { semanticNumber } from "../utils/semanticNumber.js";
 
-export const PDF_MAX_PAGES_PER_READ = 20;
-
 export const inputSchema = lazySchema(() =>
     z.strictObject({
         file_path: z.string().describe('The absolute path to the file to read'),
@@ -13,12 +11,7 @@ export const inputSchema = lazySchema(() =>
         limit: semanticNumber(z.number().int().positive().optional()).describe(
             'The number of lines to read. Only provide if the file is too large to read at once.',
         ),
-        // pages: z
-        //     .string()
-        //     .optional()
-        //     .describe(
-        //         `Page range for PDF files (e.g., "1-5", "3", "10-20"). Only applicable to PDF files. Maximum ${PDF_MAX_PAGES_PER_READ} pages per request.`,
-        //     ),
+
     }),
 )
 export const outputSchema = lazySchema(() =>

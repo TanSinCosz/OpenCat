@@ -23,18 +23,12 @@ test("Edit rejects partial-view read cache entries", async () => {
   });
 
   const edit = new FileEdit();
-  const validation = await edit.validateInput(
-    {
-      file_path: filePath,
-      old_string: "before",
-      new_string: "after",
-      replace_all: false,
-    },
-    context,
-  );
-
-  assert.equal(validation.result, false);
-  assert.match(validation.message, /read it first/i);
+  await assert.rejects(edit.call({
+    file_path: filePath,
+    old_string: "before",
+    new_string: "after",
+    replace_all: false,
+  }, context), /read it first/i);
   assert.equal(await readFile(filePath, "utf8"), "before\n");
 });
 

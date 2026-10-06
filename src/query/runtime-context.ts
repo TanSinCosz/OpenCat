@@ -275,7 +275,6 @@ export async function loadDynamicSkillContextForQuery(
   state: State,
 ): Promise<number> {
   const skills = collectActiveDynamicSkills(runtime);
-  runtime.toolUseContext.dynamicSkillDirTriggers?.clear();
 
   if (skills.length === 0) {
     return 0;

@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-
-import { createMemoryConfig } from "../src/Memory/config.js";
 import { createDefaultTools } from "../src/Tools/index.js";
 import { WebFetch } from "../src/Tools/WebFetch/WebFetch.js";
 import { inputSchema } from "../src/Tools/WebFetch/type.js";
@@ -39,7 +37,6 @@ test("WebFetch fetches HTML and extracts readable text", async () => {
       model: "deepseek-v4-pro",
       maxTokens: 4_096,
     },
-    MemoryConfig: createMemoryConfig(),
   });
 
   const output = await tool.call(
@@ -81,7 +78,6 @@ test("WebFetch reports cross-host redirects without following them", async () =>
       model: "deepseek-v4-pro",
       maxTokens: 4_096,
     },
-    MemoryConfig: createMemoryConfig(),
   });
 
   const output = await tool.call(

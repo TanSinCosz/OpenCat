@@ -1,8 +1,6 @@
 
 import type { JSONSchemaObject } from "../Tools/types.js";
 
-export type ModelRole = "system" | "user" | "assistant" | "tool";
-
 export interface ModelFunctionDefinition {
   name: string;
   description?: string;

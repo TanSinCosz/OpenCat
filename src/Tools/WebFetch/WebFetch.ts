@@ -40,9 +40,6 @@ export class WebFetch
   inputSchema = inputSchema;
   outputSchema = outputSchema;
   maxResultSizeChars = 100_000;
-  searchHint = "fetch and extract content from a URL";
-  shouldDefer = true;
-  alwaysLoad = true;
 
   private readonly fetchImpl: typeof fetch;
   private readonly maxBytes: number;

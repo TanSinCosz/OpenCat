@@ -33,20 +33,28 @@ export interface InvokedSkill {
 }
 
 export interface State {
+  /** 会话业务消息；模型输入由投影构建，保留现有历史与压缩的关系。 */
   Messages: Message[];
+  /** 等待本轮注入的附件，合并为 opencat_context 消息后清空。 */
   runtimeContextMessages: Message[];
+  /** 已有摘要和按摘要防重的回填标记。 */
   autoCompress: AutoCompressState;
   historySnips: HistorySnipBoundary[];
+  /** 已生成的工具结果替换表，由 State 持久化。 */
   toolResultBudgetState: ToolResultBudgetState;
+  /** 会话滚动笔记、覆盖位置和更新进度，主会话压缩依赖此状态。 */
   sessionMemory: SessionMemoryState;
   mode: "default" | "plan";
   plan?: PlanState;
+  /** 父子智能体的协作任务表；活动执行资源由 Agent runner 管理。 */
   agentTasks: AgentTasksState;
   agentNotifications: AgentNotification[];
   backgroundTasks: BackgroundTasksState;
   backgroundTaskNotifications: BackgroundTaskNotification[];
+  /** 已读取技能的正文，供现有压缩后回填逻辑使用。 */
   invokedSkills: InvokedSkill[];
   todos: Record<string, TodoList>;
+  /** 文件记忆的召回去重、累计预算与提取游标；记忆库正文在文件中。 */
   longTermMemory: LongTermMemoryState;
 }
 

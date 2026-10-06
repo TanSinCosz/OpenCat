@@ -21,9 +21,6 @@ export class MemorySave
   outputSchema = outputSchema;
   strict = true;
   maxResultSizeChars = 20_000;
-  searchHint = "save durable long-term memory";
-  shouldDefer = false;
-  alwaysLoad = true;
 
   description(): string {
     return DESCRIPTION;

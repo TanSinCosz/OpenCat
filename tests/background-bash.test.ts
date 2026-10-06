@@ -1,3 +1,4 @@
+import { inputSchema as bashInputSchema } from "../src/Tools/Bash/type.js";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,9 +9,6 @@ import {
   killBackgroundTasksForAgent,
 } from "../src/Tools/Bash/background.js";
 import { Bash } from "../src/Tools/Bash/Bash.js";
-import {
-  inputSchema as bashInputSchema,
-} from "../src/Tools/Bash/type.js";
 import {
   markRestoredBackgroundTasksDetached,
 } from "../src/Tools/Bash/state.js";
@@ -118,7 +116,6 @@ test("background Bash tasks are scoped to their owning Agent", async () => {
   const killed = await killBackgroundTasksForAgent(
     runtime.sessionId,
     runtime.agentId,
-    state,
   );
 
   assert.equal(killed, 1);
@@ -173,11 +170,6 @@ function createTestRuntime(
       apiKey: "test-key",
       model: "deepseek-v4-flash",
       maxTokens: 128,
-    },
-    MemoryConfig: {
-      embedder: { provider: "test", config: {} },
-      vectorStore: { provider: "test", config: {} },
-      llm: { provider: "test", config: {} },
     },
     transcriptStore: false,
   });

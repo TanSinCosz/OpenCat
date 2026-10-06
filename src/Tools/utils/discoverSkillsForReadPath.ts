@@ -3,18 +3,12 @@ import { dirname, isAbsolute, join, relative, sep } from 'path'
 import { getCwd } from "./cwd.js";
 import { ToolUseContext, SkillRuntimeState, SkillCommand } from "../types.js";
 
-type dynamicSkills = Map<string, SkillCommand>
-
 export async function discoverSkillsForReadPath(
     fullFilePath: string,
     context: ToolUseContext,
 ): Promise<void> {
     const cwd = getCwd()
     const newSkillDirs = await discoverSkillDirsForPaths([fullFilePath], cwd, context.skillRuntime)
-
-    for (const dir of newSkillDirs) {
-        context.dynamicSkillDirTriggers?.add(dir)
-    }
 
     if (newSkillDirs.length > 0) {
         await addSkillDirectories(newSkillDirs, context.skillRuntime)
@@ -23,11 +17,10 @@ export async function discoverSkillsForReadPath(
     activateConditionalSkillsForPaths([fullFilePath], cwd, context.skillRuntime)
 }
 
-
 export async function discoverSkillDirsForPaths(
     filePaths: string[],
     cwd: string,
-    SkillRuntimeState: SkillRuntimeState
+    skillRuntime: SkillRuntimeState
 ): Promise<string[]> {
     const root = cwd.endsWith(sep) ? cwd.slice(0, -1) : cwd
     const discovered: string[] = []
@@ -38,8 +31,8 @@ export async function discoverSkillDirsForPaths(
         while (currentDir === root || currentDir.startsWith(root + sep)) {
             const skillDir = join(currentDir, '.claude', 'skills')
 
-            if (!SkillRuntimeState.checkedSkillDirs.has(skillDir)) {
-                SkillRuntimeState.checkedSkillDirs.add(skillDir)
+            if (!skillRuntime.checkedSkillDirs.has(skillDir)) {
+                skillRuntime.checkedSkillDirs.add(skillDir)
 
                 try {
                     const stats = await stat(skillDir)
@@ -60,7 +53,7 @@ export async function discoverSkillDirsForPaths(
     return discovered.sort((a, b) => b.split(sep).length - a.split(sep).length)
 }
 
-export async function addSkillDirectories(dirs: string[], SkillRuntimeState: SkillRuntimeState): Promise<void> {
+export async function addSkillDirectories(dirs: string[], skillRuntime: SkillRuntimeState): Promise<void> {
     if (dirs.length === 0) return
 
     const loaded = await Promise.all(dirs.map(loadSkillsFromDirectory))
@@ -68,9 +61,9 @@ export async function addSkillDirectories(dirs: string[], SkillRuntimeState: Ski
     for (let i = loaded.length - 1; i >= 0; i--) {
         for (const skill of loaded[i] ?? []) {
             if (skill.paths?.length) {
-                SkillRuntimeState.conditionalSkills.set(skill.name, skill)
+                skillRuntime.conditionalSkills.set(skill.name, skill)
             } else {
-                SkillRuntimeState.dynamicSkills.set(skill.name, skill)
+                skillRuntime.dynamicSkills.set(skill.name, skill)
             }
         }
     }
@@ -79,11 +72,11 @@ export async function addSkillDirectories(dirs: string[], SkillRuntimeState: Ski
 export function activateConditionalSkillsForPaths(
     filePaths: string[],
     cwd: string,
-    SkillRuntimeState: SkillRuntimeState
+    skillRuntime: SkillRuntimeState
 ): string[] {
     const activated: string[] = []
 
-    for (const [name, skill] of SkillRuntimeState.conditionalSkills) {
+    for (const [name, skill] of skillRuntime.conditionalSkills) {
         if (!skill.paths?.length) continue
 
         for (const filePath of filePaths) {
@@ -95,9 +88,8 @@ export function activateConditionalSkillsForPaths(
             }
 
             if (matchesAnyPattern(relativePath, skill.paths)) {
-                SkillRuntimeState.dynamicSkills.set(name, skill)
-                SkillRuntimeState.conditionalSkills.delete(name)
-                SkillRuntimeState.activatedConditionalSkillNames.add(name)
+                skillRuntime.dynamicSkills.set(name, skill)
+                skillRuntime.conditionalSkills.delete(name)
                 activated.push(name)
                 break
             }
@@ -105,10 +97,6 @@ export function activateConditionalSkillsForPaths(
     }
 
     return activated
-}
-
-export function getDynamicSkills(context: ToolUseContext): SkillCommand[] {
-    return [...context.skillRuntime.dynamicSkills.values()]
 }
 
 async function loadSkillsFromDirectory(dir: string): Promise<SkillCommand[]> {

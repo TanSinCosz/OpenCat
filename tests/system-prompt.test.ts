@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSystemPrompt } from "../src/system-prompt.js";
-import { createMemoryConfig } from "../src/Memory/config.js";
 import { createRuntime } from "../src/types/runtime.js";
 
 test("system prompt documents projected context tags", async () => {
@@ -11,7 +10,6 @@ test("system prompt documents projected context tags", async () => {
       model: "deepseek-v4-flash",
       maxTokens: 1024,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [],
   });

@@ -13,20 +13,6 @@ if (!modelRuntimeConfig.apiKey.trim()) {
 const runtime = createRuntime({
   cwd: process.cwd(),
   modelRuntimeConfig,
-  MemoryConfig: {
-    embedder: {
-      provider: "manual-memory-dream",
-      config: {},
-    },
-    vectorStore: {
-      provider: "manual-memory-dream",
-      config: {},
-    },
-    llm: {
-      provider: "manual-memory-dream",
-      config: {},
-    },
-  },
   longTermMemoryConfig: {
     ...getAppConfig().memory,
     fileMemoryDirectory: getAppConfig().memory.directory,

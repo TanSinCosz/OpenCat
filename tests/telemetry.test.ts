@@ -39,7 +39,6 @@ test("query emits minimal telemetry events when an observer is configured", asyn
       maxTokens: 1024,
     },
     modelClient: createTextClient("OK"),
-    MemoryConfig: createMemoryConfig(),
     longTermMemoryConfig: {
       enabled: false,
     },
@@ -143,23 +142,6 @@ function createContentChunk(content: string): ModelStreamEnvelope {
           finish_reason: "stop",
         },
       ],
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

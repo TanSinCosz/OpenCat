@@ -10,14 +10,9 @@ import { resolveRipgrepCommand } from "../utils/ripgrep.js";
 import { getDescription, GREP_TOOL_NAME } from "./prompt.js";
 import { inputSchema, outputSchema } from "./type.js";
 
-
 const DEFAULT_HEAD_LIMIT = 250
-type typeInput = z.infer<ReturnType<typeof inputSchema>>;
-type typeOutput = z.infer<ReturnType<typeof outputSchema>>;
-
-type ValidationResult =
-    | { result: true }
-    | { result: false; message: string; errorCode?: number };
+type GrepInput = z.infer<ReturnType<typeof inputSchema>>;
+type GrepOutput = z.infer<ReturnType<typeof outputSchema>>;
 
 const VCS_DIRECTORIES_TO_EXCLUDE = [
     '.git',
@@ -29,11 +24,10 @@ const VCS_DIRECTORIES_TO_EXCLUDE = [
 ] as const
 
 export class Grep
-    implements Tool<typeInput, typeOutput, typeof inputSchema, typeof outputSchema> {
+    implements Tool<GrepInput, GrepOutput, typeof inputSchema, typeof outputSchema> {
     name = GREP_TOOL_NAME;
     inputSchema = inputSchema;
     outputSchema = outputSchema;
-    searchHint = "search file contents with regex (ripgrep)";
     maxResultSizeChars = 20_000;
 
     async description(): Promise<string> {
@@ -48,7 +42,7 @@ export class Grep
         return true;
     }
 
-    formatResult({ output }: { output: typeOutput }): string {
+    formatResult({ output }: { output: GrepOutput }): string {
         const suffix = formatLimitSuffix(output.appliedLimit, output.appliedOffset)
 
         if (output.mode === 'content' || output.mode === 'count') {
@@ -76,52 +70,6 @@ export class Grep
         ].join('\n')
     }
 
-    async validateInput(
-        { pattern, path }: typeInput,
-    ): Promise<ValidationResult> {
-        if (!pattern.trim()) {
-            return {
-                result: false,
-                message: 'Search pattern cannot be empty.',
-                errorCode: 1,
-            }
-        }
-
-        if (path === 'undefined' || path === 'null') {
-            return {
-                result: false,
-                message: 'Path must be omitted when using the default directory.',
-                errorCode: 2,
-            }
-        }
-
-        if (!path) {
-            return { result: true }
-        }
-
-        const absolutePath = expandPath(path)
-
-        if (absolutePath.startsWith('\\\\') || absolutePath.startsWith('//')) {
-            return { result: true }
-        }
-
-        try {
-            await stat(absolutePath)
-        } catch (error) {
-            if (isENOENT(error)) {
-                return {
-                    result: false,
-                    message: `Path does not exist: ${path}.`,
-                    errorCode: 3,
-                }
-            }
-
-            throw error
-        }
-
-        return { result: true }
-    }
-
     async call(
         {
             pattern,
@@ -138,9 +86,9 @@ export class Grep
             head_limit,
             offset = 0,
             multiline = false,
-        }: typeInput,
+        }: GrepInput,
         context: ToolUseContext,
-    ): Promise<typeOutput> {
+    ): Promise<GrepOutput> {
         const searchPath = path ? expandPath(path) : getCwd()
 
         const args: string[] = ['--hidden', '--max-columns', '500']
@@ -332,11 +280,6 @@ function relativizeCountLine(line: string): string {
     return `${toRelativePath(filePath)}${rest}`
 }
 
-
-function isENOENT(error: unknown): boolean {
-    return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
-
 export async function runRipgrep(
     args: string[],
     cwd: string,
@@ -389,8 +332,6 @@ export async function runRipgrep(
         })
     })
 }
-
-
 
 export function toRelativePath(filePath: string, cwd = process.cwd()): string {
     const relativePath = path.relative(cwd, filePath)

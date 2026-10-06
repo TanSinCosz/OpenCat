@@ -22,9 +22,6 @@ export class Plan
   outputSchema = outputSchema;
   strict = true;
   maxResultSizeChars = 100_000;
-  searchHint = "enter or exit planning-only mode";
-  shouldDefer = false;
-  alwaysLoad = true;
 
   description(): string {
     return DESCRIPTION;
@@ -60,13 +57,10 @@ export class Plan
     }
 
     state.mode = newMode;
-    runtime.toolUseContext.setAppState((previous) => ({
-      ...previous,
-      toolPermissionContext: {
-        ...previous.toolPermissionContext,
-        mode: newMode,
-      },
-    }));
+    runtime.toolUseContext.permissionContext = {
+      ...runtime.toolUseContext.permissionContext,
+      mode: newMode,
+    };
 
     await recordTranscriptStateSnapshot(runtime, state, "mode");
 

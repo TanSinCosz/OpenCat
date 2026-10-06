@@ -24,9 +24,6 @@ export class ReadSkill
   inputSchema = inputSchema;
   outputSchema = outputSchema;
   maxResultSizeChars = 100_000;
-  searchHint = "read discovered project skill instructions";
-  shouldDefer = false;
-  alwaysLoad = true;
   strict = true;
 
   description(): string {
@@ -230,24 +227,18 @@ function activateSkillAllowedTools(
     return undefined;
   }
 
-  const previousAppState = context.getAppState();
-  context.setAppState((previous) => {
-    const commandRules =
-      previous.toolPermissionContext.alwaysAllowRules.command ?? [];
-    return {
-      ...previous,
-      toolPermissionContext: {
-        ...previous.toolPermissionContext,
-        alwaysAllowRules: {
-          ...previous.toolPermissionContext.alwaysAllowRules,
-          command: [...new Set([...commandRules, ...allowedTools])],
-        },
-      },
-    };
-  });
+  const previousPermissions = context.permissionContext;
+  const commandRules = previousPermissions.alwaysAllowRules.command ?? [];
+  context.permissionContext = {
+    ...previousPermissions,
+    alwaysAllowRules: {
+      ...previousPermissions.alwaysAllowRules,
+      command: [...new Set([...commandRules, ...allowedTools])],
+    },
+  };
 
   return () => {
-    context.setAppState(() => previousAppState);
+    context.permissionContext = previousPermissions;
   };
 }
 

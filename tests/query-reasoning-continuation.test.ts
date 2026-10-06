@@ -64,7 +64,6 @@ test("query recovers output truncation with ordinary chat messages", async () =>
         reasoningEffort: "max",
       },
       modelClient: client,
-      MemoryConfig: createMemoryConfig(),
       tools: [],
     });
 
@@ -166,7 +165,6 @@ test("query preserves visible partial content when recovering output truncation"
         reasoningEffort: "max",
       },
       modelClient: client,
-      MemoryConfig: createMemoryConfig(),
       tools: [],
     });
 
@@ -267,23 +265,6 @@ function createContentChunk(content: string): ModelStreamEnvelope {
           finish_reason: "stop",
         },
       ],
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { lazySchema } from "../utils/lazySchema.js";
 
-
 export const inputSchema = lazySchema(() =>
     z.strictObject({
         pattern: z.string().describe('The glob pattern to match files against'),
@@ -13,7 +12,6 @@ export const inputSchema = lazySchema(() =>
             ),
     }),
 )
-type InputSchema = ReturnType<typeof inputSchema>
 
 export const outputSchema = lazySchema(() =>
     z.object({

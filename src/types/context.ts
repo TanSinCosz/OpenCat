@@ -34,10 +34,6 @@ export interface HistorySnipBoundary {
   createdAt: number;
 }
 
-export interface ContextProjectionState {
-  recentMessageCount?: number;
-}
-
 export interface ToolResultBudgetState {
   // Keys are local tool message ids when query projection has them available.
   // `tool_call_id` is API-local and may repeat, so it must not be the state key.

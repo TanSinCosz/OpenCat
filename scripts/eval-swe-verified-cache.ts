@@ -4,8 +4,6 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-
-import { createMemoryConfig } from "../src/Memory/config.js";
 import { createDefaultTools } from "../src/Tools/index.js";
 import type { Tools } from "../src/Tools/types.js";
 import type { EvaluationEvent } from "../src/telemetry/events.js";
@@ -169,7 +167,6 @@ async function runInstance(instance: SweBenchInstance): Promise<InstanceSummary>
         model,
       },
       appConfig,
-      MemoryConfig: createMemoryConfig({ cwd: worktreePath, config: appConfig }),
       observer: {
         async emit(event) {
           events.push(event);
@@ -403,7 +400,6 @@ async function runPythonDatasetLoader(args: string[]): Promise<string> {
 
   throw new Error(`Failed to run Python SWE-bench loader.\n${errors.join("\n")}`);
 }
-
 
 function normalizeInstance(value: unknown): SweBenchInstance {
   const record = value as Record<string, unknown>;
@@ -639,14 +635,9 @@ function optionalStringField(
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-
-
-
 function stringSetting(value: string | undefined): string | undefined {
   return value?.trim() || undefined;
 }
-
-
 
 function sanitizePath(value: string): string {
   return value.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 128) || "instance";

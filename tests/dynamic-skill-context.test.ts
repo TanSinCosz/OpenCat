@@ -33,7 +33,6 @@ test("dynamic skills are replaced and rematerialized into opencat context", asyn
       maxTokens: 1024,
     },
     modelClient: createTextClient("OK"),
-    MemoryConfig: createMemoryConfig(),
     longTermMemoryConfig: {
       enabled: false,
     },
@@ -119,23 +118,6 @@ function createTextClient(content: string): OpenAICompatibleClient {
     },
     async collectStream(): Promise<never> {
       throw new Error("collectStream is not used in this test");
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

@@ -2,8 +2,6 @@ import { z } from "zod";
 import { lazySchema } from "../utils/lazySchema.js";
 import { semanticBoolean } from "../utils/semanticBoolean.js";
 
-
-
 export const inputSchema = lazySchema(() =>
   z.strictObject({
     file_path: z.string().describe('The absolute path to the file to modify'),
@@ -18,15 +16,12 @@ export const inputSchema = lazySchema(() =>
     ).describe('Replace all occurrences of old_string (default false)'),
   }),
 )
-type InputSchema = ReturnType<typeof inputSchema>
 
 export type FileEdit = {
   old_string: string
   new_string: string
   replace_all: boolean
 }
-
-
 
 export const hunkSchema = lazySchema(() =>
   z.object({
@@ -72,4 +67,3 @@ export const outputSchema = lazySchema(() =>
     gitDiff: gitDiffSchema().optional(),
   }),
 )
-type OutputSchema = ReturnType<typeof outputSchema>

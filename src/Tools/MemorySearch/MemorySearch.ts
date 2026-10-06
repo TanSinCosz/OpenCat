@@ -1,6 +1,7 @@
 import type { z } from "zod";
 
-import { searchLongTermMemory } from "../../Memory/runtime.js";
+import { createMemoryConfig } from "../../Memory/config.js";
+import { MemoryTool } from "../../Memory/Memory.js";
 import type { Runtime } from "../../types/runtime.js";
 import type { State } from "../../types/state.js";
 import type { Tool, ToolUseContext } from "../types.js";
@@ -21,9 +22,6 @@ export class MemorySearch
   outputSchema = outputSchema;
   strict = true;
   maxResultSizeChars = 20_000;
-  searchHint = "search long-term memory";
-  shouldDefer = false;
-  alwaysLoad = false;
 
   description(): string {
     return DESCRIPTION;
@@ -61,10 +59,27 @@ export class MemorySearch
     runtime: Runtime,
     _state: State,
   ): Promise<MemorySearchOutput> {
-    return searchLongTermMemory(runtime, input.query, {
+    const config = runtime.longTermMemoryConfig;
+    if (!config.enabled) {
+      return { results: [] };
+    }
+
+    // 默认智能体使用文件记忆；只有调用此兼容工具时才初始化向量服务。
+    const memory = runtime.legacyMemory ??= new MemoryTool(
+      runtime.legacyMemoryConfig ?? createMemoryConfig({
+        cwd: runtime.cwd,
+        config: runtime.appConfig,
+      }),
+    );
+    const scope = input.scope ?? "user";
+    return memory.search(input.query, {
       topK: input.topK ?? 8,
-      scope: input.scope ?? "user",
-      threshold: input.threshold,
+      threshold: input.threshold ?? config.searchThreshold,
+      filters: scope === "run"
+        ? { run_id: config.runId }
+        : scope === "agent"
+          ? { agent_id: config.agentId }
+          : { user_id: config.userId },
     });
   }
 }

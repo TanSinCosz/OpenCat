@@ -7,15 +7,6 @@ export type EvaluationEventInput = EvaluationEvent extends infer Event
     : never
   : never;
 
-type RuntimeEventFields = {
-  timestamp: number;
-  sessionId: string;
-  agentId: string;
-  agentRole: Runtime["agentRole"];
-  parentAgentId?: Runtime["parentAgentId"];
-  agentType?: Runtime["agentType"];
-};
-
 export interface RunObserver {
   emit(event: EvaluationEvent): void | Promise<void>;
 }

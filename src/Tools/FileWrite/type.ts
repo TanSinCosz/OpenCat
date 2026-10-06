@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { lazySchema } from "../utils/lazySchema.js";
 
-
 export const inputSchema = lazySchema(() =>
   z.strictObject({
     file_path: z
@@ -12,7 +11,6 @@ export const inputSchema = lazySchema(() =>
     content: z.string().describe('The content to write to the file'),
   }),
 )
-type InputSchema = ReturnType<typeof inputSchema>
 
 export const outputSchema = lazySchema(() =>
   z.object({

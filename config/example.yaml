@@ -14,13 +14,12 @@ memory:
   enabled: true
   autoInject: true
   autoExtract: true
-  autoInjectTopK: 6
-  searchThreshold: 0.1
   maxInjectedChars: 40000
   userId: default-user
   dreamRecentSessions: 8
   # directory: .opencat/memory/files
   # The following settings are only used by the legacy vector-memory API.
+  searchThreshold: 0.1
   embedding: {}
   # embedding:
   #   apiKey: ""

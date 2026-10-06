@@ -185,7 +185,6 @@ export async function stopBackgroundTask(
 export async function killBackgroundTasksForAgent(
   sessionId: string,
   ownerAgentId: string,
-  state: State,
 ): Promise<number> {
   const ownedHandles = [...handles.values()].filter((handle) =>
     handle.sessionId === sessionId &&

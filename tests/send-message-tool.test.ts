@@ -113,7 +113,6 @@ test("SendMessage pending messages are drained into the running agent context", 
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
     agentDefinitions,
     tools: [
       new Agent(agentDefinitions),
@@ -171,7 +170,6 @@ function createHarness() {
       maxTokens: 1024,
     },
     modelClient: createFakeClient(),
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
   });
 
@@ -334,23 +332,6 @@ function createFakeClient(): OpenAICompatibleClient {
     },
     async collectStream(): Promise<never> {
       throw new Error("collectStream is not used in this test");
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

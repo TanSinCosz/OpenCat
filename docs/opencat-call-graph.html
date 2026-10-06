@@ -210,7 +210,7 @@
       { id:'mcp', group:'tool', x:830, y:78, w:190, title:'Configured MCP', file:'src/mcp/config.ts', desc:'加载 MCP 配置并适配远程工具' },
       { id:'state', group:'storage', x:1110, y:78, w:190, title:'State', file:'src/types/state.ts', desc:'保存 Messages、压缩状态、任务和记忆状态' },
 
-      { id:'query', group:'query', x:65, y:220, w:190, title:'query / _query', file:'src/query.ts', desc:'主循环：每轮准备上下文、请求模型、执行工具' },
+      { id:'query', group:'query', x:65, y:220, w:190, title:'query / runQueryLoop', file:'src/query.ts', desc:'主循环：每轮准备上下文、请求模型、执行工具' },
       { id:'build', group:'context', x:335, y:220, w:210, title:'buildMessagesForQuery', file:'src/query/messages.ts', desc:'投影已有状态，必要时新增 compact / snip' },
       { id:'context', group:'context', x:625, y:220, w:190, title:'materializeRequestContext', file:'src/query.ts · runtime-context.ts', desc:'加载计划、技能、Agent 状态和运行时附件' },
       { id:'request', group:'query', x:895, y:220, w:190, title:'createStreamRequest', file:'src/query/request.ts', desc:'将最终 DeepSeek messages 发送给模型' },

@@ -11,6 +11,8 @@ import { FileRead } from "../src/Tools/FileRead/FileRead.js";
 import { Glob } from "../src/Tools/Glob/Glob.js";
 import { Grep } from "../src/Tools/Grep/Grep.js";
 import { MemorySearch } from "../src/Tools/MemorySearch/MemorySearch.js";
+import type { MemoryTool } from "../src/Memory/Memory.js";
+import type { SearchMemoryOptions } from "../src/Memory/type.js";
 import type { Tool } from "../src/Tools/types.js";
 import { expandPath } from "../src/Tools/utils/path.js";
 import { createRuntime } from "../src/types/runtime.js";
@@ -25,7 +27,6 @@ test("executeToolCall runs tools with the runtime working directory", async () =
       model: "deepseek-v4-flash",
       maxTokens: 128,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [{
       name: "CwdProbe",
@@ -67,7 +68,6 @@ test("executeToolCall returns a tool result when a tool is unavailable", async (
       model: "deepseek-v4-flash",
       maxTokens: 128,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [createNoopTool("Read")],
   });
@@ -105,7 +105,6 @@ test("executeToolCall returns a permission-denied tool result", async () => {
       model: "deepseek-v4-flash",
       maxTokens: 128,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [createNoopTool("Edit")],
     canUseTool: () => ({
@@ -143,18 +142,12 @@ test("executeToolCall allows tools granted by temporary command rules", async ()
       model: "deepseek-v4-flash",
       maxTokens: 128,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [createNoopTool("Edit")],
-    appState: {
-      toolPermissionContext: {
-        mode: "default",
-        additionalWorkingDirectories: new Map(),
-        alwaysAllowRules: {
-          command: ["Edit"],
-        },
-        alwaysDenyRules: {},
-        alwaysAskRules: {},
+    permissionContext: {
+      mode: "default",
+      alwaysAllowRules: {
+        command: ["Edit"],
       },
     },
     canUseTool: () => ({
@@ -191,19 +184,13 @@ test("executeToolCall cannot bypass a hard fork policy with temporary rules", as
       model: "deepseek-v4-flash",
       maxTokens: 128,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [createNoopTool("Edit")],
     enforceCanUseToolBeforeTemporaryRules: true,
-    appState: {
-      toolPermissionContext: {
-        mode: "default",
-        additionalWorkingDirectories: new Map(),
-        alwaysAllowRules: {
-          command: ["Edit"],
-        },
-        alwaysDenyRules: {},
-        alwaysAskRules: {},
+    permissionContext: {
+      mode: "default",
+      alwaysAllowRules: {
+        command: ["Edit"],
       },
     },
     canUseTool: () => ({
@@ -238,7 +225,6 @@ test("executeToolCall uses model-facing formatted tool results", async () => {
       model: "deepseek-v4-flash",
       maxTokens: 128,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [
       {
@@ -355,6 +341,59 @@ test("built-in formatResult methods return model-facing text", () => {
   );
 });
 
+test("legacy MemorySearch preserves scope, threshold and lazy service ownership", async () => {
+  const calls: Array<{ query: string; options: SearchMemoryOptions }> = [];
+  const memory = {
+    async search(query: string, options: SearchMemoryOptions) {
+      calls.push({ query, options });
+      return { results: [] };
+    },
+  } as unknown as MemoryTool;
+  const runtime = createRuntime({
+    modelRuntimeConfig: { apiKey: "test-key", model: "test-model", maxTokens: 128 },
+    longTermMemoryConfig: {
+      enabled: true, searchThreshold: 0.42,
+      userId: "memory-user", agentId: "memory-agent", runId: "memory-run",
+    },
+    legacyMemory: memory,
+    transcriptStore: false,
+    tools: [new MemorySearch()],
+  });
+
+  for (const scope of ["user", "agent", "run"] as const) {
+    await executeToolCall({
+      id: `search-${scope}`, type: "function",
+      function: { name: "MemorySearch", arguments: JSON.stringify({ query: "remembered decision", scope }) },
+    }, runtime.tools, runtime, createState());
+  }
+  assert.deepEqual(calls.map((call) => call.options.filters), [
+    { user_id: "memory-user" }, { agent_id: "memory-agent" }, { run_id: "memory-run" },
+  ]);
+  assert.ok(calls.every((call) => call.query === "remembered decision" && call.options.topK === 8 && call.options.threshold === 0.42));
+  assert.equal(runtime.legacyMemory, memory);
+
+  await executeToolCall({
+    id: "search-custom", type: "function",
+    function: { name: "MemorySearch", arguments: JSON.stringify({ query: "custom", topK: 11, threshold: 0.7 }) },
+  }, runtime.tools, runtime, createState());
+  assert.equal(calls.at(-1)?.options.topK, 11);
+  assert.equal(calls.at(-1)?.options.threshold, 0.7);
+});
+
+test("disabled legacy search needs no vector configuration or service", async () => {
+  const runtime = createRuntime({
+    modelRuntimeConfig: { apiKey: "test-key", model: "test-model", maxTokens: 128 },
+    longTermMemoryConfig: { enabled: false },
+    transcriptStore: false,
+  });
+  const output = await new MemorySearch().call(
+    { query: "unused" }, runtime.toolUseContext, runtime, createState(),
+  );
+  assert.deepEqual(output, { results: [] });
+  assert.equal(runtime.legacyMemory, undefined);
+  assert.equal(runtime.legacyMemoryConfig, undefined);
+});
+
 function createNoopTool(name: string): Tool {
   return {
     name,
@@ -365,22 +404,5 @@ function createNoopTool(name: string): Tool {
     description: () => `${name} test tool`,
     prompt: () => `${name} test prompt`,
     call: () => ({ ok: true }),
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
-    },
   };
 }

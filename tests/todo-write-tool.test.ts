@@ -28,7 +28,6 @@ test("TodoWrite stores the current agent todo list", async () => {
       maxTokens: 1024,
     },
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
   });
   const tool = new TodoWrite();
@@ -106,7 +105,6 @@ test("query projects todo list context and replaces stale todo blocks", async ()
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
   });
 
@@ -156,23 +154,6 @@ function createNoopClient(): OpenAICompatibleClient {
     },
     async collectStream() {
       throw new Error("collectStream should not be used");
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

@@ -77,8 +77,6 @@ class McpToolAdapter implements Tool<Record<string, unknown>, McpToolCallResult>
   readonly inputSchema = z.record(z.string(), z.unknown());
   readonly outputSchema = z.unknown();
   readonly maxResultSizeChars = 100_000;
-  readonly shouldDefer = false;
-  readonly alwaysLoad = true;
   readonly strict = false;
 
   constructor(
@@ -102,10 +100,6 @@ class McpToolAdapter implements Tool<Record<string, unknown>, McpToolCallResult>
 
   prompt(): string {
     return this.description();
-  }
-
-  userFacingName(): string {
-    return this.name;
   }
 
   isConcurrencySafe(): boolean {

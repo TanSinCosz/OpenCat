@@ -10,7 +10,6 @@ import type {
   ModelStreamEnvelope,
   ModelStreamRequest,
 } from "../src/openai-compatible/types.js";
-import { createMemoryConfig } from "../src/Memory/config.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 import type { Tool } from "../src/Tools/types.js";
@@ -28,7 +27,6 @@ test("assistant reasoning content is preserved in model history", () => {
   assert.equal(projected.content, "final answer");
   assert.equal(projected.reasoning_content, "private chain of thought");
 });
-
 
 test("assistant reasoning content is projected when the assistant turn called tools", () => {
   const message = createMessage({
@@ -68,7 +66,6 @@ test("buildMessagesForQuery keeps visible assistant reasoning content", async ()
       model: "deepseek-v4-flash",
       maxTokens: 1024,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [],
   });
@@ -120,7 +117,6 @@ test("query carries assistant reasoning content into the next tool-followup requ
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools: [echoTool],
   });

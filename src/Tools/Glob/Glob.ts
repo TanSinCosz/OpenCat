@@ -1,5 +1,4 @@
 import { spawn } from "child_process";
-import { stat } from "fs/promises";
 import path, { isAbsolute, join } from "path";
 import { z } from "zod";
 
@@ -10,12 +9,8 @@ import { resolveRipgrepCommand } from "../utils/ripgrep.js";
 import { DESCRIPTION, GLOB_TOOL_NAME } from "./prompt.js";
 import { inputSchema, outputSchema } from "./type.js";
 
-type typeInput = z.infer<ReturnType<typeof inputSchema>>;
-type typeOutput = z.infer<ReturnType<typeof outputSchema>>;
-
-type ValidationResult =
-    | { result: true }
-    | { result: false; message: string; errorCode?: number };
+type GlobInput = z.infer<ReturnType<typeof inputSchema>>;
+type GlobOutput = z.infer<ReturnType<typeof outputSchema>>;
 
 type GlobFilesOptions = {
     limit: number;
@@ -23,11 +18,10 @@ type GlobFilesOptions = {
 };
 
 export class Glob
-    implements Tool<typeInput, typeOutput, typeof inputSchema, typeof outputSchema> {
+    implements Tool<GlobInput, GlobOutput, typeof inputSchema, typeof outputSchema> {
     name = GLOB_TOOL_NAME;
     inputSchema = inputSchema;
     outputSchema = outputSchema;
-    searchHint = "find files by name pattern or wildcard";
     maxResultSizeChars = 100_000;
 
     async description(): Promise<string> {
@@ -42,7 +36,7 @@ export class Glob
         return true;
     }
 
-    formatResult({ output }: { output: typeOutput }): string {
+    formatResult({ output }: { output: GlobOutput }): string {
         if (output.filenames.length === 0) {
             return `No files matched. Search completed in ${output.durationMs}ms.`;
         }
@@ -56,61 +50,7 @@ export class Glob
         ].join("\n");
     }
 
-    async validateInput({ pattern, path }: typeInput): Promise<ValidationResult> {
-        if (!pattern.trim()) {
-            return {
-                result: false,
-                message: "Glob pattern cannot be empty.",
-                errorCode: 1,
-            };
-        }
-
-        if (path === "undefined" || path === "null") {
-            return {
-                result: false,
-                message:
-                    'Path must be omitted when using the default directory. Do not pass "undefined" or "null".',
-                errorCode: 2,
-            };
-        }
-
-        if (!path) {
-            return { result: true };
-        }
-
-        const absolutePath = expandPath(path);
-
-        // Avoid stat on UNC paths because it can trigger network side effects.
-        if (absolutePath.startsWith("\\\\") || absolutePath.startsWith("//")) {
-            return { result: true };
-        }
-
-        try {
-            const stats = await stat(absolutePath);
-
-            if (!stats.isDirectory()) {
-                return {
-                    result: false,
-                    message: `Path is not a directory: ${path}`,
-                    errorCode: 4,
-                };
-            }
-        } catch (error) {
-            if (isENOENT(error)) {
-                return {
-                    result: false,
-                    message: `Directory does not exist: ${path}.`,
-                    errorCode: 3,
-                };
-            }
-
-            throw error;
-        }
-
-        return { result: true };
-    }
-
-    async call(input: typeInput, context: ToolUseContext): Promise<typeOutput> {
+    async call(input: GlobInput, context: ToolUseContext): Promise<GlobOutput> {
         const start = Date.now();
         const searchPath = input.path ? expandPath(input.path) : getCwd();
         const limit = 100;
@@ -208,8 +148,4 @@ function runCommand(
             reject(new Error(stderr || `${command} exited with code ${code}`));
         });
     });
-}
-
-function isENOENT(error: unknown): boolean {
-    return error instanceof Error && "code" in error && error.code === "ENOENT";
 }

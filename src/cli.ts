@@ -1,9 +1,7 @@
-
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 
 import { getAppConfig } from "./config/load-config.js";
-import { createMemoryConfig } from "./Memory/config.js";
 import { closeMcpConnections } from "./mcp/index.js";
 import { formatOpenAICompatibleErrorForUser } from "./openai-compatible/errors.js";
 import { createToolsWithConfiguredMcp } from "./mcp/config.js";
@@ -22,7 +20,6 @@ export async function runCli(args: string[]): Promise<void> {
     cwd: process.cwd(),
     appConfig: config,
     modelRuntimeConfig: config.model,
-    MemoryConfig: createMemoryConfig({ cwd: process.cwd(), config }),
     longTermMemoryConfig: {
       ...config.memory,
       fileMemoryDirectory: config.memory.directory,

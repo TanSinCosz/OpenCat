@@ -8,11 +8,12 @@ import type {
 import type { Message } from "../types/messages.js";
 import type { RuntimeUsageStats } from "../types/runtime.js";
 
-export type ToolPermissionDecision =
+/** 用户对计划的审批结果；工具执行权限回调另使用 Tools/types.ts 的 ToolPermissionDecision。 */
+export type ToolApprovalDecision =
   | { behavior: "allow" }
   | { behavior: "deny"; reason?: string };
 
-export type ToolPermissionRequest = {
+export type ToolApprovalRequest = {
   approvalId: string;
   toolCall: ModelToolCall;
   mode: "plan";
@@ -86,8 +87,8 @@ export interface QueryOptions {
    */
   usePreprojectedMessagesOnFirstTurn?: boolean;
   requestToolPermission?: (
-    request: ToolPermissionRequest,
-  ) => Promise<ToolPermissionDecision>;
+    request: ToolApprovalRequest,
+  ) => Promise<ToolApprovalDecision>;
 }
 
 export interface MessagesForQuery {

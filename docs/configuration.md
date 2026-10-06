@@ -101,7 +101,6 @@ const config = loadAppConfig({ configPath: "local.yaml" });
 const runtime = createRuntime({
   appConfig: config,
   modelRuntimeConfig: config.model,
-  MemoryConfig: createMemoryConfig({ config }),
 });
 ```
 

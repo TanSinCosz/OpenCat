@@ -183,13 +183,6 @@ const PLAN_MODE_BLOCKED_TOOLS = new Set([
   "Write",
 ]);
 
-export function isPlanModeBlockedToolName(
-  toolName: string,
-  state: State,
-): boolean {
-  return state.mode === "plan" && PLAN_MODE_BLOCKED_TOOLS.has(toolName);
-}
-
 function getPlanModeDenial(tool: Tool, state: State): string | null {
   if (state.mode !== "plan" || !PLAN_MODE_BLOCKED_TOOLS.has(tool.name)) {
     return null;
@@ -294,8 +287,7 @@ function stringifyError(error: unknown): string {
 
 function isAllowedByTemporaryCommandRule(tool: Tool, runtime: Runtime): boolean {
   const rules = runtime.toolUseContext
-    .getAppState()
-    .toolPermissionContext
+    .permissionContext
     .alwaysAllowRules
     .command ?? [];
 

@@ -8,10 +8,12 @@
 | --------------------------- | -------------------------------------------------------------------------------- |
 | `src/Tools/types.ts`      | `Tool` 接口、`ToolUseContext`、`FileStateCache`、`SkillRuntimeState`     |
 | `src/Tools/executor.ts`   | 工具执行管道：查找 → 解析 → 校验 → 权限 → 调用 → 格式化                     |
-| `src/Tools/index.ts`      | 内置 14 工具的注册数组，MCP 工具合并                                             |
+| `src/Tools/index.ts`      | 内置 15 工具的注册数组，MCP 工具合并                                             |
 | 各`src/Tools/{ToolName}/` | 每个工具独立目录：`{ToolName}.ts` + `prompt.ts` + `type.ts` + `state.ts` |
 
 ### 3.2 Tool 接口
+
+`runtime.toolUseContext.permissionContext` 保存当前运行的权限模式与临时允许规则。它直接供 Plan、ReadSkill、executor 和子 Agent 继承使用；旧的单字段 `AppState` 包装及 get/set 函数已删除。计划审批使用 Query 的 `ToolApprovalDecision`，工具权限回调使用 `ToolPermissionDecision`，两者分别负责用户审批与工具执行检查。
 
 每个工具实现统一的 `Tool<TInput, TOutput>` 泛型接口：
 
@@ -24,19 +26,15 @@ interface Tool<
 > {
     name: string;
     inputSchema: TInputSchema;         // Zod schema，用于参数校验+function calling
-    outputSchema: TOutputSchema;       // Zod schema，输出类型校验
+    outputSchema: TOutputSchema;       // Zod schema，描述输出结构；executor 不做输出 parse
     inputJsonSchema?: JSONSchemaObject; // 可选的 JSON Schema（MCP 工具的 schema 双轨制）
     maxResultSizeChars?: number;       // 结果字符上限，超出的触发大体积工具压缩
-    searchHint?: string;              // 搜索提示（未充分使用）
-    shouldDefer?: boolean;            // 延迟加载标记（需 tool research 支持，DeepSeek 未提供，目前未激活）
-    alwaysLoad?: boolean;             // 始终加载（不受工具过滤影响）
     strict?: boolean;                 // DeepSeek strict function calling 模式
 
     description(): MaybePromise<string>;   // 系统提示词中的工具描述
     prompt(): MaybePromise<string>;        // 系统提示词中的使用指南
 
     isEnabled?(): MaybePromise<boolean>;   // 动态启用/禁用
-    userFacingName?(): string;             // 用户界面展示名
     isConcurrencySafe?(): boolean;         // 是否可并行执行
 
     formatResult?(options: { output: TOutput }): string;
@@ -75,24 +73,27 @@ tool_calls 解析
 
 异常捕获：工具执行抛出任何异常 → `stringifyError()` → 作为工具错误结果返回（不中断主循环）。
 
-### 3.4 14 工具总览
+### 3.4 15 工具总览
 
-| #  | 工具                  | strict | 并发安全 | 结果上限（chars） | 特殊标志                                 |
-| -- | --------------------- | ------ | -------- | ----------------- | ---------------------------------------- |
-| 1  | **Read**        | ✅     | ✅       | 无限制            | alwaysLoad                               |
-| 2  | **Write**       | ✅     | ❌       | 100K              | -                                        |
-| 3  | **Edit**        | ✅     | ❌       | 100K              | -                                        |
-| 4  | **Bash**        | ✅     | ❌       | 30K               | -                                        |
-| 5  | **Agent**       | ✅     | ❌       | 100K              | alwaysLoad                               |
-| 6  | **MemorySave**  | ✅     | ❌       | 20K               | alwaysLoad                               |
-| 7  | **ReadSkill**   | ✅     | ✅       | 100K              | alwaysLoad                               |
-| 8  | **SendMessage** | ✅     | ❌       | 100K              | alwaysLoad                               |
-| 9  | **Grep**        | ❌     | ✅       | 20K               | -                                        |
-| 10 | **Glob**        | ❌     | ✅       | 100K              | -                                        |
-| 11 | **WebSearch**   | ❌     | ✅       | 100K              | alwaysLoad                               |
-| 12 | **WebFetch**    | ❌     | ✅       | 100K              | alwaysLoad（shouldDefer 已声明但未激活） |
-| 13 | **TodoWrite**   | ✅     | ❌       | 100K              | alwaysLoad                               |
-| 14 | **Plan**        | ✅     | ❌       | 100K              | alwaysLoad                               |
+| # | 工具 | strict | 并发安全 | 结果上限（chars） |
+| --- | --- | --- | --- | --- |
+| 1 | **Read** | ✅ | ✅ | 无限制 |
+| 2 | **Write** | ✅ | ❌ | 100K |
+| 3 | **Edit** | ✅ | ❌ | 100K |
+| 4 | **Bash** | ✅ | ❌ | 30K |
+| 5 | **Agent** | ✅ | ❌ | 100K |
+| 6 | **MemorySave** | ✅ | ❌ | 20K |
+| 7 | **ReadSkill** | ✅ | ❌ | 100K |
+| 8 | **SendMessage** | ✅ | ❌ | 100K |
+| 9 | **Grep** | ❌ | ✅ | 20K |
+| 10 | **Glob** | ❌ | ✅ | 100K |
+| 11 | **WebSearch** | ❌ | ✅ | 100K |
+| 12 | **WebFetch** | ❌ | ✅ | 100K |
+| 13 | **TodoWrite** | ✅ | ❌ | 100K |
+| 14 | **Plan** | ✅ | ❌ | 100K |
+| 15 | **TaskStop** | ✅ | ✅ | 4K |
+
+工具是否进入模型请求由实际注册与启用逻辑决定。没有消费者的 `searchHint`、`shouldDefer`、`alwaysLoad` 已删除。
 
 ---
 
@@ -305,8 +306,6 @@ tool_calls 解析
 | 格式化 | URL + status + Content-Type + bytes + note + 正文                                                         |
 | 注     | `prompt` 参数当前被接受但不参与提取（仅做纯文本提取，不做模型加工）                                     |
 
-**shouldDefer**（未激活）：设计用于标记需要延迟加载的工具（WebFetch 设为 `true`）。本意是配合 tool research 机制——模型先声明意图，下一轮再实际调用。但因 DeepSeek 不支持 tool research，目前 `shouldDefer` 字段仅在类型和工具类中声明，executor 和 query 循环中无消费代码，实际行为与 `false` 无异。
-
 **HTML 提取流程**：去 script/style 标签 → 去注释 → 换行规范化 → 实体解码。
 
 **重定向策略**：同源最多 5 次；跨域不自动跟随，返回目标 URL 让模型决定。
@@ -341,7 +340,7 @@ tool_calls 解析
 
 **行为**：按 `runtime.agentId` 隔离（不同 agent 各自维护独立列表）。每次调用全量替换任务列表，写入 `state.todos[agentId]` 后通过 `recordTranscriptStateSnapshot` 持久化到 transcript。`formatResult()` 渲染为编号列表（`[pending]`/`[in_progress]`/`[completed]`）。
 
-**配置**：`alwaysLoad: true`，`strict: true`，结果上限 100K 字符。
+**配置**：`strict: true`，结果上限 100K 字符。
 
 #### 3.5.14 Plan — 计划模式
 
@@ -359,17 +358,15 @@ tool_calls 解析
 - `request_approval`：提交计划并立即退出 plan 模式，切换回 default 模式。模型应在调用前展示计划供用户审阅。
 - `exit`：仅在用户明确指示时退出 plan 模式
 
-**配置**：`alwaysLoad: true`，`strict: true`，`isConcurrencySafe: false`。
+**配置**：`strict: true`，`isConcurrencySafe: false`。
 
 ---
 
 ### 3.6 执行管道控制
 
-**并发控制**：`isConcurrencySafe()` 决定工具是否可与其他工具并行执行。`query.ts` 中 `partitionToolCallsForExecution()` 按并发安全性将同轮工具调用分组成 batch：安全的工具（如 Read、Glob、Grep）放入同一 batch，通过 `Promise.all` 并行执行；不安全的工具（如 Edit、Write、Bash、Agent）各自独立成 batch，串行执行。
+**并发控制**：`isConcurrencySafe()` 决定工具是否可与其他工具并行执行。`query/tool-execution.ts` 中 `partitionToolCallsForExecution()` 按并发安全性将同轮工具调用分组成 batch：相邻的安全工具（如 Read、Glob、Grep）放入同一 batch，通过 `Promise.all` 并行执行；不安全的工具（如 Edit、Write、Bash、Agent）各自独立成 batch，形成串行边界。结果仍按模型调用顺序写入历史、持久化记录和事件流。
 
 **落盘持久化**：`executor.ts` 中每次工具调用后，`maybePersistToolResultContent()` 检查输出是否超过 `maxResultSizeChars`。超限时内容落盘到 `.opencat/tool-results/{sessionId}/{toolCallId}`，消息中替换为瘦引用标记 `persistedToolResult`（含 path + sha256），供后续 bulky compact 复用。
-
-**shouldDefer（未激活）**：`shouldDefer` 字段在 Tool 接口和工具类中声明（目前仅 WebFetch 设为 `true`），设计意图是配合 tool research 实现延迟加载——模型先声明意图，下一轮再实际调用。但因 DeepSeek 不支持 tool research，executor 和 query 中无消费逻辑，实际不生效。
 
 **strict 模式**：`strict: true` 的工具要求 DeepSeek 在调用时启用 strict function calling 模式，确保参数类型严格匹配。
 

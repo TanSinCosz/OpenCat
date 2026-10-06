@@ -1,7 +1,3 @@
-import {
-    createOpenAICompatibleClient,
-    type OpenAICompatibleClient,
-} from "../openai-compatible/model-client.js";
 import { OpenAIEmbedder } from "./Embedding/Embedding.js";
 import { MemoryConfig, AddMemoryOptions, SearchResult, SearchFilters, MemoryItem } from "./type.js";
 import { VectorStore } from "./VectorStore/base.js";
@@ -39,7 +35,6 @@ export class MemoryTool {
     private embedder: OpenAIEmbedder;
     private llm: OpenAIStructuredLLM;
     private vectorStore!: VectorStore;
-    telemetryId: string
     private _entityStore?: VectorStore;
     private customInstructions: string | undefined;
 
@@ -50,7 +45,6 @@ export class MemoryTool {
         this.llm = new OpenAIStructuredLLM(config.llm.config)
         this.vectorStore = new MemoryVectorStore(this.config.vectorStore.config);
         this.customInstructions = config.customInstructions;
-        this.telemetryId = "anonymous";
     }
 
     async search(

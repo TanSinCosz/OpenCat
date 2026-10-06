@@ -22,9 +22,6 @@ export class TaskStop
   outputSchema = outputSchema;
   strict = true;
   maxResultSizeChars = 4_000;
-  searchHint = "stop a running background task";
-  shouldDefer = true;
-  alwaysLoad = true;
 
   description(): string {
     return DESCRIPTION;

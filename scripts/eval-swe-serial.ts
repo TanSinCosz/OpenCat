@@ -4,8 +4,6 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-
-import { createMemoryConfig } from "../src/Memory/config.js";
 import { query } from "../src/query.js";
 import { prepareSweWorkspace } from "../src/swe/workspace.js";
 import type { SweWorkspaceOptions } from "../src/swe/workspace.js";
@@ -15,7 +13,6 @@ import type { EvaluationEvent } from "../src/telemetry/events.js";
 import { JsonlRunObserver } from "../src/telemetry/jsonl.js";
 import { createMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
-import type { ContextCompressionConfig } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 
 const execFileAsync = promisify(execFile);
@@ -198,7 +195,6 @@ async function runInstance(instance: SweBenchInstance): Promise<InstanceSummary>
         model,
       },
       appConfig,
-      MemoryConfig: createMemoryConfig({ cwd: workspace.path, config: appConfig }),
       contextCompressionConfig: config.contextCompression,
       observer: {
         async emit(event) {
@@ -496,7 +492,6 @@ function summarizeTotals(results: readonly InstanceSummary[]) {
   };
 }
 
-
 async function git(args: readonly string[], cwd?: string): Promise<string> {
   const { stdout } = await execFileAsync("git", [
     "-c",
@@ -515,10 +510,6 @@ function parseChangedFiles(status: string): string[] {
     .filter(Boolean)
     .map((line) => line.slice(3).trim());
 }
-
-
-
-
 
 function computeCacheHitRate(hit: number, miss: number): number {
   const denominator = hit + miss;
@@ -556,7 +547,6 @@ async function isFile(filePath: string): Promise<boolean> {
     return false;
   }
 }
-
 
 function sanitizePath(value: string): string {
   return value.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 128) || "instance";

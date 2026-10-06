@@ -33,8 +33,6 @@ export interface SystemPromptOptions {
   outputStyle?: OutputStyleConfig;
 }
 
-export type MainSystemPromptOptions = SystemPromptOptions;
-
 export async function buildSystemPrompt(
   runtime: Runtime,
   options: SystemPromptOptions = {},

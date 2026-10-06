@@ -205,6 +205,8 @@ conversation transcript，也不会完整注入主模型上下文。每次召回
 
 ### 8.2 配置
 
+旧 YAML 的 `memory.autoInjectTopK` 仅为配置兼容保留，不进入运行配置，也不控制文件选择数量；当前选择器仍使用 `MAX_RELEVANT_MEMORY_FILES = 5`。
+
 `LongTermMemoryRuntimeConfig`（`src/Memory/runtime.ts`）：
 
 | 字段                     | 类型        | 默认值             | 说明                                         |
@@ -212,8 +214,7 @@ conversation transcript，也不会完整注入主模型上下文。每次召回
 | `enabled`              | `boolean` | `true`           | 长期记忆总开关                               |
 | `autoInject`           | `boolean` | `false`          | runtime 工厂默认关闭；CLI/Web 入口显式开启   |
 | `autoExtract`          | `boolean` | `false`          | 每轮结束后 fork agent 提取（需用户显式开启） |
-| `autoInjectTopK`       | `number`  | `6`              | 自动注入的记忆条目数                         |
-| `searchThreshold`      | `number`  | `0.1`            | 搜索相关性阈值                               |
+| `searchThreshold`      | `number`  | `0.1`            | 仅用于旧 MemorySearch 的搜索相关性阈值       |
 | `maxInjectedChars`     | `number`  | `40,000`         | 注入内容的最大字符数                         |
 | `fileMemoryDirectory?` | `string`  | —                 | 覆盖默认`~/.opencat/memory/` 路径          |
 | `userId`               | `string`  | `"default-user"` | 用户标识                                     |
@@ -229,17 +230,19 @@ conversation transcript，也不会完整注入主模型上下文。每次召回
 #### 8.3.1 完整函数调用路径
 
 ```
-query()                                          // query.ts:76
-  → _query()                                     // query.ts:84  (主循环)
-    → materializeContextForQuery()                // query.ts:548
-      → shouldAttachLongTermMemory(state)         // query.ts:673
+query()                                          // query.ts
+  → runQueryLoop()                               // query.ts (内部主循环)
+    → prepareMessagesForTurn()                   // query/turn-context.ts
+      → materializeRequestContext()              // query/request-context.ts
+        → shouldAttachLongTermMemory(state)      // query/request-context.ts
           return lastMessage?.role === "user"
               && lastMessage.source === "user"
           // 只在收到真实用户消息时才注入，runtime/system 消息不触发
-      → createLongTermMemoryContextMessage(
-          runtime, visibleMessages)              // long-term-memory.ts:35
-      → createProjectionContextStateMessage()    // runtime-context.ts:88
-      → state.Messages.push(contextMessage)      // query.ts:579
+        → createLongTermMemoryContextMessage(
+            runtime, state.Messages,
+            state.longTermMemory)                // query/long-term-memory.ts
+        → createProjectionContextStateMessage()  // query/runtime-context.ts
+        → state.Messages.push(contextMessage)    // query/request-context.ts
 ```
 
 #### 8.3.2 `createLongTermMemoryContextMessage()` 完整流程
@@ -336,7 +339,7 @@ Treat memory as background context that may be stale. Verify it against current 
 
 #### 8.4.1 工具定义
 
-`MemorySave` 是 `alwaysLoad: true` 的 always-available 工具。其 schema：
+`MemorySave` 在默认工具表中注册，启用后可由模型调用。其 schema：
 
 ```typescript
 // 输入
@@ -396,7 +399,7 @@ formatResult({ output }: { output: MemorySaveOutput }): string {
 
 #### 8.5.1 触发位置与条件
 
-入口：`query.ts:220` — 模型本轮无工具调用时（即本轮可以结束），调用 `extractLongTermMemoryForCompletedQuery(runtime, state, { turnStartMessageId, turnStartedAt })`。
+入口：`query/lifecycle.ts` 的 `finalizeQuery()` — 模型本轮无工具调用时，在回合摘要更新后调用 `extractLongTermMemoryForCompletedQuery(runtime, state, { turnStartMessageId, turnStartedAt })`。这两个边界值在本次用户查询开始时捕获；达到轮次上限不触发该提取。
 
 四道门（`long-term-memory.ts:233`）：
 

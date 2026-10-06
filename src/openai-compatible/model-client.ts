@@ -228,17 +228,6 @@ function toOpenAIToolChoice(
   return toolChoice;
 }
 
-function toOpenAIToolCall(toolCall: ModelToolCall): ChatCompletionMessageToolCall {
-  return {
-    id: toolCall.id,
-    type: "function",
-    function: {
-      name: toolCall.function.name,
-      arguments: toolCall.function.arguments,
-    },
-  };
-}
-
 function fromOpenAIResponse(
   response: ChatCompletion
 ): ModelChatCompletionResponse {

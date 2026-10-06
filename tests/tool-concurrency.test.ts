@@ -31,7 +31,6 @@ test("query runs consecutive concurrency-safe tools in parallel", async () => {
       createToolCall(0, "call_safe_a", "SafeA"),
       createToolCall(1, "call_safe_b", "SafeB"),
     ]),
-    MemoryConfig: createMemoryConfig(),
     tools: [
       createTimingTool("SafeA", true, log),
       createTimingTool("SafeB", true, log),
@@ -65,7 +64,6 @@ test("query treats non-concurrency-safe tools as execution barriers", async () =
       createToolCall(1, "call_unsafe", "Unsafe"),
       createToolCall(2, "call_safe_b", "SafeB"),
     ]),
-    MemoryConfig: createMemoryConfig(),
     tools: [
       createTimingTool("SafeA", true, log),
       createTimingTool("Unsafe", false, log),
@@ -168,23 +166,6 @@ function createToolCallClient(
     },
     async collectStream(): Promise<never> {
       throw new Error("collectStream is not used in this test");
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

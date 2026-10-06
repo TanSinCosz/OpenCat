@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-
-import { createMemoryConfig } from "../src/Memory/config.js";
 import { createDefaultTools } from "../src/Tools/index.js";
 import { WebSearch } from "../src/Tools/WebSearch/WebSearch.js";
 import { inputSchema } from "../src/Tools/WebSearch/type.js";
@@ -70,7 +68,6 @@ test("WebSearch calls the DeepSeek Anthropic server tool and filters results", a
       model: "deepseek-v4-pro",
       maxTokens: 4_096,
     },
-    MemoryConfig: createMemoryConfig(),
   });
 
   const output = await tool.call(
@@ -120,7 +117,6 @@ test("WebSearch surfaces HTTP errors without leaking unbounded responses", async
       model: "deepseek-v4-pro",
       maxTokens: 4_096,
     },
-    MemoryConfig: createMemoryConfig(),
   });
 
   await assert.rejects(

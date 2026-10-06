@@ -21,9 +21,6 @@ export class TodoWrite
   outputSchema = outputSchema;
   strict = true;
   maxResultSizeChars = 100_000;
-  searchHint = "update the session todo list";
-  shouldDefer = false;
-  alwaysLoad = true;
 
   description(): string {
     return DESCRIPTION;

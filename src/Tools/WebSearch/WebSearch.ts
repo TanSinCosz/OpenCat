@@ -38,9 +38,6 @@ export class WebSearch
   inputSchema = inputSchema;
   outputSchema = outputSchema;
   maxResultSizeChars = 100_000;
-  searchHint = "search the web for current information";
-  shouldDefer = false;
-  alwaysLoad = true;
 
   private readonly fetchImpl: typeof fetch;
   private readonly messagesUrl?: string;

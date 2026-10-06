@@ -16,7 +16,7 @@ import {
 import { Plan } from "../src/Tools/Plan/Plan.js";
 import { FileWrite } from "../src/Tools/FileWrite/FileWrite.js";
 import { query } from "../src/query.js";
-import type { QueryEvent, ToolPermissionDecision } from "../src/query/types.js";
+import type { QueryEvent, ToolApprovalDecision } from "../src/query/types.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 import { createMessage } from "../src/types/messages.js";
@@ -41,7 +41,7 @@ test("Plan switches between plan and default mode", async () => {
   assert.equal(entered.newMode, "plan");
   assert.equal(state.mode, "plan");
   assert.equal(
-    runtime.toolUseContext.getAppState().toolPermissionContext.mode,
+    runtime.toolUseContext.permissionContext.mode,
     "plan",
   );
 
@@ -164,7 +164,7 @@ test("query can deny a submitted plan and stay in plan mode", async () => {
   for await (
     const event of query(runtime, state, {
       maxTurns: 2,
-      requestToolPermission: async (): Promise<ToolPermissionDecision> => ({
+      requestToolPermission: async (): Promise<ToolApprovalDecision> => ({
         behavior: "deny",
         reason: "Denied in test.",
       }),
@@ -244,20 +244,6 @@ function createTestRuntime(
       apiKey: "test-key",
       model: "deepseek-v4-flash",
       maxTokens: 128,
-    },
-    MemoryConfig: {
-      embedder: {
-        provider: "test",
-        config: {},
-      },
-      vectorStore: {
-        provider: "test",
-        config: {},
-      },
-      llm: {
-        provider: "test",
-        config: {},
-      },
     },
     transcriptStore: false,
     tools,

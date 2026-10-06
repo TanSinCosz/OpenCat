@@ -140,7 +140,6 @@ async function snapshot(
       model: "deepseek-v4-flash",
       maxTokens: 256,
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
     tools,
     systemPrompt,
@@ -260,14 +259,10 @@ function wrapTool(
     outputSchema: overrides.outputSchema ?? tool.outputSchema,
     inputJsonSchema: tool.inputJsonSchema,
     maxResultSizeChars: tool.maxResultSizeChars,
-    searchHint: tool.searchHint,
-    shouldDefer: tool.shouldDefer,
-    alwaysLoad: tool.alwaysLoad,
     strict: tool.strict,
     description: overrides.description ?? (() => tool.description()),
     prompt: overrides.prompt ?? (() => tool.prompt()),
     isEnabled: tool.isEnabled ? () => tool.isEnabled!() : undefined,
-    userFacingName: tool.userFacingName ? () => tool.userFacingName!() : undefined,
     isConcurrencySafe: tool.isConcurrencySafe
       ? () => tool.isConcurrencySafe!()
       : undefined,
@@ -277,23 +272,6 @@ function wrapTool(
 
 function formatPercent(value: number): string {
   return `${value.toFixed(2)}%`;
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
-    },
-  };
 }
 
 function createProbeTool(): Tool {

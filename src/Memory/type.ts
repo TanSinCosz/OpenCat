@@ -1,11 +1,3 @@
-import { z } from "zod";
-
-
-
-
-
-
-
 export interface MultiModalMessages {
   type: "image_url";
   image_url: {
@@ -54,7 +46,6 @@ export interface SearchMemoryOptions {
   explain?: boolean;
 }
 
-
 export interface MemoryConfig {
   version?: string;
   embedder: {
@@ -99,46 +90,6 @@ export interface VectorStoreResult {
   score?: number;
 }
 
-export const MemoryConfigSchema = z.object({
-  version: z.string().optional(),
-  embedder: z.object({
-    provider: z.string(),
-    config: z.object({
-      modelProperties: z.record(z.string(), z.any()).optional(),
-      apiKey: z.string().optional(),
-      model: z.union([z.string(), z.any()]).optional(),
-      baseURL: z.string().optional(),
-      embeddingDims: z.number().optional(),
-      url: z.string().optional(),
-    }),
-  }),
-  vectorStore: z.object({
-    provider: z.string(),
-    config: z
-      .object({
-        collectionName: z.string().optional(),
-        dimension: z.number().optional(),
-        dbPath: z.string().optional(),
-        client: z.any().optional(),
-      })
-      .passthrough(),
-  }),
-  llm: z.object({
-    provider: z.string(),
-    config: z.object({
-      apiKey: z.string().optional(),
-      model: z.union([z.string(), z.any()]).optional(),
-      modelProperties: z.record(z.string(), z.any()).optional(),
-      baseURL: z.string().optional(),
-      url: z.string().optional(),
-      timeout: z.number().optional(),
-    }),
-  }),
-  customInstructions: z.string().optional(),
-});
-
-
-
 export interface Entity {
   userId?: string;
   agentId?: string;
@@ -158,17 +109,3 @@ export interface AddMemoryOptions extends Entity {
   currentDate?: string;
   customInstructions?: string;
 }
-
-export interface SearchMemoryOptions {
-  topK?: number;
-  filters?: SearchFilters;
-  threshold?: number;
-  explain?: boolean;
-}
-
-export interface GetAllMemoryOptions {
-  topK?: number;
-  filters?: SearchFilters;
-}
-
-export interface DeleteAllMemoryOptions extends Entity {}

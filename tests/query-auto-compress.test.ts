@@ -58,7 +58,6 @@ test("query auto-compresses oversized projected context", async () => {
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
   });
   state.historySnips.push({
     id: "history_snip_stale_projection",
@@ -178,7 +177,6 @@ test("auto-compress clears bulky compact state but preserves recent group budget
         throw new Error("session memory should already be ready");
       },
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
   });
 
@@ -269,7 +267,6 @@ test("query compacts visible snip content-only history after session memory cove
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
   });
 
   try {
@@ -337,7 +334,6 @@ test("auto-compress skips snip compaction when session memory does not cover it"
         throw new Error("collectStream is not used in this test");
       },
     },
-    MemoryConfig: createMemoryConfig(),
     transcriptStore: false,
   });
 
@@ -405,7 +401,6 @@ test("query flushes agent notifications after auto-compression", async () => {
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
   });
 
   for await (const _event of query(runtime, state, { maxTurns: 1 })) {
@@ -459,7 +454,6 @@ test("session runtime does not trigger nested auto-compression", async () => {
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
   });
 
   for await (const _event of query(runtime, state, { maxTurns: 1 })) {
@@ -523,7 +517,6 @@ test("subagent local auto-compression can create a compact summary", async () =>
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
   });
 
   const result = await applyAutoCompression(runtime, state);
@@ -601,23 +594,6 @@ function createAssistantChunk(text: string): ModelStreamEnvelope {
           finish_reason: "stop",
         },
       ],
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

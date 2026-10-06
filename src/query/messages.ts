@@ -531,47 +531,6 @@ type ToolResultCandidate = {
   sizeTokens: number;
 };
 
-async function compactBulkyToolResultsWithStats(
-  messages: Message[],
-  runtime: Runtime,
-  ownerState?: State,
-  contextBaseTokens = 0,
-): Promise<{ messages: Message[]; stats: Pick<MessageProjectionStats,
-  "bulkyToolCompactNeeded" | "bulkyToolCompactCount" | "toolResultCharsAfterCompact"
-> }> {
-  const applied = applyExistingBulkyToolCompactionsWithStats(
-    messages,
-    runtime,
-    ownerState,
-  );
-
-  if (
-    !isProjectedContextOverBulkyCompactThreshold(
-      applied.messages,
-      contextBaseTokens,
-    )
-  ) {
-    return applied;
-  }
-
-  const created = await createBulkyToolCompactionsWithStats(
-    applied.messages,
-    runtime,
-    ownerState,
-    contextBaseTokens,
-  );
-
-  return {
-    messages: created.messages,
-    stats: {
-      bulkyToolCompactNeeded: created.stats.bulkyToolCompactNeeded,
-      bulkyToolCompactCount:
-        applied.stats.bulkyToolCompactCount + created.stats.bulkyToolCompactCount,
-      toolResultCharsAfterCompact: created.stats.toolResultCharsAfterCompact,
-    },
-  };
-}
-
 function applyExistingBulkyToolCompactionsWithStats(
   messages: Message[],
   runtime: Runtime,
@@ -1426,14 +1385,6 @@ function isContextOverHistorySnipCancelThreshold(
 ): boolean {
   return totalMessageTokens(messagesForQuery) >
     getHistorySnipCancelContextTokens();
-}
-
-function isProjectedContextOverBulkyCompactThreshold(
-  messages: readonly Message[],
-  contextBaseTokens = 0,
-): boolean {
-  return contextBaseTokens + totalProjectedMessageTokens(messages) >=
-    getBulkyToolResultCompactContextTokens();
 }
 
 function getBulkyToolResultCompactContextTokens(): number {

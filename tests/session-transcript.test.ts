@@ -17,7 +17,7 @@ import {
   recordTranscriptMessage,
   recordTranscriptStateSnapshot,
 } from "../src/transcript/persistence.js";
-import { createMessage } from "../src/types/messages.js";
+import { createMessage, toModelMessage } from "../src/types/messages.js";
 import { createRuntime } from "../src/types/runtime.js";
 import { createState } from "../src/types/state.js";
 
@@ -27,7 +27,6 @@ test("transcript store restores messages and latest state snapshot", async () =>
     sessionId: "session_restore_test",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState({ mode: "plan" });
   const userMessage = createMessage({
@@ -78,7 +77,6 @@ test("query appends assistant messages to transcript", async () => {
         throw new Error("collectStream is not used in this test");
       },
     },
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState();
   const userMessage = createMessage({
@@ -116,7 +114,6 @@ test("subagent transcript store uses the concrete agent id", async () => {
     agentType: "worker",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const message = createMessage({
     role: "user",
@@ -148,7 +145,6 @@ test("session transcript store uses the session-agent role", async () => {
     agentType: "session_memory",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const message = createMessage({
     role: "user",
@@ -179,7 +175,6 @@ test("transcript restore hydrates only post auto-compress messages by default", 
     sessionId: "session_compact_restore_test",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const first = createMessage({ role: "user", content: "old context 1" });
   const second = createMessage({ role: "assistant", content: "old context 2" });
@@ -231,7 +226,6 @@ test("transcript restore keeps pending agent notifications from snapshots", asyn
     sessionId: "session_agent_notification_restore",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState({
     agentNotifications: [
@@ -262,7 +256,6 @@ test("transcript snapshots omit volatile runtime context messages", async () => 
     sessionId: "session_runtime_context_restore",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState({
     messages: [
@@ -298,7 +291,6 @@ test("transcript restore strips stale dynamic skill context blocks", async () =>
     sessionId: "session_projection_context_restore",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const userMessage = createMessage({
     role: "user",
@@ -345,7 +337,6 @@ test("transcript restore keeps history snip boundaries from snapshots", async ()
     sessionId: "session_history_snip_restore",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const oldMessage = createMessage({
     role: "user",
@@ -386,7 +377,6 @@ test("transcript restore keeps tool result projection replacement state", async 
     sessionId: "session_tool_budget_restore",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState();
   state.toolResultBudgetState.seenIds.add("tool_result:seen");
@@ -413,7 +403,6 @@ test("transcript restore keeps long-term memory recall state without bodies", as
     sessionId: "session_memory_state_restore",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const cursorMessage = createMessage({
     role: "assistant",
@@ -449,7 +438,6 @@ test("transcript merges lean state snapshots without repeating projection state"
     sessionId: "session_lean_state_restore",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const state = createState();
   const marker = "very-large-tool-budget-marker";
@@ -492,7 +480,6 @@ test("transcript restore recovers reasoning-only assistant messages", async () =
     sessionId: "session_reasoning_only_restore",
     modelRuntimeConfig: createRuntimeConfig(),
     modelClient: createNoopClient(),
-    MemoryConfig: createMemoryConfig(),
   });
   const message = createMessage({
     role: "assistant",
@@ -518,6 +505,25 @@ test("transcript restore recovers reasoning-only assistant messages", async () =
       : "",
     "unfinished reasoning that exhausted output budget",
   );
+});
+
+test("retired tool result IDs remain readable without entering model input", async () => {
+  const runtime = createRuntime({
+    cwd: await mkdtemp(join(tmpdir(), "opencat-legacy-tool-id-")),
+    sessionId: "session_legacy_tool_id",
+    modelRuntimeConfig: createRuntimeConfig(),
+    modelClient: createNoopClient(),
+  });
+  const oldMessage = {
+    ...createMessage({ role: "tool", tool_call_id: "call_old", content: "old tool output" }),
+    toolResultId: "tool_result_old",
+  };
+  await recordTranscriptMessage(runtime, oldMessage);
+  const restored = await loadStateFromTranscript(runtime.transcriptStore!, { hydrate: "full" });
+  assert.ok(restored);
+  assert.deepEqual(toModelMessage(restored.Messages[0]!), {
+    role: "tool", tool_call_id: "call_old", content: "old tool output",
+  });
 });
 
 function createAssistantChunk(text: string): ModelStreamEnvelope {
@@ -562,22 +568,5 @@ function createRuntimeConfig() {
     apiKey: "test-key",
     model: "deepseek-v4-flash",
     maxTokens: 1024,
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
-    },
   };
 }

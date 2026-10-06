@@ -11,7 +11,7 @@
 | 能力                     | 说明                                                                                                                 |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------- |
 | **编码智能体循环** | Phase A/B/C 三阶段：排空 agent 消息 → 消息投影 + 上下文压缩 → 运行时上下文注入                                     |
-| **14 个内置工具**  | Read, Write, Edit, Bash, Grep, Glob, Agent, MemorySave, ReadSkill, WebSearch, WebFetch, SendMessage, TodoWrite, Plan |
+| **15 个内置工具**  | Read, Write, Edit, Bash, Grep, Glob, Agent, MemorySave, ReadSkill, WebSearch, WebFetch, SendMessage, TodoWrite, TaskStop, Plan |
 | **四级上下文压缩** | Auto Compress → Tool-result Budget → Bulky Compact → History Snip，处理超长对话不爆上下文                         |
 | **MCP 协议**       | Stdio（管道长连接）+ HTTP Streamable 传输，支持第三方 MCP Server 工具热加载                                          |
 | **多智能体协作**   | 三种执行模式（sync/async/fork），三种隔离模式（none/docker/worktree），五个内置子智能体                              |
@@ -74,43 +74,44 @@ MCP 服务器也配置在同一 YAML 的 `mcp.stdio` / `mcp.http` 中，
 │  Phase C: 运行时上下文注入（压缩之后，不被吞掉）       │
 │    → 长期记忆 / 动态技能 / Plan / Todo / Agent 通知   │
 │                                                      │
-│  → createStreamRequest() → DeepSeek API (SSE)         │
-│  → handleToolUse() → 工具执行 → 结果追加              │
+│  → createStreamRequest() → 兼容模型 API (SSE)         │
+│  → executeToolCallsForTurn() → 工具执行 → 结果追加    │
 └──────────────────────────────────────────────────────┘
 ```
 
-核心设计：**State / Runtime 分离**。`State` 持有可序列化的数据（消息历史、压缩状态），`Runtime` 持有瞬时依赖（DeepSeek 客户端、工具列表、技能运行时）。序列化/反序列化只需保存 State，恢复时重建 Runtime。
+核心设计：**State / Runtime 分离**。`State` 持有可序列化的数据（消息历史、压缩状态），`Runtime` 持有瞬时依赖（模型客户端、工具列表、技能运行时）。序列化/反序列化只需保存 State，恢复时重建 Runtime。
 
 ---
 
 ## 项目结构
 
-```
-opencat-typescirpt/
+```text
+OpenCat/
 ├── src/
-│   ├── query.ts                  ← 主循环（Phase A/B/C）
-│   ├── query/                    ← 消息投影、运行时上下文、长期记忆注入
-│   ├── Tools/                    ← 14 个内置工具
-│   ├── mcp/                      ← MCP 协议客户端（stdio + HTTP）
-│   ├── Skills/                   ← Skill 发现与解析
-│   ├── Memory/                   ← 长期记忆（file-memory、auto-dream）
-│   ├── auto-compress/            ← 上下文压缩与恢复
-│   ├── swe/                      ← SWE-bench 评测工作区管理
-│   ├── system-prompt.ts          ← DeepSeek 系统提示词组装（11 段）
-│   └── types/                    ← State、Runtime、消息类型定义
-├── tests/                        ← 测试文件
-├── scripts/                      ← 评测脚本（eval-swe-serial.ts）
-├── docs/                         ← 详细文档
-│   ├── tools.md                  ← 工具系统详解
-│   ├── mcp.md                    ← MCP 协议详解
-│   ├── skill.md                  ← Skill 管理详解
-│   ├── compression.md            ← 上下文压缩与恢复
-│   ├── long-term-memory.md       ← 长期记忆详解
-│   ├── agent.md                  ← 多智能体协作
-│   ├── projection.md             ← 消息投影管道
-│   ├── system-prompt.md          ← 系统提示词详解（中英对照）
-│   └── eval.md                   ← 评测系统详解
-└── ARCHITECTURE.md               ← 架构总览 + 文档索引
+│   ├── main.ts、cli.ts          ← 命令行启动与交互
+│   ├── web-cli.ts              ← Web 启动入口
+│   ├── interfaces/web/         ← Web 会话、路由、查询与页面资源
+│   ├── interfaces/evaluation/  ← SWE 看板路由、启动与页面资源
+│   ├── evaluation/             ← 评测产物、指标与历史结果服务
+│   ├── query.ts、query/         ← 智能体主循环与上下文组装
+│   ├── Tools/                  ← 工具注册与执行、子智能体、技能
+│   ├── Memory/                 ← 文件长期记忆与旧检索兼容接口
+│   ├── auto-compress/          ← 自动压缩与恢复
+│   ├── session-memory/         ← 会话摘要
+│   ├── openai-compatible/      ← 模型适配与流式传输
+│   ├── mcp/                    ← 外部工具协议适配
+│   ├── transcript/             ← 会话持久化与恢复
+│   ├── tool-results/           ← 工具结果存档
+│   ├── plan/、workspace/       ← 计划持久化与补丁管理
+│   ├── config/、types/         ← 配置与核心契约
+│   ├── telemetry/              ← 运行观测
+│   ├── swe/                    ← SWE 工作区管理
+│   ├── eval-dashboard.ts       ← 评测看板启动入口
+│   └── system-prompt.ts        ← 系统提示词组装
+├── tests/                      ← 本地回归测试
+├── scripts/                    ← 评测、记忆整理和真实模型实验
+├── docs/                       ← 专题文档
+└── ARCHITECTURE.md              ← 功能入口、模块职责与阅读路线
 ```
 
 ---
@@ -130,7 +131,25 @@ opencat-typescirpt/
 
 ## 文档
 
-完整架构文档见 [ARCHITECTURE.md](ARCHITECTURE.md)，各主题详细文档在 `docs/` 目录。
+回顾项目先读 [项目导航](ARCHITECTURE.md)：按功能查找代码入口、区分当前与兼容实现。
+修改智能体循环先读 [Query 模块导航](src/query/README.md)，其中列出了每个阶段的关键函数、状态影响与顺序约束。
+修改 Web 功能先读 [Web 模块导航](src/interfaces/web/README.md)，各主题原理文档在 `docs/`。
+修改评测功能先读 [评测服务导航](src/evaluation/README.md)；看板页面与 API 见 [看板导航](src/interfaces/evaluation/README.md)。
+研究上下文压缩、持久化和历史节点分叉，见 [Codex 源码工程说明](docs/codex-context-engineering.md)，其中包含实际调用链、检查点格式和与 OpenCat 的对照。
+
+本地验证：
+
+```bash
+npm run check
+npm run test:query
+npm run test:web
+npm run test:dashboard
+npm run build
+```
+
+`test:query` 使用独立测试配置与本地模型替身，验证主循环、取消、配置隔离、上下文、压缩、审批、工具并发和持久化。
+`test:web` 使用独立测试配置与本地模型替身，验证 Web 路由、事件流、审批、会话恢复和上下文压缩。
+`test:dashboard` 使用临时评测产物，验证指标聚合、历史结果回退、会话展示、看板路由和端口重试。
 
 ---
 

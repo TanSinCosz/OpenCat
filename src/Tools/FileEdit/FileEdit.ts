@@ -12,13 +12,8 @@ import { createStructuredPatch } from "../utils/patch.js";
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname } from 'path'
 
-
-type typeInput = z.infer<ReturnType<typeof inputSchema>>;
-type typeOutput = z.infer<ReturnType<typeof outputSchema>>;
-
-type ValidationResult =
-    | { result: true }
-    | { result: false; message: string };
+type FileEditInput = z.infer<ReturnType<typeof inputSchema>>;
+type FileEditOutput = z.infer<ReturnType<typeof outputSchema>>;
 
 type PreparedEdit =
     | {
@@ -33,10 +28,9 @@ type PreparedEdit =
         message: string;
     };
 
-export class FileEdit implements Tool<typeInput, typeOutput, typeof inputSchema, typeof outputSchema> {
+export class FileEdit implements Tool<FileEditInput, FileEditOutput, typeof inputSchema, typeof outputSchema> {
 
     name = FILE_EDIT_TOOL_NAME;
-    searchHint = 'modify file contents in place';
     maxResultSizeChars = 100_000;
     strict = true;
     async description() {
@@ -51,7 +45,7 @@ export class FileEdit implements Tool<typeInput, typeOutput, typeof inputSchema,
         return false;
     }
 
-    formatResult({ output }: { output: typeOutput }): string {
+    formatResult({ output }: { output: FileEditOutput }): string {
         const modifiedNote = output.userModified
             ? ' The user modified the proposed changes before accepting them.'
             : ''
@@ -63,19 +57,7 @@ export class FileEdit implements Tool<typeInput, typeOutput, typeof inputSchema,
         return `The file ${output.filePath} has been updated successfully.${modifiedNote}`
     }
 
-    async validateInput(
-        input: typeInput,
-        context: ToolUseContext,
-    ): Promise<ValidationResult> {
-        const prepared = await prepareEdit(input, context)
-        if ('message' in prepared) {
-            return { result: false, message: prepared.message }
-        }
-
-        return { result: true }
-    }
-
-    async call(input: typeInput, context: ToolUseContext): Promise<typeOutput> {
+    async call(input: FileEditInput, context: ToolUseContext): Promise<FileEditOutput> {
         const { file_path, new_string } = input
         const prepared = await prepareEdit(input, context)
 
@@ -116,7 +98,7 @@ export class FileEdit implements Tool<typeInput, typeOutput, typeof inputSchema,
 }
 
 async function prepareEdit(
-    input: typeInput,
+    input: FileEditInput,
     context: ToolUseContext,
 ): Promise<PreparedEdit> {
     const { file_path, old_string, new_string, replace_all = false } = input
@@ -200,8 +182,6 @@ async function prepareEdit(
     }
 }
 
-
-
 export async function readTextFileOrNull(filePath: string): Promise<string | null> {
     try {
         return await readFile(filePath, 'utf8')
@@ -212,10 +192,6 @@ export async function readTextFileOrNull(filePath: string): Promise<string | nul
 
         throw error
     }
-}
-
-export async function readTextFileOrEmpty(filePath: string): Promise<string> {
-    return (await readTextFileOrNull(filePath)) ?? ''
 }
 
 export function findActualString(

@@ -54,7 +54,6 @@ export type {
   AutoCompressState,
   AutoCompressSummary,
   AutoCompressSummaryId,
-  ContextProjectionState,
   ToolResultBudgetState,
 } from "./context.js";
 export {
@@ -65,7 +64,6 @@ export {
   type MessageId,
   type SystemMessage,
   type ToolMessage,
-  type ToolResultId,
   type UserMessage,
 } from "./messages.js";
 export {

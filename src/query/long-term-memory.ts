@@ -60,11 +60,9 @@ const memoryExtractionCoordinators = new WeakMap<
 >();
 
 /**
- * Builds a transient model-visible memory block.
- *
- * This deliberately returns a transient context message instead of mutating
- * State.Messages: long-term memory is external context, not part of the
- * authoritative conversation transcript.
+ * Returns the memory block selected for this request without mutating Messages.
+ * request-context.ts merges this body into a persisted opencat_context attachment;
+ * subsequent requests still apply the existing volatile-block cleanup rules.
  */
 export async function createLongTermMemoryContextMessage(
   runtime: Runtime,

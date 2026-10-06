@@ -22,7 +22,6 @@ test("post auto-compress restore clears and reattaches read file state", async (
       maxTokens: 1024,
     },
     modelClient: createUnusedClient(),
-    MemoryConfig: createMemoryConfig(),
   });
 
   runtime.toolUseContext.readFileState.set(filePath, {
@@ -74,23 +73,6 @@ function createUnusedClient() {
     },
     async collectStream(): Promise<never> {
       throw new Error("unused");
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

@@ -2,7 +2,6 @@
 # Dependencies
 node_modules/
 resume/
-ARCHITECTURE.md
 # Build output
 dist/
 build/
@@ -46,6 +45,7 @@ fix-*.cjs
 _fix_*.cjs
 
 # Local reference/runtime folders
+/codex/
 src/src/
 .claude/*
 !.claude/skills/

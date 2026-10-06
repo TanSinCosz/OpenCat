@@ -14,6 +14,8 @@ OpenCat 内置了对 **SWE-bench Verified** 数据集的自动化评测能力，
 | `src/swe/workspace.ts`                 | SWE 工作区管理（bare clone + worktree）  |
 | `src/telemetry/jsonl.ts`               | `JsonlRunObserver`：遥测事件写入 JSONL |
 | `src/telemetry/events.ts`              | `EvaluationEvent` 类型定义             |
+| `src/eval-dashboard.ts`                | 看板启动入口；[看板模块导航](../src/interfaces/evaluation/README.md) |
+| `src/evaluation/`                     | 运行产物读取、指标与历史结果服务；[服务导航](../src/evaluation/README.md) |
 
 ---
 

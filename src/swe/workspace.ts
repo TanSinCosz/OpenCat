@@ -402,15 +402,6 @@ async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
   }
 }
 
-async function isGitRepository(repoPath: string): Promise<boolean> {
-  try {
-    await git(["rev-parse", "--git-dir"], repoPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function isBareGitRepository(repoPath: string): Promise<boolean> {
   try {
     const result = await git([

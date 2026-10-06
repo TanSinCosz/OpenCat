@@ -626,7 +626,6 @@ test("Agent tool worktree isolation keeps file edits out of the parent cwd", asy
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
     agentDefinitions,
   });
   const agent = findAgentTool(runtime);
@@ -700,7 +699,6 @@ function createHarness(options: HarnessOptions) {
       maxTokens: 1024,
     },
     modelClient: client,
-    MemoryConfig: createMemoryConfig(),
     agentDefinitions,
   });
 
@@ -840,23 +838,6 @@ function toolCallChunk(
           finish_reason: "tool_calls",
         },
       ],
-    },
-  };
-}
-
-function createMemoryConfig() {
-  return {
-    embedder: {
-      provider: "test",
-      config: {},
-    },
-    vectorStore: {
-      provider: "test",
-      config: {},
-    },
-    llm: {
-      provider: "test",
-      config: {},
     },
   };
 }

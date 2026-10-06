@@ -3,7 +3,7 @@ import {
   type CreateLongTermMemoryRuntimeConfigOptions,
   type LongTermMemoryRuntimeConfig,
 } from "../Memory/runtime.js";
-import { MemoryTool } from "../Memory/Memory.js";
+import type { MemoryTool } from "../Memory/Memory.js";
 import type { MemoryConfig } from "../Memory/type.js";
 import type { McpConnection } from "../mcp/index.js";
 import {
@@ -19,20 +19,18 @@ import {
 import {
   createToolUseContext,
   type AgentDefinitionsResult,
-  type AppState,
+  type ToolPermissionContext,
   type CanUseToolFn,
   type FileStateCache,
-  type ThinkingConfig,
   type Tools,
   type ToolUseContext,
 } from "../Tools/types.js";
-import type { Tokenizer } from "../Tools/utils/Tokenizer.js";
 import { createSessionId } from "../utils/session.js";
 import {
   normalizeModelRuntimeSettings,
   type ModelRuntimeSettings,
 } from "./config.js";
-import type { ContextProjectionState, ToolResultBudgetState } from "./context.js";
+import type { ToolResultBudgetState } from "./context.js";
 import type { RunObserver } from "../telemetry/observer.js";
 import type { Message } from "./messages.js";
 import { getAppConfig, type AppConfig } from "../config/load-config.js";
@@ -73,7 +71,7 @@ export interface Runtime {
   systemPrompt?: string;
   systemContext?: Record<string, string>;
   userContext?: Record<string, string>;
-  contextProjectionState?: ContextProjectionState;
+  /** State 保存预算状态；这里保留现有投影兼容入口和共享引用。 */
   toolResultBudgetState?: ToolResultBudgetState;
   contextCompressionConfig?: ContextCompressionConfig;
   /**
@@ -81,8 +79,9 @@ export interface Runtime {
    * Ordinary interactive permission callbacks retain their existing behavior.
    */
   enforceCanUseToolBeforeTemporaryRules?: boolean;
-  MemoryConfig: MemoryConfig;
-  longTermMemory?: MemoryTool;
+  /** 旧向量检索的可选配置与实例，仅 MemorySearch 使用。 */
+  legacyMemoryConfig?: MemoryConfig;
+  legacyMemory?: MemoryTool;
   longTermMemoryConfig: LongTermMemoryRuntimeConfig;
   transcriptStore?: TranscriptStore;
   observer?: RunObserver;
@@ -107,17 +106,16 @@ export interface CreateRuntimeOptions {
   agentType?: Runtime["agentType"];
   cwd?: string;
   appConfig?: AppConfig;
-  modelRuntimeConfig?: ModelRuntimeSettings;
+  modelRuntimeConfig: ModelRuntimeSettings;
   modelClient?: OpenAICompatibleClient;
   systemPrompt?: string;
   systemContext?: Record<string, string>;
   userContext?: Record<string, string>;
-  contextProjectionState?: ContextProjectionState;
   toolResultBudgetState?: ToolResultBudgetState;
   contextCompressionConfig?: ContextCompressionConfig;
   enforceCanUseToolBeforeTemporaryRules?: boolean;
-  MemoryConfig: MemoryConfig;
-  longTermMemory?: MemoryTool;
+  legacyMemoryConfig?: MemoryConfig;
+  legacyMemory?: MemoryTool;
   longTermMemoryConfig?: CreateLongTermMemoryRuntimeConfigOptions;
   transcriptStore?: TranscriptStore | false;
   observer?: RunObserver;
@@ -127,12 +125,8 @@ export interface CreateRuntimeOptions {
 
   // ToolUseContext fields.
   abortController?: AbortController;
-  tokenizer?: Tokenizer;
-  isNonInteractiveSession?: boolean;
-  mainLoopModel?: string;
   agentDefinitions?: AgentDefinitionsResult;
-  thinkingConfig?: ThinkingConfig;
-  appState?: AppState;
+  permissionContext?: ToolPermissionContext;
   readFileState?: FileStateCache;
   canUseTool?: CanUseToolFn;
 }
@@ -178,13 +172,12 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
     systemPrompt: options.systemPrompt,
     systemContext: options.systemContext,
     userContext: options.userContext,
-    contextProjectionState: options.contextProjectionState,
     toolResultBudgetState: options.toolResultBudgetState,
     contextCompressionConfig: options.contextCompressionConfig,
     enforceCanUseToolBeforeTemporaryRules:
       options.enforceCanUseToolBeforeTemporaryRules,
-    MemoryConfig: options.MemoryConfig,
-    longTermMemory: options.longTermMemory,
+    legacyMemoryConfig: options.legacyMemoryConfig,
+    legacyMemory: options.legacyMemory,
     longTermMemoryConfig: createLongTermMemoryRuntimeConfig(
       {
         ...(options.appConfig ? { ...appConfig.memory, fileMemoryDirectory: appConfig.memory.directory } : {}),
@@ -198,14 +191,9 @@ export function createRuntime(options: CreateRuntimeOptions): Runtime {
     tools,
     mcpConnections: options.mcpConnections ?? [],
     toolUseContext: createToolUseContext({
-      tools,
-      appState: options.appState,
+      permissionContext: options.permissionContext,
       abortController: options.abortController,
-      tokenizer: options.tokenizer,
-      isNonInteractiveSession: options.isNonInteractiveSession,
-      mainLoopModel: options.mainLoopModel,
       agentDefinitions,
-      thinkingConfig: options.thinkingConfig,
       readFileState: options.readFileState,
       canUseTool: options.canUseTool,
     }),

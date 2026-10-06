@@ -21,9 +21,6 @@ export class Agent implements Tool<AgentInput, AgentToolOutput, typeof inputSche
   outputSchema = outputSchema;
   strict = true;
   maxResultSizeChars = 100_000;
-  searchHint = "delegate complex work to a specialized subagent";
-  shouldDefer = false;
-  alwaysLoad = true;
 
   constructor(
     private readonly definitions: AgentDefinitionsResult = createAgentDefinitions(),
@@ -43,10 +40,6 @@ export class Agent implements Tool<AgentInput, AgentToolOutput, typeof inputSche
 
   isEnabled(): boolean {
     return true;
-  }
-
-  userFacingName(): string {
-    return AGENT_TOOL_NAME;
   }
 
   isConcurrencySafe(): boolean {
@@ -102,14 +95,14 @@ export class Agent implements Tool<AgentInput, AgentToolOutput, typeof inputSche
     }
 
     const agent = findAgentDefinition(
-      context.options.agentDefinitions.activeAgents,
+      context.agentDefinitions.activeAgents,
       mode === "fork" ? undefined : input.subagent_type,
     );
 
     if (!agent) {
       throw new Error(
         `Agent type '${input.subagent_type ?? "general-purpose"}' not found. Available agents: ${
-          context.options.agentDefinitions.activeAgents.map((item) => item.agentType).join(", ")
+          context.agentDefinitions.activeAgents.map((item) => item.agentType).join(", ")
         }`,
       );
     }

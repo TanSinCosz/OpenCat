@@ -71,7 +71,7 @@
 
 ## 第 2 层：Phase A — Agent Messages（仅子 agent）
 
-**时机**：`drainPendingAgentMessagesForRuntime()`，在 Phase A 中执行。仅当 `runtime.agentRole === "subagent"` 时生效。
+**时机**：`query/turn-context.ts` 的 `drainPendingAgentMessagesForRuntime()`，在 Phase A 中执行。仅当 `runtime.agentRole === "subagent"` 时生效。
 
 **位置**：追加到 `state.Messages` 末尾，作为一条 user 消息。
 
@@ -120,7 +120,7 @@
 
 ## 第 4 层：Phase C — Runtime Context（每轮注入，auto-compress 之后）
 
-**时机**：`materializeRequestContext()` → `materializeContextForQuery()`，在 Phase C 执行。先 `removePreviousVolatileContextBlocks()` 清理上轮的易失块，再收集本轮所有块合并为一条 `<opencat_context>` user 消息追加到 `state.Messages` 末尾。
+**时机**：`query/request-context.ts` 的 `materializeRequestContext()`，在 Phase C 执行。先加载运行时通知和动态技能，接着通过 `removePreviousVolatileContextBlocks()` 清理上轮的易失块，再收集本轮所有块合并为一条 `<opencat_context>` user 消息追加到 `state.Messages` 末尾。
 
 **位置**：消息数组的**最后一条** user 消息（在 Phase C 的 `buildMessagesForQuery()` 中作为最年轻的消息参与投影）。
 
@@ -404,12 +404,13 @@ Session 启动
 │  Phase B: buildMessagesForQuery() 第 2 次（仅压缩触发时）  │
 │                                                            │
 │  Phase C: materializeRequestContext()                      │
-│    ├─ removePreviousVolatileContextBlocks()                │
 │    ├─ loadRuntimeContextForQuery()                         │
 │    │   → drainAgentNotifications() → runtimeContextMessages│
 │    ├─ loadDynamicSkillContextForQuery()                    │
 │    │   → collectActiveDynamicSkills() → runtimeContextMsgs │
-│    ├─ materializeContextForQuery()                         │
+│    ├─ removePreviousVolatileContextBlocks()                │
+│    ├─ restorePlan()                                       │
+│    └─ 合并本轮上下文                                      │
 │    │   → createProjectionContextStateMessage([            │
 │    │       planMode + planFile + todoList +               │
 │    │       longTermMemory + ...runtimeContextMessages     │

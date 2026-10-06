@@ -24,6 +24,9 @@
     "eval:swe-lite:baseline": "tsx scripts/eval-swe-serial.ts",
     "eval:swe-serial": "tsx scripts/eval-swe-serial.ts",
     "test:auto-compress": "tsx --test tests/query-auto-compress.test.ts",
+    "test:query": "node --import tsx --import ./tests/setup.ts --test tests/query-lifecycle.test.ts tests/query-auto-compress.test.ts tests/query-history-snip.test.ts tests/query-reasoning-continuation.test.ts tests/tool-concurrency.test.ts tests/agent-notifications.test.ts tests/plan-tool.test.ts tests/todo-write-tool.test.ts tests/dynamic-skill-context.test.ts tests/post-compress-context.test.ts tests/reasoning-content.test.ts tests/tool-result-persistence.test.ts tests/session-transcript.test.ts tests/telemetry.test.ts",
+    "test:web": "node --import tsx --import ./tests/setup.ts --test tests/web-cli.test.ts tests/session-transcript.test.ts tests/system-prompt.test.ts tests/query-auto-compress.test.ts",
+    "test:dashboard": "node --import tsx --import ./tests/setup.ts --test tests/evaluation-dashboard.test.ts",
     "start": "node dist/main.js"
   },
   "devDependencies": {
@@ -38,10 +41,8 @@
     "diff": "^9.0.0",
     "lru-cache": "^11.5.1",
     "openai": "^6.42.0",
-    "tree-sitter-wasms": "^0.1.13",
     "tsx": "^4.22.4",
     "uuid": "^14.0.0",
-    "web-tree-sitter": "^0.26.9",
     "xlsx": "^0.18.5",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"

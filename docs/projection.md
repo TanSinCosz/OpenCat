@@ -44,11 +44,10 @@ Phase B 完成后的 state.Messages
   ├─ materializeRequestContext()
   │   ├─ loadRuntimeContextForQuery()    ← agent 通知等
   │   ├─ loadDynamicSkillContextForQuery() ← 动态技能通知
-  │   └─ materializeContextForQuery()
-  │       ├─ removePreviousVolatileContextBlocks()
-  │       ├─ Plan/Todo/长期记忆 上下文块
-  │       ├─ runtimeContextMessages（agent通知+技能通知）
-  │       └─ 合并为单条 <opencat_context> 消息 → 追加到 state.Messages
+  │   ├─ removePreviousVolatileContextBlocks()
+  │   ├─ Plan/Todo/长期记忆 上下文块
+  │   ├─ runtimeContextMessages（agent通知+技能通知）
+  │   └─ 合并为单条 <opencat_context> 消息 → 追加到 state.Messages
   │
   ├─ buildMessagesForQuery() ← 再次投影（含运行时上下文消息）
   │
@@ -219,7 +218,7 @@ createHistorySnipBoundary()
 `buildMessagesForQuery()` 在每次 API 调用前执行。在 query.ts 主循环中，它被调用 **2-3 次**（取决于是否触发 auto-compress）：
 
 ```
-query.ts 主循环 (_query)
+query/turn-context.ts 上下文准备 (prepareMessagesForTurn，由 query.ts 主循环调用)
   │
   ├─ Phase A: drainPendingAgentMessagesForRuntime()
   │
@@ -272,7 +271,7 @@ query.ts 主循环 (_query)
 **调用链**：
 
 ```
-materializeRequestContext(runtime, state, visibleMessages)  ← query.ts:449
+materializeRequestContext(runtime, state)  ← query/request-context.ts
   ├─ loadRuntimeContextForQuery(runtime, state)
   │   → 排空 agent 通知（drainAgentNotifications）
   │   → 追加到 state.runtimeContextMessages[]
@@ -281,7 +280,7 @@ materializeRequestContext(runtime, state, visibleMessages)  ← query.ts:449
   │   → 收集活跃动态技能（collectActiveDynamicSkills）
   │   → 追加到 state.runtimeContextMessages[]
   │
-  └─ materializeContextForQuery(runtime, state, visibleMessages)
+  └─ 清理旧块并合并本轮上下文
       ├─ removePreviousVolatileContextBlocks(state)
       │   → 剥离旧的 <context_block source="dynamic_skill|todo_list|plan_mode">
       │   → 如果剥离后 <opencat_context> 为空，移除整条消息
